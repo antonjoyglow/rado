@@ -1,7 +1,7 @@
 {
   "name": "rado",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -24,8 +24,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.4",
-    "typescript": "~6.0.3",
+    "typescript": "^7.0.2",
     "vite": "^8.0.16",
-    "vitest": "^3.2.7"
+    "vitest": "^5.1.0"
   }
 }

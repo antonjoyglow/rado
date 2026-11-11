@@ -166,7 +166,7 @@ function row(item: ReviewItem, jiraSite: string): HTMLElement {
       void api.openTicket(item.key);
     },
   }, item.ticket);
-  const copy = h("button", {
+  const copy: HTMLButtonElement = h("button", {
     class: "action",
     type: "button",
     title: aggregate ? "Copy all links, one 'repo: link' per line" : "Copy the link",
