@@ -1,0 +1,325 @@
+import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot } from "./api";
+import { ageColumn, ago, datesTooltip, newestFirst, nextReview, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
+import { h } from "./dom";
+
+type SectionKey = ReviewState | "hidden";
+
+const SECTIONS: { key: SectionKey; title: string; collapsed: boolean }[] = [
+  { key: "needsReview", title: "Needs your review", collapsed: false },
+  { key: "reReview", title: "New pushes since your vote", collapsed: false },
+  { key: "mine", title: "Your PRs", collapsed: false },
+  { key: "waitingOnAuthor", title: "Waiting on author", collapsed: true },
+  { key: "approved", title: "Approved by you or your team", collapsed: true },
+  { key: "stale", title: "Quiet for 3 weeks", collapsed: true },
+  { key: "hidden", title: "Not mine or hidden", collapsed: true },
+];
+
+/** When you last opened each row, by row key; "Review next" walks past the ones you just opened. */
+const openedAt = new Map<string, number>();
+const opened = (key: string) => openedAt.set(key, Date.now());
+
+const inSection = (item: ReviewItem, key: SectionKey) => (key === "hidden" ? item.hidden : !item.hidden && item.state === key);
+const POLL_CHOICES = [1, 3, 5, 10];
+const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
+
+export function mountList(root: HTMLElement): void {
+  const status = h("div", { class: "status" });
+  const body = h("div", { class: "body" });
+  const settingsPanel = h("div", { class: "settings", hidden: true });
+  const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
+  const settingsButton = h("button", {
+    class: "icon",
+    type: "button",
+    title: "Settings",
+    onclick: () => {
+      settingsPanel.hidden = !settingsPanel.hidden;
+      if (!settingsPanel.hidden && snapshot) renderSettings(settingsPanel, snapshot);
+    },
+  }, "⚙");
+  const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
+  root.append(
+    h("header", {}, h("h1", {}, "Reviews"), refreshButton, settingsButton, closeButton),
+    status,
+    settingsPanel,
+    body,
+  );
+
+  let snapshot: Snapshot | null = null;
+  let pollingSince: number | null = null;
+  const expanded = new Set(SECTIONS.filter((s) => !s.collapsed).map((s) => s.key));
+
+  const renderStatus = () => {
+    if (!snapshot) return;
+    status.replaceChildren();
+    status.dataset.kind = snapshot.polling ? "busy" : snapshot.error ? "error" : "ok";
+    if (snapshot.polling) {
+      const seconds = pollingSince ? Math.round((Date.now() - pollingSince) / 1000) : 0;
+      status.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
+    } else if (snapshot.error) {
+      status.append(snapshot.error);
+    } else {
+      status.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
+    }
+  };
+
+  const renderBody = () => {
+    if (!snapshot) return;
+    body.replaceChildren();
+    if (!snapshot.hasPat && !snapshot.hasGithubToken) {
+      settingsPanel.hidden = false;
+      renderSettings(settingsPanel, snapshot);
+      return;
+    }
+    if (!snapshot.lastRefreshed) {
+      body.append(h("p", { class: "empty" }, snapshot.error ? "Nothing loaded yet." : "Loading your reviews…"));
+      return;
+    }
+    const next = nextReview(snapshot.items, openedAt);
+    if (next) {
+      body.append(h("button", {
+        class: "next",
+        type: "button",
+        title: next.members.length > 1 ? `Open all ${next.members.length} PRs on ${next.branch}` : `Open ${prLabel(next)}`,
+        onclick: () => {
+          opened(next.key);
+          void api.openRow(next.key);
+          renderBody();
+        },
+      },
+        h("span", { class: "label" }, "Review next ▸"),
+        h("span", { class: "title" }, next.title),
+        h("span", { class: "meta" }, next.members.length > 1 ? `${next.members.length} PRs · ${next.branch}` : prLabel(next)),
+      ));
+    }
+    for (const section of SECTIONS) {
+      const mineSection = section.key === "mine";
+      const inThis = snapshot.items.filter((i) => inSection(i, section.key));
+      const items = mineSection ? newestFirst(inThis) : inThis;
+      if (items.length === 0 && section.collapsed) continue;
+      const open = expanded.has(section.key);
+      const heading = h("button", {
+        class: "section",
+        type: "button",
+        onclick: () => {
+          if (open) expanded.delete(section.key);
+          else expanded.add(section.key);
+          renderBody();
+        },
+      }, `${open ? "▾" : "▸"} ${section.title}`, h("span", { class: "n" }, String(items.length)));
+      body.append(heading);
+      if (!open) continue;
+      if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
+      for (const item of items) body.append(row(item, snapshot.settings.jiraSite));
+    }
+  };
+
+  void watchSnapshot((s) => {
+    if (s.polling && !snapshot?.polling) pollingSince = Date.now();
+    snapshot = s;
+    renderStatus();
+    renderBody();
+  });
+  setInterval(renderStatus, 1000);
+  // Rows opened since the last render change which review is next.
+  window.addEventListener("focus", renderBody);
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") void api.hideList();
+  });
+}
+
+function row(item: ReviewItem, jiraSite: string): HTMLElement {
+  const badges = [
+    item.approvals > 0 && h("span", { class: "badge approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
+    item.objections > 0 && h("span", { class: "badge objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
+    item.comments && item.comments.total > 0 && h("span", {
+      class: "badge",
+      title: `${item.comments.total} comments, ${item.comments.openThreads} open threads`,
+    }, `💬 ${item.comments.total}${item.comments.openThreads > 0 ? ` · ${item.comments.openThreads} open` : ""}`),
+    item.required && h("span", { class: "badge required" }, "required"),
+    item.viaGroup && h("span", { class: "badge" }, "team"),
+    item.draft && h("span", { class: "badge" }, "draft"),
+    h("span", { class: "badge target" }, `→ ${item.target}`),
+  ];
+  const aggregate = item.members.length > 1;
+  const meta = aggregate ? `${item.members.length} PRs · ${item.branch} · ${item.author}` : item.author;
+  const members = h("span", { class: "members" },
+    ...item.members.map((m) => h("span", {
+      class: "member",
+      role: "link",
+      tabIndex: 0,
+      title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
+      data: { assigned: String(m.state !== null) },
+      onclick: (e: MouseEvent) => {
+        e.stopPropagation();
+        opened(item.key);
+        void api.openPr(m.id);
+      },
+    }, prLabel(m))),
+  );
+  const ticket = jiraSite && item.ticket && h("span", {
+    class: "member ticket",
+    role: "link",
+    tabIndex: 0,
+    title: `Open ${item.ticket} in Jira`,
+    onclick: (e: MouseEvent) => {
+      e.stopPropagation();
+      void api.openTicket(item.key);
+    },
+  }, item.ticket);
+  const copy = h("button", {
+    class: "action",
+    type: "button",
+    title: aggregate ? "Copy all links, one 'repo: link' per line" : "Copy the link",
+    onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
+  }, "Copy");
+  return h("div", { class: "row", data: { tier: item.hidden ? "low" : item.tier } },
+    h("button", {
+      class: "open",
+      type: "button",
+      title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
+      onclick: () => {
+        opened(item.key);
+        void api.openRow(item.key);
+      },
+    },
+      h("span", { class: "dot" }),
+      h("span", { class: "main" },
+        h("span", { class: "title" }, item.title),
+        h("span", { class: "meta" }, ticket, meta, ...badges),
+        members,
+      ),
+      ageCell(item),
+    ),
+    h("span", { class: "actions" },
+      copy,
+      h("button", {
+        class: "action",
+        type: "button",
+        title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
+        onclick: () => void api.setHidden(item.key, !item.hidden),
+      }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+    ),
+  );
+}
+
+const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+/** "5d · 2h": opened (the row's earliest PR), then last activity (muted). Hover shows each PR's exact times. */
+function ageCell(item: ReviewItem): HTMLElement {
+  const { opened, updated } = ageColumn(item.createdAt, item.updatedAt, new Date());
+  const phrase = (text: string) => (text === "new" || text === "now" ? "within the hour" : `${text} ago`);
+  const summary = updated ? `Opened ${phrase(opened)} · last activity ${phrase(updated)}` : `Opened ${phrase(opened)}`;
+  return h("span", { class: "age", title: `${summary}\n${datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso)))}` },
+    opened,
+    ...(updated ? [h("span", { class: "updated" }, ` · ${updated}`)] : []),
+  );
+}
+
+function flash(button: HTMLButtonElement, text: string): void {
+  const label = button.textContent;
+  button.textContent = text;
+  button.dataset.flash = "true";
+  setTimeout(() => {
+    button.textContent = label;
+    delete button.dataset.flash;
+  }, 1500);
+}
+
+function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
+  const settings = { ...snapshot.settings };
+  const message = h("p", { class: "message" });
+  const fail = (e: unknown) => { message.dataset.kind = "error"; message.textContent = String(e); };
+  const ok = (text: string) => { message.dataset.kind = "ok"; message.textContent = text; };
+  const save = () => api.saveSettings(settings).then(() => ok("Saved."), fail);
+
+  const pat = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasPat ? "•••••••••••••••• saved" : "Paste a PAT (Code: Read)" });
+  const savePat = h("button", { type: "button", onclick: () => api.savePat(pat.value).then(() => { pat.value = ""; pat.placeholder = "•••••••••••••••• saved"; ok("PAT saved to Windows Credential Manager."); }, fail) }, "Save");
+  const githubToken = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasGithubToken ? "•••••••••••••••• saved" : "Paste a token (repo, read:org)" });
+  const saveGithubToken = h("button", {
+    type: "button",
+    onclick: () => api.saveGithubToken(githubToken.value).then(() => {
+      githubToken.value = "";
+      githubToken.placeholder = "•••••••••••••••• saved";
+      ok("GitHub token saved to Windows Credential Manager.");
+    }, fail),
+  }, "Save");
+
+  const org = h("input", { type: "text", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(); } });
+  const teams = h("input", {
+    type: "text",
+    value: settings.teams.join(", "),
+    placeholder: "TeamAlpha",
+    onchange: () => { settings.teams = teams.value.split(",").map((t) => t.trim()).filter(Boolean); void save(); },
+  });
+  const jira = h("input", {
+    type: "text",
+    value: settings.jiraSite,
+    placeholder: "yourcompany.atlassian.net",
+    onchange: () => { settings.jiraSite = jira.value; void save(); },
+  });
+
+  const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
+  const chips = POLL_CHOICES.map((m) =>
+    h("button", { type: "button", class: "chip", data: { on: String(m === settings.pollMinutes) }, onclick: () => setMinutes(m) }, `${m} min`),
+  );
+  const setMinutes = (m: number) => {
+    settings.pollMinutes = m;
+    minutes.value = String(m);
+    chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
+    void save();
+  };
+  minutes.onchange = () => {
+    const m = parseMinutes(minutes.value);
+    if (m === null) fail("Polling interval must be a whole number from 1 to 120.");
+    else setMinutes(m);
+  };
+
+  const scale = h("input", { type: "number", min: String(SCALE_MIN), max: String(SCALE_MAX), value: String(settings.pillScale), class: "scale", ariaLabel: "Counter size in percent" });
+  const smaller = h("button", { type: "button", title: "Smaller", onclick: () => setScale(stepScale(settings.pillScale, -1)) }, "−");
+  const bigger = h("button", { type: "button", title: "Bigger", onclick: () => setScale(stepScale(settings.pillScale, 1)) }, "+");
+  const setScale = (percent: number) => {
+    settings.pillScale = percent;
+    scale.value = String(percent);
+    smaller.disabled = percent <= SCALE_MIN;
+    bigger.disabled = percent >= SCALE_MAX;
+    void save();
+  };
+  smaller.disabled = settings.pillScale <= SCALE_MIN;
+  bigger.disabled = settings.pillScale >= SCALE_MAX;
+  scale.onchange = () => {
+    const percent = parseScale(scale.value);
+    if (percent === null) fail(`Counter size must be a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
+    else setScale(percent);
+  };
+
+  const browsers = BROWSERS.map(([value, label]) =>
+    h("button", { type: "button", class: "chip", data: { on: String(value === settings.browser) }, onclick: () => setBrowser(value) }, label),
+  );
+  const setBrowser = (value: Browser) => {
+    settings.browser = value;
+    browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === value)));
+    void save();
+  };
+
+  const notify = h("input", { type: "checkbox", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(); } });
+  const autostart = h("input", { type: "checkbox", onchange: () => api.setAutostart(autostart.checked).then(() => ok("Saved."), fail) });
+  void api.autostart().then((on) => (autostart.checked = on));
+
+  panel.replaceChildren(
+    h("h2", {}, "Azure DevOps"),
+    h("label", {}, "PAT", h("span", { class: "inline" }, pat, savePat)),
+    h("label", {}, "Organization", org),
+    h("label", {}, "My teams (comma-separated)", teams),
+    h("label", {}, "Jira Cloud site, for ticket links from branch names", jira),
+    h("h2", {}, "GitHub"),
+    h("label", {}, "Token", h("span", { class: "inline" }, githubToken, saveGithubToken)),
+    h("h2", {}, "Rado"),
+    // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
+    h("div", { class: "field" }, "Check every", h("span", { class: "inline" }, ...chips, minutes, "min")),
+    h("div", { class: "field" }, `Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, h("span", { class: "inline" }, smaller, scale, "%", bigger)),
+    h("div", { class: "field" }, "Open links in", h("span", { class: "inline" }, ...browsers)),
+    h("label", { class: "check" }, notify, "Notify me about new reviews"),
+    h("label", { class: "check" }, autostart, "Start with Windows"),
+    h("div", { class: "inline" }, message, h("button", { type: "button", class: "quit", onclick: () => void api.quit() }, "Quit")),
+  );
+}

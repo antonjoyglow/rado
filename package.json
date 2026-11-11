@@ -1,0 +1,31 @@
+{
+  "name": "rado",
+  "private": true,
+  "version": "0.4.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "app:dev": "scripts\\msvc.cmd tauri dev",
+    "app:build": "scripts\\msvc.cmd tauri build",
+    "app:update": "scripts\\update.cmd",
+    "mcp:build": "scripts\\msvc.cmd cargo build --release --manifest-path src-tauri/Cargo.toml --bin rado-mcp",
+    "test:rust": "scripts\\msvc.cmd cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-autostart": "^2.7.0",
+    "@tauri-apps/plugin-notification": "^2.8.0",
+    "@tauri-apps/plugin-opener": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^3.2.7"
+  }
+}
