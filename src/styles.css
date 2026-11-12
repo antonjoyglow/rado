@@ -137,7 +137,7 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .badge.approved { color: var(--clear); border-color: currentColor; }
 .badge.objected { color: var(--normal); border-color: currentColor; }
 
-.settings { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.settings { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; border-bottom: 1px solid var(--line); }
 .settings[hidden] { display: none; }
 .settings h2 { margin: 6px 0 -4px; font-size: 12px; font-weight: 600; }
 .settings h2:first-child { margin-top: 0; }
