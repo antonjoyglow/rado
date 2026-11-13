@@ -93,7 +93,11 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                 open_threads: a.open_threads + b.open_threads,
             });
             let created_at = mine.iter().map(|m| m.created_at).min().unwrap_or(lead.created_at);
+            // The row names a release target when any of my PRs on the branch merges into one, not only the lead.
+            let release = mine.iter().find(|m| m.release_target);
             let summary = ReviewItem {
+                target: release.map_or_else(|| lead.target.clone(), |m| m.target.clone()),
+                release_target: release.is_some(),
                 hidden: mine.iter().all(|m| m.hidden),
                 required: mine.iter().any(|m| m.required),
                 via_group: mine.iter().all(|m| m.via_group),
@@ -245,6 +249,17 @@ mod tests {
         assert_eq!((rows[0].summary.age_hours, rows[0].newest_age_hours), (2, 1), "oldest and newest PR ages");
         assert_eq!(rows[0].members.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 1]);
         assert_eq!(rows[1].key, "pr:3");
+    }
+
+    #[test]
+    fn group_siblingIntoReleaseBranch_namesThatTargetOnTheRow() {
+        let mut sibling = item(2, "Core", "feature/x", 50);
+        (sibling.target, sibling.release_target) = ("qa".into(), true);
+        let rows = group(&[item(1, "Api", "feature/x", 60), sibling], &[], &urls(&[1, 2]));
+        assert_eq!(rows[0].summary.id, 1, "the lead merges into dev");
+        assert_eq!((rows[0].summary.target.as_str(), rows[0].summary.release_target), ("qa", true));
+        let plain = group(&[item(1, "Api", "feature/x", 60), item(2, "Core", "feature/x", 50)], &[], &urls(&[1, 2]));
+        assert_eq!((plain[0].summary.target.as_str(), plain[0].summary.release_target), ("dev", false));
     }
 
     #[test]

@@ -143,10 +143,9 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
     item.releaseTarget && h("span", { title: `Merges into ${item.target}` }, `→ ${item.target}`),
   ].filter((f): f is HTMLSpanElement => Boolean(f));
   const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" · ", f]));
-  const members = item.members.map((m) => h("span", {
+  const members = item.members.map((m) => h("button", {
       class: "member",
-      role: "link",
-      tabIndex: 0,
+      type: "button",
       title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
       data: { assigned: String(m.state !== null) },
       onclick: (e: MouseEvent) => {
@@ -155,10 +154,9 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
         void api.openPr(m.id);
       },
     }, prLabel(m)));
-  const ticket = jiraSite && item.ticket && h("span", {
+  const ticket = jiraSite && item.ticket && h("button", {
     class: "member ticket",
-    role: "link",
-    tabIndex: 0,
+    type: "button",
     title: `Open ${item.ticket} in Jira`,
     onclick: (e: MouseEvent) => {
       e.stopPropagation();
@@ -172,20 +170,26 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
     onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
   const tier = item.hidden ? "low" : item.tier;
+  const openRow = () => {
+    opened(item.key);
+    void api.openRow(item.key);
+  };
+  // The title is the keyboard target for opening the row; a click anywhere else on the row does the same,
+  // and the chips are buttons of their own beside it rather than inside it.
   return h("div", { class: "row", data: { tier, next: String(isNext) } },
-    h("button", {
-      class: "open",
-      type: "button",
-      title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
-      onclick: () => {
-        opened(item.key);
-        void api.openRow(item.key);
-      },
-    },
+    h("div", { class: "open", onclick: openRow },
       h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
-      h("span", { class: "main" },
+      h("div", { class: "main" },
         isNext && h("span", { class: "next-label" }, "Review next"),
-        h("span", { class: "title" }, item.title),
+        h("button", {
+          class: "title",
+          type: "button",
+          title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
+          onclick: (e: MouseEvent) => {
+            e.stopPropagation();
+            openRow();
+          },
+        }, item.title),
         h("span", { class: "meta" }, ...meta),
         h("span", { class: "members" }, ticket, ...members),
       ),
