@@ -49,7 +49,7 @@ describe("newestFirst", () => {
 });
 
 describe("age", () => {
-  it.each([[0, "new"], [5, "5h"], [47, "47h"], [48, "2d"], [100, "4d"]])("%i hours -> %s", (h, text) => {
+  it.each([[0, "new"], [5, "5h"], [23, "23h"], [24, "1d"], [47, "1d"], [48, "2d"], [100, "4d"]])("%i hours -> %s", (h, text) => {
     expect(age(h)).toBe(text);
   });
 });
