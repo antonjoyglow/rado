@@ -995,13 +995,10 @@ Function CreateOrUpdateStartMenuShortcut
     Return
   ${EndIf}
 
-  ; Skip creating shortcut if in update mode or no shortcut mode
-  ; but always create if migrating from wix
+  ; Rado: every reinstall runs in update mode, so update mode must not skip this or a lost shortcut never comes back
   ${If} $WixMode = 0
-    ${If} $UpdateMode = 1
-    ${OrIf} $NoShortcutMode = 1
-      Return
-    ${EndIf}
+  ${AndIf} $NoShortcutMode = 1
+    Return
   ${EndIf}
 
   !if "${STARTMENUFOLDER}" != ""
