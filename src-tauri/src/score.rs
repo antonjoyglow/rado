@@ -56,6 +56,8 @@ pub struct ReviewItem {
     pub branch: String,
     pub author: String,
     pub target: String,
+    /// Merges into a release branch (`is_release_target`); the list names the target only then.
+    pub release_target: bool,
     pub age_hours: i64,
     pub created_at: DateTime<Utc>,
     /// Last thread update (push, vote, comment, reviewer or status change) after opening;
@@ -235,7 +237,8 @@ pub struct PrFacts {
 /// A ranked item for a PR in `state`; comments and last activity come later from `attach_threads`.
 pub fn review_item(pr: PrFacts, state: ReviewState, required: bool, via_group: bool, now: DateTime<Utc>) -> ReviewItem {
     let age_hours = (now - pr.created_at).num_hours().max(0);
-    let score = score(state, required, via_group, pr.draft, is_release_target(&pr.target), age_hours);
+    let release_target = is_release_target(&pr.target);
+    let score = score(state, required, via_group, pr.draft, release_target, age_hours);
     ReviewItem {
         id: pr.id,
         provider: pr.provider,
@@ -245,6 +248,7 @@ pub fn review_item(pr: PrFacts, state: ReviewState, required: bool, via_group: b
         branch: pr.branch,
         author: pr.author,
         target: pr.target,
+        release_target,
         age_hours,
         created_at: pr.created_at,
         updated_at: None,
@@ -352,7 +356,13 @@ mod tests {
         p.creation_date = now() - Duration::days(3);
         let item = rank_one(p, &mut VoteMemory::new()).unwrap();
         assert_eq!(item.tier, Tier::Urgent);
-        assert_eq!(item.target, "qa");
+        assert_eq!((item.target.as_str(), item.release_target), ("qa", true));
+    }
+
+    #[test]
+    fn rank_intoDev_isNotAReleaseTarget() {
+        let item = rank_one(pr(1, vec![reviewer(ME, 0, false, false)]), &mut VoteMemory::new()).unwrap();
+        assert_eq!((item.target.as_str(), item.release_target), ("dev", false));
     }
 
     #[test]

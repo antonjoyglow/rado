@@ -180,6 +180,7 @@ mod tests {
             branch: branch.into(),
             author: "A".into(),
             target: "dev".into(),
+            release_target: false,
             age_hours: id,
             created_at: at(-id),
             updated_at: None,
