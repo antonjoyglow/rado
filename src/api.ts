@@ -64,6 +64,9 @@ export interface Settings {
   teams: string[];
   /** Counter size in percent, 75–200. */
   pillScale: number;
+  /** Size of the review list in px; shrunk to fit the screen when shown. */
+  listWidth: number;
+  listHeight: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
   /** Host of the Jira site ticket chips link to, such as `yourcompany.atlassian.net`; empty hides the chips. */

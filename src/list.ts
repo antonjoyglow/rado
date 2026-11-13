@@ -1,5 +1,7 @@
 import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot } from "./api";
-import { ageColumn, ago, datesTooltip, newestFirst, nextReview, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
+import {
+  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseListSide, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
+} from "./format";
 import { h } from "./dom";
 
 type SectionKey = ReviewState | "hidden";
@@ -21,28 +23,36 @@ const opened = (key: string) => openedAt.set(key, Date.now());
 const inSection = (item: ReviewItem, key: SectionKey) => (key === "hidden" ? item.hidden : !item.hidden && item.state === key);
 const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
+const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
 
 export function mountList(root: HTMLElement): void {
   const status = h("div", { class: "status" });
   const body = h("div", { class: "body" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
+  const heading = h("h1", {}, "Reviews");
   const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
-  const settingsButton = h("button", {
-    class: "icon",
-    type: "button",
-    title: "Settings",
-    onclick: () => {
-      settingsPanel.hidden = !settingsPanel.hidden;
-      if (!settingsPanel.hidden && snapshot) renderSettings(settingsPanel, snapshot);
-    },
-  }, "⚙");
+  const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
   root.append(
-    h("header", {}, h("h1", {}, "Reviews"), refreshButton, settingsButton, closeButton),
+    h("header", {}, heading, refreshButton, settingsButton, closeButton),
     status,
     settingsPanel,
     body,
   );
+
+  // Settings replace the list rather than squeezing it; hiding the list keeps its rows and scroll position.
+  let listScroll = 0;
+  const showSettings = (on: boolean) => {
+    if (on === !settingsPanel.hidden) return;
+    if (on) listScroll = body.scrollTop;
+    settingsPanel.hidden = !on;
+    body.hidden = on;
+    heading.textContent = on ? "Settings" : "Reviews";
+    settingsButton.textContent = on ? "←" : "⚙";
+    settingsButton.title = on ? "Back to reviews" : "Settings";
+    if (on && snapshot) renderSettings(settingsPanel, snapshot);
+    if (!on) body.scrollTop = listScroll;
+  };
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
@@ -66,8 +76,7 @@ export function mountList(root: HTMLElement): void {
     if (!snapshot) return;
     body.replaceChildren();
     if (!snapshot.hasPat && !snapshot.hasGithubToken) {
-      settingsPanel.hidden = false;
-      renderSettings(settingsPanel, snapshot);
+      showSettings(true);
       return;
     }
     if (!snapshot.lastRefreshed) {
@@ -123,7 +132,9 @@ export function mountList(root: HTMLElement): void {
   // Rows opened since the last render change which review is next.
   window.addEventListener("focus", renderBody);
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") void api.hideList();
+    if (e.key !== "Escape") return;
+    if (settingsPanel.hidden) void api.hideList();
+    else showSettings(false);
   });
 }
 
@@ -204,14 +215,12 @@ function row(item: ReviewItem, jiraSite: string): HTMLElement {
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-/** "5d · 2h": opened (the row's earliest PR), then last activity (muted). Hover shows each PR's exact times. */
+/** When the row's earliest PR opened, then its last activity. Hover shows each PR's exact times. */
 function ageCell(item: ReviewItem): HTMLElement {
-  const { opened, updated } = ageColumn(item.createdAt, item.updatedAt, new Date());
-  const phrase = (text: string) => (text === "new" || text === "now" ? "within the hour" : `${text} ago`);
-  const summary = updated ? `Opened ${phrase(opened)} · last activity ${phrase(updated)}` : `Opened ${phrase(opened)}`;
-  return h("span", { class: "age", title: `${summary}\n${datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso)))}` },
-    opened,
-    ...(updated ? [h("span", { class: "updated" }, ` · ${updated}`)] : []),
+  const { opened, active } = ageColumn(item.createdAt, item.updatedAt, new Date());
+  return h("span", { class: "age", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) },
+    h("span", {}, opened),
+    active && h("span", { class: "updated" }, active),
   );
 }
 
@@ -292,6 +301,27 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     else setScale(percent);
   };
 
+  const listWidth = h("input", { type: "number", min: String(LIST_WIDTH[0]), max: String(LIST_WIDTH[1]), value: String(settings.listWidth), class: "side", ariaLabel: "List width in px" });
+  const listHeight = h("input", { type: "number", min: String(LIST_HEIGHT[0]), max: String(LIST_HEIGHT[1]), value: String(settings.listHeight), class: "side", ariaLabel: "List height in px" });
+  const sizes = LIST_SIZES.map(([label, w, ht]) =>
+    h("button", { type: "button", class: "chip", title: `${w} × ${ht} px`, onclick: () => setListSize(w, ht) }, label),
+  );
+  const setListSize = (w: number, ht: number) => {
+    settings.listWidth = w;
+    settings.listHeight = ht;
+    listWidth.value = String(w);
+    listHeight.value = String(ht);
+    sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === w && LIST_SIZES[i][2] === ht)));
+    void save();
+  };
+  sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
+  listWidth.onchange = listHeight.onchange = () => {
+    const w = parseListSide(listWidth.value, LIST_WIDTH);
+    const ht = parseListSide(listHeight.value, LIST_HEIGHT);
+    if (w === null || ht === null) fail(`List size must be whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
+    else setListSize(w, ht);
+  };
+
   const browsers = BROWSERS.map(([value, label]) =>
     h("button", { type: "button", class: "chip", data: { on: String(value === settings.browser) }, onclick: () => setBrowser(value) }, label),
   );
@@ -317,6 +347,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
     h("div", { class: "field" }, "Check every", h("span", { class: "inline" }, ...chips, minutes, "min")),
     h("div", { class: "field" }, `Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, h("span", { class: "inline" }, smaller, scale, "%", bigger)),
+    h("div", { class: "field" }, "List size (shrinks to fit the screen)", h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
     h("div", { class: "field" }, "Open links in", h("span", { class: "inline" }, ...browsers)),
     h("label", { class: "check" }, notify, "Notify me about new reviews"),
     h("label", { class: "check" }, autostart, "Start with Windows"),

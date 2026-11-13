@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, prLabel, heat, newestFirst, nextReview, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseListSide, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", ageHours: 1,
@@ -104,14 +104,21 @@ describe("stepScale", () => {
 
 describe("ageColumn", () => {
   const now = new Date("2026-11-04T12:00:00Z");
-  it("withActivity_showsOpenedAndUpdated", () =>
-    expect(ageColumn("2026-10-30T12:00:00Z", "2026-11-04T10:00:00Z", now)).toEqual({ opened: "5d", updated: "2h" }));
-  it("noActivity_showsOnlyOpened", () => expect(ageColumn("2026-11-04T09:00:00Z", null, now)).toEqual({ opened: "3h", updated: null }));
-  it("activityWithinTheHour_isNowNotNew", () =>
-    expect(ageColumn("2026-11-01T12:00:00Z", "2026-11-04T11:30:00Z", now)).toEqual({ opened: "3d", updated: "now" }));
+  it("withActivity_labelsOpenedAndActive", () =>
+    expect(ageColumn("2026-10-30T12:00:00Z", "2026-11-04T10:00:00Z", now)).toEqual({ opened: "opened 5d ago", active: "active 2h ago" }));
+  it("noActivity_showsOnlyOpened", () => expect(ageColumn("2026-11-04T09:00:00Z", null, now)).toEqual({ opened: "opened 3h ago", active: null }));
+  it("withinTheHour_isJustNow", () =>
+    expect(ageColumn("2026-11-04T11:40:00Z", "2026-11-04T11:50:00Z", now)).toEqual({ opened: "opened just now", active: "active just now" }));
   it("bothPartsUseTheSameClock_soActivityIsNeverOlderThanOpening", () => {
     const later = new Date("2026-11-04T15:00:00Z");
-    expect(ageColumn("2026-11-04T09:00:00Z", "2026-11-04T09:30:00Z", later)).toEqual({ opened: "6h", updated: "5h" });
+    expect(ageColumn("2026-11-04T09:00:00Z", "2026-11-04T09:30:00Z", later)).toEqual({ opened: "opened 6h ago", active: "active 5h ago" });
+  });
+});
+
+describe("parseListSide", () => {
+  it("acceptsWholePixelsInRange", () => expect(parseListSide(" 640 ", LIST_WIDTH)).toBe(640));
+  it("rejectsOutOfRangeFractionsAndText", () => {
+    for (const text of ["359", "1601", "640.5", "", "wide"]) expect(parseListSide(text, LIST_WIDTH), text).toBeNull();
   });
 });
 

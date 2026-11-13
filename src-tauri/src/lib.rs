@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
@@ -29,7 +29,6 @@ use store::{Settings, Store};
 
 const PILL: &str = "pill";
 const LIST: &str = "list";
-const LIST_SIZE: (f64, f64) = (440.0, 600.0);
 /// The pill's size at 100%, matching `tauri.conf.json`.
 const PILL_SIZE: (f64, f64) = (112.0, 36.0);
 
@@ -362,9 +361,10 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window(LIST) {
         return Ok(window);
     }
+    let (width, height) = list_size(app);
     let window = WebviewWindowBuilder::new(app, LIST, WebviewUrl::App("index.html".into()))
         .title("Pending reviews")
-        .inner_size(LIST_SIZE.0, LIST_SIZE.1)
+        .inner_size(f64::from(width), f64::from(height))
         .decorations(false)
         .resizable(false)
         .always_on_top(true)
@@ -397,19 +397,32 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     Ok(window)
 }
 
+fn list_size(app: &AppHandle) -> (u32, u32) {
+    let shared = app.state::<Shared>();
+    let inner = shared.inner.lock().expect("state lock");
+    (inner.settings.list_width, inner.settings.list_height)
+}
+
+/// Sizes the list from settings, shrunk to fit the counter's screen, and puts it beside the counter.
+fn place_list(app: &AppHandle, list: &tauri::WebviewWindow) {
+    let (width, height) = list_size(app);
+    let Some(pill) = app.get_webview_window(PILL) else { return };
+    let (Ok(pos), Ok(size), Ok(Some(monitor))) = (pill.outer_position(), pill.outer_size(), pill.current_monitor()) else { return };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let (left, top) = (area.position.x, area.position.y);
+    let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
+    let w = ((f64::from(width) * scale) as i32).min(area.size.width as i32);
+    let h = ((f64::from(height) * scale) as i32).min(area.size.height as i32);
+    let _ = list.set_size(PhysicalSize::new(w as u32, h as u32));
+    let x = if pos.x + size.width as i32 / 2 > (left + right) / 2 { pos.x - w - 8 } else { pos.x + size.width as i32 + 8 };
+    let y = pos.y.clamp(top, (bottom - h).max(top));
+    let _ = list.set_position(PhysicalPosition::new(x.clamp(left, (right - w).max(left)), y));
+}
+
 fn show_list(app: &AppHandle) -> tauri::Result<()> {
     let list = list_window(app)?;
-    if let Some(pill) = app.get_webview_window(PILL)
-        && let (Ok(pos), Ok(size), Ok(Some(monitor))) = (pill.outer_position(), pill.outer_size(), pill.current_monitor()) {
-            let scale = monitor.scale_factor();
-            let (w, h) = ((LIST_SIZE.0 * scale) as i32, (LIST_SIZE.1 * scale) as i32);
-            let area = monitor.work_area();
-            let (left, top) = (area.position.x, area.position.y);
-            let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
-            let x = if pos.x + size.width as i32 / 2 > (left + right) / 2 { pos.x - w - 8 } else { pos.x + size.width as i32 + 8 };
-            let y = pos.y.clamp(top, (bottom - h).max(top));
-            let _ = list.set_position(PhysicalPosition::new(x.clamp(left, (right - w).max(left)), y));
-        }
+    place_list(app, &list);
     app.state::<Shared>().inner.lock().expect("state lock").list_had_focus = false;
     list.show()?;
     let _ = list.set_focus();
@@ -577,10 +590,11 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let shared = app.state::<Shared>();
     let settings = settings.clamped();
     shared.store.save_settings(&settings)?;
-    let (resize, refetch) = {
+    let (resize, resize_list, refetch) = {
         let old = &shared.inner.lock().expect("state lock").settings;
         (
             old.pill_scale != settings.pill_scale,
+            (old.list_width, old.list_height) != (settings.list_width, settings.list_height),
             old.organization != settings.organization || old.teams != settings.teams || old.poll_minutes != settings.poll_minutes,
         )
     };
@@ -594,6 +608,9 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         }
         s.settings = settings;
     });
+    if resize_list && let Some(list) = app.get_webview_window(LIST) {
+        place_list(&app, &list);
+    }
     // A size or notification change needs no new data; refetching on every − / + click would hit ADO each time.
     if refetch {
         shared.wake.notify_one();
