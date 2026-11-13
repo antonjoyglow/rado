@@ -100,11 +100,10 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 }
 .section .n { margin-left: auto; }
 .section .chevron {
-  width: 7px; height: 7px; margin: 0 3px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
-  transform: rotate(-45deg); transition: transform 0.15s;
+  flex: none; width: 7px; height: 7px; margin: 0 3px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
 }
 .section[aria-expanded="true"] .chevron { transform: rotate(45deg); }
-@media (prefers-reduced-motion: reduce) { .section .chevron { transition: none; } }
 .empty { margin: 4px 14px 8px; color: var(--muted); }
 
 .row[data-next="true"] { box-shadow: inset 3px 0 0 var(--accent); }
