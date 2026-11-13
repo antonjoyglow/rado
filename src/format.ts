@@ -62,16 +62,15 @@ export const SCALE_STEP = 25;
 
 /** A typed counter size: any whole percent from SCALE_MIN to SCALE_MAX. */
 export function parseScale(text: string): number | null {
-  const value = Number(text.trim());
-  return Number.isInteger(value) && value >= SCALE_MIN && value <= SCALE_MAX ? value : null;
+  return parseWhole(text, [SCALE_MIN, SCALE_MAX]);
 }
 
 /** Allowed review list width and height in px, matching `LIST_*_RANGE` in `store.rs`. */
 export const LIST_WIDTH: readonly [number, number] = [360, 1600];
 export const LIST_HEIGHT: readonly [number, number] = [400, 1600];
 
-/** A typed list width or height: a whole number of px inside `range`. */
-export function parseListSide(text: string, [min, max]: readonly [number, number]): number | null {
+/** A typed whole number inside `range`, such as a list width in px. */
+export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
   const value = Number(text.trim());
   return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }

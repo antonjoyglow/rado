@@ -361,10 +361,8 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window(LIST) {
         return Ok(window);
     }
-    let (width, height) = list_size(app);
     let window = WebviewWindowBuilder::new(app, LIST, WebviewUrl::App("index.html".into()))
         .title("Pending reviews")
-        .inner_size(f64::from(width), f64::from(height))
         .decorations(false)
         .resizable(false)
         .always_on_top(true)
@@ -397,15 +395,13 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     Ok(window)
 }
 
-fn list_size(app: &AppHandle) -> (u32, u32) {
-    let shared = app.state::<Shared>();
-    let inner = shared.inner.lock().expect("state lock");
-    (inner.settings.list_width, inner.settings.list_height)
-}
-
 /// Sizes the list from settings, shrunk to fit the counter's screen, and puts it beside the counter.
 fn place_list(app: &AppHandle, list: &tauri::WebviewWindow) {
-    let (width, height) = list_size(app);
+    let (width, height) = {
+        let shared = app.state::<Shared>();
+        let inner = shared.inner.lock().expect("state lock");
+        (inner.settings.list_width, inner.settings.list_height)
+    };
     let Some(pill) = app.get_webview_window(PILL) else { return };
     let (Ok(pos), Ok(size), Ok(Some(monitor))) = (pill.outer_position(), pill.outer_size(), pill.current_monitor()) else { return };
     let scale = monitor.scale_factor();
@@ -414,10 +410,12 @@ fn place_list(app: &AppHandle, list: &tauri::WebviewWindow) {
     let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
     let w = ((f64::from(width) * scale) as i32).min(area.size.width as i32);
     let h = ((f64::from(height) * scale) as i32).min(area.size.height as i32);
-    let _ = list.set_size(PhysicalSize::new(w as u32, h as u32));
     let x = if pos.x + size.width as i32 / 2 > (left + right) / 2 { pos.x - w - 8 } else { pos.x + size.width as i32 + 8 };
-    let y = pos.y.clamp(top, (bottom - h).max(top));
-    let _ = list.set_position(PhysicalPosition::new(x.clamp(left, (right - w).max(left)), y));
+    let at = PhysicalPosition::new(x.clamp(left, (right - w).max(left)), pos.y.clamp(top, (bottom - h).max(top)));
+    // Moving onto a monitor with another DPI rescales the window, so it moves first, is sized there, and is placed again.
+    let _ = list.set_position(at);
+    let _ = list.set_size(PhysicalSize::new(w as u32, h as u32));
+    let _ = list.set_position(at);
 }
 
 fn show_list(app: &AppHandle) -> tauri::Result<()> {

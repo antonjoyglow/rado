@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseListSide, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", ageHours: 1,
@@ -115,10 +115,10 @@ describe("ageColumn", () => {
   });
 });
 
-describe("parseListSide", () => {
-  it("acceptsWholePixelsInRange", () => expect(parseListSide(" 640 ", LIST_WIDTH)).toBe(640));
+describe("parseWhole", () => {
+  it("acceptsWholePixelsInRange", () => expect(parseWhole(" 640 ", LIST_WIDTH)).toBe(640));
   it("rejectsOutOfRangeFractionsAndText", () => {
-    for (const text of ["359", "1601", "640.5", "", "wide"]) expect(parseListSide(text, LIST_WIDTH), text).toBeNull();
+    for (const text of ["359", "1601", "640.5", "", "wide"]) expect(parseWhole(text, LIST_WIDTH), text).toBeNull();
   });
 });
 

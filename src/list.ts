@@ -1,6 +1,6 @@
 import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot } from "./api";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseListSide, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
 import { h } from "./dom";
 
@@ -316,8 +316,8 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
   };
   sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
   listWidth.onchange = listHeight.onchange = () => {
-    const w = parseListSide(listWidth.value, LIST_WIDTH);
-    const ht = parseListSide(listHeight.value, LIST_HEIGHT);
+    const w = parseWhole(listWidth.value, LIST_WIDTH);
+    const ht = parseWhole(listHeight.value, LIST_HEIGHT);
     if (w === null || ht === null) fail(`List size must be whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
     else setListSize(w, ht);
   };
