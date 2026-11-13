@@ -19,15 +19,20 @@ pub struct Settings {
     /// Team reviewers whose PRs count as mine, by name (`TeamAlpha` matches `[contoso]\TeamAlpha`).
     pub teams: Vec<String>,
     /// Size of the `{ reviews | mine }` counter, in percent of the 16 px original.
-    #[serde(deserialize_with = "lenient_percent")]
+    #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub pill_scale: u32,
+    /// Size of the review list, in logical pixels; shrunk to fit the screen when shown.
+    #[serde(deserialize_with = "lenient_number::<_, 640>")]
+    pub list_width: u32,
+    #[serde(deserialize_with = "lenient_number::<_, 860>")]
+    pub list_height: u32,
     #[serde(deserialize_with = "lenient_browser")]
     pub browser: Browser,
     /// Host of the Jira site ticket chips link to; empty hides the chips.
     pub jira_site: String,
 }
 
-/// Like `lenient_percent`: a hand-edited `null` or unknown browser falls back to the default browser
+/// Like `lenient_number`: a hand-edited `null` or unknown browser falls back to the default browser
 /// instead of failing the whole file.
 fn lenient_browser<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Browser, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
@@ -56,16 +61,19 @@ impl Browser {
 }
 
 /// A hand-edited `87.5` or `-1` must not fail the whole file and reset the other settings:
-/// any number is rounded (then `clamped`), and anything else falls back to 100%.
-fn lenient_percent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+/// any number is rounded (then `clamped`), and anything else falls back to `DEFAULT`.
+fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserializer: D) -> Result<u32, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     // `as` saturates, so a negative number becomes 0 and `clamped` lifts it to the minimum.
-    Ok(value.as_f64().map_or(100, |v| v.round() as u32))
+    Ok(value.as_f64().map_or(DEFAULT, |v| v.round() as u32))
 }
 
 /// Smallest and largest counter size, in percent. Below 75% the pixel font stops being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
+/// Smallest and largest review list, in logical pixels. Below these the rows stop fitting their buttons.
+pub const LIST_WIDTH_RANGE: (u32, u32) = (360, 1600);
+pub const LIST_HEIGHT_RANGE: (u32, u32) = (400, 1600);
 
 impl Settings {
     /// Pulls values typed or edited by hand back into their allowed ranges.
@@ -73,6 +81,8 @@ impl Settings {
         Self {
             poll_minutes: self.poll_minutes.clamp(1, 120),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
+            list_width: self.list_width.clamp(LIST_WIDTH_RANGE.0, LIST_WIDTH_RANGE.1),
+            list_height: self.list_height.clamp(LIST_HEIGHT_RANGE.0, LIST_HEIGHT_RANGE.1),
             jira_site: jira_host(&self.jira_site),
             ..self
         }
@@ -94,6 +104,8 @@ impl Default for Settings {
             notify: true,
             teams: Vec::new(),
             pill_scale: 100,
+            list_width: 640,
+            list_height: 860,
             browser: Browser::System,
             jira_site: String::new(),
         }
@@ -236,6 +248,17 @@ mod tests {
         ] {
             let settings = Settings { jira_site: typed.into(), ..Settings::default() }.clamped();
             assert_eq!(settings.jira_site, expected, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn settings_listSize_defaultsWhenMissingOrJunkAndIsClamped() {
+        let old: Settings = serde_json::from_str(r#"{"organization":"org"}"#).unwrap();
+        assert_eq!((old.list_width, old.list_height), (640, 860));
+        for (raw_w, raw_h, expected) in [("\"wide\"", "null", (640, 860)), ("10", "99999", (360, 1600)), ("700.4", "900", (700, 900))] {
+            let json = format!(r#"{{"organization":"org","listWidth":{raw_w},"listHeight":{raw_h}}}"#);
+            let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
+            assert_eq!((settings.organization.as_str(), (settings.list_width, settings.list_height)), ("org", expected), "{raw_w} x {raw_h}");
         }
     }
 

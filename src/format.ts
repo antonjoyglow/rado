@@ -62,8 +62,17 @@ export const SCALE_STEP = 25;
 
 /** A typed counter size: any whole percent from SCALE_MIN to SCALE_MAX. */
 export function parseScale(text: string): number | null {
+  return parseWhole(text, [SCALE_MIN, SCALE_MAX]);
+}
+
+/** Allowed review list width and height in px, matching `LIST_*_RANGE` in `store.rs`. */
+export const LIST_WIDTH: readonly [number, number] = [360, 1600];
+export const LIST_HEIGHT: readonly [number, number] = [400, 1600];
+
+/** A typed whole number inside `range`, such as a list width in px. */
+export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
   const value = Number(text.trim());
-  return Number.isInteger(value) && value >= SCALE_MIN && value <= SCALE_MAX ? value : null;
+  return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
 /** The − / + buttons: the next multiple of SCALE_STEP down or up, so a typed 110 steps to 100 or 125. */
@@ -83,9 +92,12 @@ export function hoursSince(iso: string, now: Date): number {
  * The age column: opened, then last activity. Both are measured against `now`, so they stay consistent
  * between polls. The second part is absent when there was no activity after opening or it is unknown.
  */
-export function ageColumn(createdAt: string, updatedAt: string | null, now: Date): { opened: string; updated: string | null } {
-  const sinceUpdate = updatedAt === null ? null : hoursSince(updatedAt, now);
-  return { opened: age(hoursSince(createdAt, now)), updated: sinceUpdate === null ? null : sinceUpdate < 1 ? "now" : age(sinceUpdate) };
+export function ageColumn(createdAt: string, updatedAt: string | null, now: Date): { opened: string; active: string | null } {
+  const phrase = (hours: number) => (hours < 1 ? "just now" : `${age(hours)} ago`);
+  return {
+    opened: `opened ${phrase(hoursSince(createdAt, now))}`,
+    active: updatedAt === null ? null : `active ${phrase(hoursSince(updatedAt, now))}`,
+  };
 }
 
 /** Hover text for the age column: one line per PR with its exact opened and, when known, last-activity times. */
