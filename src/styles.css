@@ -112,10 +112,9 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 
 .row { display: flex; align-items: center; padding-right: 8px; }
 .row:hover { background: var(--hover); }
-.row .open {
-  flex: 1; min-width: 0; display: flex; gap: 10px; align-items: flex-start;
-  padding: 8px 6px 8px 14px; border: 0; background: none; text-align: left;
-}
+.row .open { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: flex-start; padding: 8px 6px 8px 14px; cursor: pointer; }
+.row button.title { padding: 0; border: 0; background: none; text-align: left; }
+.row button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .row .actions { flex: none; display: flex; flex-direction: column; gap: 4px; }
 .row .action {
   width: 72px; padding: 2px 0; border: 1px solid var(--line); border-radius: 6px;
@@ -125,7 +124,7 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .row .action[data-flash="true"] { color: var(--clear); border-color: currentColor; }
 .row .members { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .row .member {
-  padding: 0 6px; border-radius: 8px; border: 1px solid var(--accent); color: var(--accent); font-size: 11px;
+  padding: 0 6px; border-radius: 8px; border: 1px solid var(--accent); background: none; color: var(--accent); font-size: 11px;
 }
 .row .member:hover { background: var(--accent); color: var(--on-accent); }
 .row .member[data-assigned="false"] { border-style: dashed; border-color: var(--line); color: var(--muted); }
