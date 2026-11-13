@@ -38,6 +38,8 @@ export interface ReviewItem extends PrRef {
   ticket: string | null;
   author: string;
   target: string;
+  /** Merges into a release branch (master, main, qa, release); the list names the target only then. */
+  releaseTarget: boolean;
   ageHours: number;
   /** When the row's earliest PR assigned to you (or yours) was opened. */
   createdAt: string;

@@ -3,7 +3,7 @@ import type { Member, ReviewItem } from "./api";
 import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
-  key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", ageHours: 1,
+  key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
   createdAt: "2026-11-04T11:00:00Z", updatedAt: null,
   required: false, viaGroup: false, draft: false, state: "needsReview", score: 50, tier: "normal", hidden: false, approvals: 0, objections: 0, comments: null,
   actionable: over.state === undefined || over.state === "needsReview" || over.state === "reReview",

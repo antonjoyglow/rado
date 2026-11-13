@@ -106,6 +106,7 @@ mod tests {
             branch: branch.into(),
             author: "Author".into(),
             target: "dev".into(),
+            release_target: false,
             age_hours: 8,
             created_at: now(),
             updated_at: None,

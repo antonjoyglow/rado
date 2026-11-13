@@ -1,4 +1,4 @@
-import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot } from "./api";
+import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot, type Tier } from "./api";
 import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
@@ -83,23 +83,7 @@ export function mountList(root: HTMLElement): void {
       body.append(h("p", { class: "empty" }, snapshot.error ? "Nothing loaded yet." : "Loading your reviews…"));
       return;
     }
-    const next = nextReview(snapshot.items, openedAt);
-    if (next) {
-      body.append(h("button", {
-        class: "next",
-        type: "button",
-        title: next.members.length > 1 ? `Open all ${next.members.length} PRs on ${next.branch}` : `Open ${prLabel(next)}`,
-        onclick: () => {
-          opened(next.key);
-          void api.openRow(next.key);
-          renderBody();
-        },
-      },
-        h("span", { class: "label" }, "Review next ▸"),
-        h("span", { class: "title" }, next.title),
-        h("span", { class: "meta" }, next.members.length > 1 ? `${next.members.length} PRs · ${next.branch}` : prLabel(next)),
-      ));
-    }
+    const nextKey = nextReview(snapshot.items, openedAt)?.key;
     for (const section of SECTIONS) {
       const mineSection = section.key === "mine";
       const inThis = snapshot.items.filter((i) => inSection(i, section.key));
@@ -118,7 +102,7 @@ export function mountList(root: HTMLElement): void {
       body.append(heading);
       if (!open) continue;
       if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
-      for (const item of items) body.append(row(item, snapshot.settings.jiraSite));
+      for (const item of items) body.append(row(item, snapshot.settings.jiraSite, item.key === nextKey));
     }
   };
 
@@ -138,23 +122,24 @@ export function mountList(root: HTMLElement): void {
   });
 }
 
-function row(item: ReviewItem, jiraSite: string): HTMLElement {
-  const badges = [
-    item.approvals > 0 && h("span", { class: "badge approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
-    item.objections > 0 && h("span", { class: "badge objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
-    item.comments && item.comments.total > 0 && h("span", {
-      class: "badge",
-      title: `${item.comments.total} comments, ${item.comments.openThreads} open threads`,
-    }, `💬 ${item.comments.total}${item.comments.openThreads > 0 ? ` · ${item.comments.openThreads} open` : ""}`),
-    item.required && h("span", { class: "badge required" }, "required"),
-    item.viaGroup && h("span", { class: "badge" }, "team"),
-    item.draft && h("span", { class: "badge" }, "draft"),
-    h("span", { class: "badge target" }, `→ ${item.target}`),
-  ];
+const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", low: "Low" };
+
+function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
   const aggregate = item.members.length > 1;
-  const meta = aggregate ? `${item.members.length} PRs · ${item.branch} · ${item.author}` : item.author;
-  const members = h("span", { class: "members" },
-    ...item.members.map((m) => h("span", {
+  // Plain text, so the outlined chips are exactly the things that open something.
+  const facts = [
+    h("span", {}, aggregate ? `${item.members.length} PRs · ${item.branch} · ${item.author}` : item.author),
+    item.required && h("span", { class: "required" }, "required"),
+    item.approvals > 0 && h("span", { class: "approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
+    item.objections > 0 && h("span", { class: "objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
+    item.comments && item.comments.total > 0 && h("span", {
+      title: `${item.comments.total} comments, ${item.comments.openThreads} open threads`,
+    }, `${item.comments.total} comment${item.comments.total === 1 ? "" : "s"}${item.comments.openThreads > 0 ? ` (${item.comments.openThreads} open)` : ""}`),
+    item.draft && h("span", {}, "draft"),
+    item.releaseTarget && h("span", { title: `Merges into ${item.target}` }, `→ ${item.target}`),
+  ].filter((f): f is HTMLSpanElement => Boolean(f));
+  const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" · ", f]));
+  const members = item.members.map((m) => h("span", {
       class: "member",
       role: "link",
       tabIndex: 0,
@@ -165,8 +150,7 @@ function row(item: ReviewItem, jiraSite: string): HTMLElement {
         opened(item.key);
         void api.openPr(m.id);
       },
-    }, prLabel(m))),
-  );
+    }, prLabel(m)));
   const ticket = jiraSite && item.ticket && h("span", {
     class: "member ticket",
     role: "link",
@@ -183,7 +167,8 @@ function row(item: ReviewItem, jiraSite: string): HTMLElement {
     title: aggregate ? "Copy all links, one 'repo: link' per line" : "Copy the link",
     onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
-  return h("div", { class: "row", data: { tier: item.hidden ? "low" : item.tier } },
+  const tier = item.hidden ? "low" : item.tier;
+  return h("div", { class: "row", data: { tier, next: String(isNext) } },
     h("button", {
       class: "open",
       type: "button",
@@ -193,11 +178,12 @@ function row(item: ReviewItem, jiraSite: string): HTMLElement {
         void api.openRow(item.key);
       },
     },
-      h("span", { class: "dot" }),
+      h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
       h("span", { class: "main" },
+        isNext && h("span", { class: "next-label" }, "Review next"),
         h("span", { class: "title" }, item.title),
-        h("span", { class: "meta" }, ticket, meta, ...badges),
-        members,
+        h("span", { class: "meta" }, ...meta),
+        h("span", { class: "members" }, ticket, ...members),
       ),
       ageCell(item),
     ),
@@ -236,35 +222,52 @@ function flash(button: HTMLButtonElement, text: string): void {
 
 function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
   const settings = { ...snapshot.settings };
-  const message = h("p", { class: "message" });
-  const fail = (e: unknown) => { message.dataset.kind = "error"; message.textContent = String(e); };
-  const ok = (text: string) => { message.dataset.kind = "ok"; message.textContent = text; };
-  const save = () => api.saveSettings(settings).then(() => ok("Saved."), fail);
+  // Each field reports its own save next to its caption; errors stay until the next attempt.
+  const note = () => h("span", { class: "note", role: "status" });
+  const ok = (n: HTMLElement, text = "Saved") => {
+    n.dataset.kind = "ok";
+    n.textContent = text;
+    setTimeout(() => { if (n.textContent === text) n.textContent = ""; }, 2000);
+  };
+  const fail = (n: HTMLElement, e: unknown) => { n.dataset.kind = "error"; n.textContent = String(e); };
+  const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
+  const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
+  const n = {
+    pat: note(), org: note(), teams: note(), jira: note(), token: note(), minutes: note(), scale: note(), size: note(), browser: note(),
+    notify: note(), autostart: note(),
+  };
 
   const pat = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasPat ? "•••••••••••••••• saved" : "Paste a PAT (Code: Read)" });
-  const savePat = h("button", { type: "button", onclick: () => api.savePat(pat.value).then(() => { pat.value = ""; pat.placeholder = "•••••••••••••••• saved"; ok("PAT saved to Windows Credential Manager."); }, fail) }, "Save");
+  const savePat = h("button", {
+    type: "button",
+    onclick: () => api.savePat(pat.value).then(() => {
+      pat.value = "";
+      pat.placeholder = "•••••••••••••••• saved";
+      ok(n.pat, "Saved to Windows Credential Manager");
+    }, (e) => fail(n.pat, e)),
+  }, "Save");
   const githubToken = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasGithubToken ? "•••••••••••••••• saved" : "Paste a token (repo, read:org)" });
   const saveGithubToken = h("button", {
     type: "button",
     onclick: () => api.saveGithubToken(githubToken.value).then(() => {
       githubToken.value = "";
       githubToken.placeholder = "•••••••••••••••• saved";
-      ok("GitHub token saved to Windows Credential Manager.");
-    }, fail),
+      ok(n.token, "Saved to Windows Credential Manager");
+    }, (e) => fail(n.token, e)),
   }, "Save");
 
-  const org = h("input", { type: "text", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(); } });
+  const org = h("input", { type: "text", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(n.org); } });
   const teams = h("input", {
     type: "text",
     value: settings.teams.join(", "),
     placeholder: "TeamAlpha",
-    onchange: () => { settings.teams = teams.value.split(",").map((t) => t.trim()).filter(Boolean); void save(); },
+    onchange: () => { settings.teams = teams.value.split(",").map((t) => t.trim()).filter(Boolean); void save(n.teams); },
   });
   const jira = h("input", {
     type: "text",
     value: settings.jiraSite,
     placeholder: "yourcompany.atlassian.net",
-    onchange: () => { settings.jiraSite = jira.value; void save(); },
+    onchange: () => { settings.jiraSite = jira.value; void save(n.jira); },
   });
 
   const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -275,11 +278,11 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     settings.pollMinutes = m;
     minutes.value = String(m);
     chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
-    void save();
+    void save(n.minutes);
   };
   minutes.onchange = () => {
     const m = parseMinutes(minutes.value);
-    if (m === null) fail("Polling interval must be a whole number from 1 to 120.");
+    if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
     else setMinutes(m);
   };
 
@@ -291,13 +294,13 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     scale.value = String(percent);
     smaller.disabled = percent <= SCALE_MIN;
     bigger.disabled = percent >= SCALE_MAX;
-    void save();
+    void save(n.scale);
   };
   smaller.disabled = settings.pillScale <= SCALE_MIN;
   bigger.disabled = settings.pillScale >= SCALE_MAX;
   scale.onchange = () => {
     const percent = parseScale(scale.value);
-    if (percent === null) fail(`Counter size must be a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
+    if (percent === null) fail(n.scale, `Use a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
     else setScale(percent);
   };
 
@@ -312,13 +315,13 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     listWidth.value = String(w);
     listHeight.value = String(ht);
     sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === w && LIST_SIZES[i][2] === ht)));
-    void save();
+    void save(n.size);
   };
   sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
   listWidth.onchange = listHeight.onchange = () => {
     const w = parseWhole(listWidth.value, LIST_WIDTH);
     const ht = parseWhole(listHeight.value, LIST_HEIGHT);
-    if (w === null || ht === null) fail(`List size must be whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
+    if (w === null || ht === null) fail(n.size, `Use whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
     else setListSize(w, ht);
   };
 
@@ -328,29 +331,29 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
   const setBrowser = (value: Browser) => {
     settings.browser = value;
     browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === value)));
-    void save();
+    void save(n.browser);
   };
 
-  const notify = h("input", { type: "checkbox", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(); } });
-  const autostart = h("input", { type: "checkbox", onchange: () => api.setAutostart(autostart.checked).then(() => ok("Saved."), fail) });
+  const notify = h("input", { type: "checkbox", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
+  const autostart = h("input", { type: "checkbox", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
 
   panel.replaceChildren(
     h("h2", {}, "Azure DevOps"),
-    h("label", {}, "PAT", h("span", { class: "inline" }, pat, savePat)),
-    h("label", {}, "Organization", org),
-    h("label", {}, "My teams (comma-separated)", teams),
-    h("label", {}, "Jira Cloud site, for ticket links from branch names", jira),
+    h("label", {}, caption("PAT", n.pat), h("span", { class: "inline" }, pat, savePat)),
+    h("label", {}, caption("Organization", n.org), org),
+    h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
+    h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
     h("h2", {}, "GitHub"),
-    h("label", {}, "Token", h("span", { class: "inline" }, githubToken, saveGithubToken)),
+    h("label", {}, caption("Token", n.token), h("span", { class: "inline" }, githubToken, saveGithubToken)),
     h("h2", {}, "Rado"),
     // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
-    h("div", { class: "field" }, "Check every", h("span", { class: "inline" }, ...chips, minutes, "min")),
-    h("div", { class: "field" }, `Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, h("span", { class: "inline" }, smaller, scale, "%", bigger)),
-    h("div", { class: "field" }, "List size (shrinks to fit the screen)", h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
-    h("div", { class: "field" }, "Open links in", h("span", { class: "inline" }, ...browsers)),
-    h("label", { class: "check" }, notify, "Notify me about new reviews"),
-    h("label", { class: "check" }, autostart, "Start with Windows"),
-    h("div", { class: "inline" }, message, h("button", { type: "button", class: "quit", onclick: () => void api.quit() }, "Quit")),
+    h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
+    h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
+    h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+    h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
+    h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
+    h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
+    h("div", { class: "end" }, h("button", { type: "button", class: "quit", onclick: () => void api.quit() }, "Quit")),
   );
 }
