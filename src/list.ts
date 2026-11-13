@@ -170,14 +170,16 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
     onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
   const tier = item.hidden ? "low" : item.tier;
-  const openRow = () => {
-    opened(item.key);
-    void api.openRow(item.key);
-  };
-  // The title is the keyboard target for opening the row; a click anywhere else on the row does the same,
-  // and the chips are buttons of their own beside it rather than inside it.
+  // The title button is the keyboard target for opening the row: its click bubbles to this div, as does a click
+  // anywhere else on the row. The chips are buttons of their own beside it and stop their clicks here.
   return h("div", { class: "row", data: { tier, next: String(isNext) } },
-    h("div", { class: "open", onclick: openRow },
+    h("div", {
+      class: "open",
+      onclick: () => {
+        opened(item.key);
+        void api.openRow(item.key);
+      },
+    },
       h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
       h("div", { class: "main" },
         isNext && h("span", { class: "next-label" }, "Review next"),
@@ -185,10 +187,6 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
           class: "title",
           type: "button",
           title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
-          onclick: (e: MouseEvent) => {
-            e.stopPropagation();
-            openRow();
-          },
         }, item.title),
         h("span", { class: "meta" }, ...meta),
         h("span", { class: "members" }, ticket, ...members),
