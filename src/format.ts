@@ -7,7 +7,7 @@ export function prLabel(pr: PrRef): string {
 
 export function age(hours: number): string {
   if (hours < 1) return "new";
-  if (hours < 48) return `${hours}h`;
+  if (hours < 24) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
 }
 

@@ -93,12 +93,13 @@ export function mountList(root: HTMLElement): void {
       const heading = h("button", {
         class: "section",
         type: "button",
+        ariaExpanded: String(open),
         onclick: () => {
           if (open) expanded.delete(section.key);
           else expanded.add(section.key);
           renderBody();
         },
-      }, `${open ? "▾" : "▸"} ${section.title}`, h("span", { class: "n" }, String(items.length)));
+      }, h("span", { class: "chevron", ariaHidden: "true" }), section.title, h("span", { class: "n" }, String(items.length)));
       body.append(heading);
       // A collapsed section still shows the next review, so the marker can't disappear.
       if (!open) {
@@ -355,7 +356,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
     h("h2", {}, "GitHub"),
     h("label", {}, caption("Token", n.token), h("span", { class: "inline" }, githubToken, saveGithubToken)),
-    h("h2", {}, "Rado"),
+    h("h2", {}, "General"),
     // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
     h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
     h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
