@@ -1,6 +1,6 @@
 [package]
 name = "rado"
-version = "0.5.0"
+version = "0.6.0"
 description = "Rado: a floating count of the Azure DevOps and GitHub reviews waiting on you"
 authors = ["Antonis Charalampidis"]
 edition = "2024"

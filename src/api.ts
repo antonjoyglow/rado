@@ -46,7 +46,6 @@ export interface ReviewItem extends PrRef {
   /** Latest activity across those PRs, a later sibling's opening included; null when there was none or it is unknown. */
   updatedAt: string | null;
   required: boolean;
-  viaGroup: boolean;
   draft: boolean;
   state: ReviewState;
   score: number;

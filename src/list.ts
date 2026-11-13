@@ -100,7 +100,12 @@ export function mountList(root: HTMLElement): void {
         },
       }, `${open ? "▾" : "▸"} ${section.title}`, h("span", { class: "n" }, String(items.length)));
       body.append(heading);
-      if (!open) continue;
+      // A collapsed section still shows the next review, so the marker can't disappear.
+      if (!open) {
+        const next = items.find((i) => i.key === nextKey);
+        if (next) body.append(row(next, snapshot.settings.jiraSite, true));
+        continue;
+      }
       if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
       for (const item of items) body.append(row(item, snapshot.settings.jiraSite, item.key === nextKey));
     }
@@ -132,9 +137,7 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
     item.required && h("span", { class: "required" }, "required"),
     item.approvals > 0 && h("span", { class: "approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
     item.objections > 0 && h("span", { class: "objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
-    item.comments && item.comments.total > 0 && h("span", {
-      title: `${item.comments.total} comments, ${item.comments.openThreads} open threads`,
-    }, `${item.comments.total} comment${item.comments.total === 1 ? "" : "s"}${item.comments.openThreads > 0 ? ` (${item.comments.openThreads} open)` : ""}`),
+    item.comments && item.comments.total > 0 && h("span", {}, `${item.comments.total} comment${item.comments.total === 1 ? "" : "s"}${item.comments.openThreads > 0 ? ` (${item.comments.openThreads} open)` : ""}`),
     item.draft && h("span", {}, "draft"),
     item.releaseTarget && h("span", { title: `Merges into ${item.target}` }, `→ ${item.target}`),
   ].filter((f): f is HTMLSpanElement => Boolean(f));
@@ -206,7 +209,7 @@ function ageCell(item: ReviewItem): HTMLElement {
   const { opened, active } = ageColumn(item.createdAt, item.updatedAt, new Date());
   return h("span", { class: "age", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) },
     h("span", {}, opened),
-    active && h("span", { class: "updated" }, active),
+    active && h("span", {}, active),
   );
 }
 
@@ -222,14 +225,18 @@ function flash(button: HTMLButtonElement, text: string): void {
 
 function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
   const settings = { ...snapshot.settings };
-  // Each field reports its own save next to its caption; errors stay until the next attempt.
+  // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
+  // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
   const note = () => h("span", { class: "note", role: "status" });
-  const ok = (n: HTMLElement, text = "Saved") => {
-    n.dataset.kind = "ok";
+  const timers = new Map<HTMLElement, number>();
+  const show = (n: HTMLElement, kind: "ok" | "error", text: string) => {
+    clearTimeout(timers.get(n));
+    n.dataset.kind = kind;
     n.textContent = text;
-    setTimeout(() => { if (n.textContent === text) n.textContent = ""; }, 2000);
+    if (kind === "ok") timers.set(n, setTimeout(() => (n.textContent = ""), 2000));
   };
-  const fail = (n: HTMLElement, e: unknown) => { n.dataset.kind = "error"; n.textContent = String(e); };
+  const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
+  const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = {
@@ -237,7 +244,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     notify: note(), autostart: note(),
   };
 
-  const pat = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasPat ? "•••••••••••••••• saved" : "Paste a PAT (Code: Read)" });
+  const pat = h("input", { type: "password", autocomplete: "off", ariaLabel: "PAT", placeholder: snapshot.hasPat ? "•••••••••••••••• saved" : "Paste a PAT (Code: Read)" });
   const savePat = h("button", {
     type: "button",
     onclick: () => api.savePat(pat.value).then(() => {
@@ -246,7 +253,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
       ok(n.pat, "Saved to Windows Credential Manager");
     }, (e) => fail(n.pat, e)),
   }, "Save");
-  const githubToken = h("input", { type: "password", autocomplete: "off", placeholder: snapshot.hasGithubToken ? "•••••••••••••••• saved" : "Paste a token (repo, read:org)" });
+  const githubToken = h("input", { type: "password", autocomplete: "off", ariaLabel: "GitHub token", placeholder: snapshot.hasGithubToken ? "•••••••••••••••• saved" : "Paste a token (repo, read:org)" });
   const saveGithubToken = h("button", {
     type: "button",
     onclick: () => api.saveGithubToken(githubToken.value).then(() => {
@@ -256,15 +263,17 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     }, (e) => fail(n.token, e)),
   }, "Save");
 
-  const org = h("input", { type: "text", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(n.org); } });
+  const org = h("input", { type: "text", ariaLabel: "Organization", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(n.org); } });
   const teams = h("input", {
     type: "text",
+    ariaLabel: "My teams",
     value: settings.teams.join(", "),
     placeholder: "TeamAlpha",
     onchange: () => { settings.teams = teams.value.split(",").map((t) => t.trim()).filter(Boolean); void save(n.teams); },
   });
   const jira = h("input", {
     type: "text",
+    ariaLabel: "Jira Cloud site",
     value: settings.jiraSite,
     placeholder: "yourcompany.atlassian.net",
     onchange: () => { settings.jiraSite = jira.value; void save(n.jira); },
@@ -334,8 +343,8 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     void save(n.browser);
   };
 
-  const notify = h("input", { type: "checkbox", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
-  const autostart = h("input", { type: "checkbox", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
+  const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
+  const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
 
   panel.replaceChildren(
@@ -354,6 +363,6 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
     h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
     h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
     h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
-    h("div", { class: "end" }, h("button", { type: "button", class: "quit", onclick: () => void api.quit() }, "Quit")),
+    h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
   );
 }
