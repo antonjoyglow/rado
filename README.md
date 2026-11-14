@@ -116,6 +116,17 @@ The installer updates an existing install in place: it skips Tauri's "uninstall 
 
 The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. On this machine, Rust would otherwise pick a Visual Studio install that has no C++ libraries.
 
+## Releasing
+
+Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml` (npm test, cargo test, clippy).
+
+1. Cut the release branch from main: `git fetch origin && git switch -c release/0.8.0 origin/main && git push -u origin release/0.8.0`.
+2. Feature PRs target it (`gh pr create --base release/0.8.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog. For a PR with a single commit, GitHub uses that commit's subject instead of the PR title, so give the commit the same conventional title.
+3. To release, on the release branch run `npm run release -- 0.8.0` (`--dry-run` prints the section first). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`, and writes a dated `## [0.8.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning it replaces that section, hand edits included.
+4. Edit the section, commit, and open the release PR from `release/0.8.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
+5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0`. `.github/workflows/release.yml` builds the installer and publishes it with the `0.8.0` changelog section as the release notes; it fails if the section is missing.
+6. Cut the next release branch from main after tagging (`release/0.9.0`). A patch release also starts from main (`release/0.8.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The Silkscreen font in `src/fonts/` is under the SIL Open Font License (`src/fonts/OFL.txt`).
