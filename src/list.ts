@@ -1,62 +1,136 @@
-import { api, watchSnapshot, type Browser, type ReviewItem, type ReviewState, type Snapshot, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type ReviewItem, type Snapshot, type Tier } from "./api";
 import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
 import { h } from "./dom";
-
-type SectionKey = ReviewState | "hidden";
-
-const SECTIONS: { key: SectionKey; title: string; collapsed: boolean }[] = [
-  { key: "needsReview", title: "Needs your review", collapsed: false },
-  { key: "reReview", title: "New pushes since your vote", collapsed: false },
-  { key: "mine", title: "Your PRs", collapsed: false },
-  { key: "waitingOnAuthor", title: "Waiting on author", collapsed: true },
-  { key: "approved", title: "Approved by you or your team", collapsed: true },
-  { key: "stale", title: "Quiet for 3 weeks", collapsed: true },
-  { key: "hidden", title: "Not mine or hidden", collapsed: true },
-];
+import {
+  defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
+} from "./tabs";
 
 /** When you last opened each row, by row key; "Review next" walks past the ones you just opened. */
 const openedAt = new Map<string, number>();
 const opened = (key: string) => openedAt.set(key, Date.now());
 
-const inSection = (item: ReviewItem, key: SectionKey) => (key === "hidden" ? item.hidden : !item.hidden && item.state === key);
+const LIST_TAB_KEY = "rado.listTab";
+const SETTINGS_TAB_KEY = "rado.settingsTab";
+
+// Storage can be missing or throw (private mode, blocked site data); the tabs then just aren't remembered.
+function recall(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function remember(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Not remembered; see recall.
+  }
+}
+
+/**
+ * A tablist over buttons the caller made once, so focus survives re-renders. Arrows, Home and End move focus
+ * and selection. `onSelect` owns the state and calls `select` to update the ARIA attributes.
+ */
+function tabList<K extends string>(
+  label: string,
+  tabs: readonly { key: K; tab: HTMLButtonElement }[],
+  panelOf: (key: K) => HTMLElement,
+  onSelect: (key: K) => void,
+): { list: HTMLElement; select: (key: K) => void } {
+  for (const { key, tab } of tabs) {
+    tab.type = "button";
+    tab.role = "tab";
+    tab.setAttribute("aria-controls", panelOf(key).id);
+    tab.onclick = () => {
+      tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+      onSelect(key);
+    };
+  }
+  const list = h("div", { class: "tabs", role: "tablist", ariaLabel: label }, ...tabs.map((t) => t.tab));
+  list.addEventListener("keydown", (e) => {
+    const from = tabs.findIndex((t) => t.tab === document.activeElement);
+    const to = from < 0 ? null : stepTab(from, e.key, tabs.length);
+    if (to === null) return;
+    e.preventDefault();
+    tabs[to].tab.focus();
+    tabs[to].tab.click();
+  });
+  const select = (key: K) => {
+    for (const t of tabs) {
+      t.tab.ariaSelected = String(t.key === key);
+      t.tab.tabIndex = t.key === key ? 0 : -1;
+    }
+    panelOf(key).setAttribute("aria-labelledby", tabs.find((t) => t.key === key)!.tab.id);
+  };
+  return { list, select };
+}
+
 const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
 const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
 
 export function mountList(root: HTMLElement): void {
   const status = h("div", { class: "status" });
-  const body = h("div", { class: "body" });
+  const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
   const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
+
+  // One tab per section, always all seven so they never move. Created once; renderBody updates them in place.
+  const tabs = SECTIONS.map((s) => {
+    const count = h("span", { class: "n" });
+    const tab = h("button", { class: "tab", id: `tab-${s.key}`, title: s.title }, s.label, count, h("span", { class: "next-dot", ariaHidden: "true" }));
+    return { key: s.key, count, tab };
+  });
+  let tab: SectionKey | null = restoreTab(recall(LIST_TAB_KEY), SECTIONS.map((s) => s.key));
+  const scrolls = new Map<SectionKey, number>();
+  const strip = tabList("Review sections", tabs, () => body, (key) => {
+    if (tab) scrolls.set(tab, body.scrollTop);
+    tab = key;
+    strip.select(key);
+    remember(LIST_TAB_KEY, key);
+    renderBody();
+    body.scrollTop = scrolls.get(key) ?? 0;
+  });
+
   root.append(
     h("header", {}, heading, refreshButton, settingsButton, closeButton),
     status,
+    strip.list,
     settingsPanel,
     body,
   );
+  strip.select(tab ?? "needsReview");
 
   // Settings replace the list rather than squeezing it; hiding the list keeps its rows and scroll position.
   let listScroll = 0;
-  const showSettings = (on: boolean) => {
+  let settingsTab: SettingsTab = restoreTab(recall(SETTINGS_TAB_KEY), SETTINGS_TABS.map((t) => t.key)) ?? "ado";
+  const showSettings = (on: boolean, startTab: SettingsTab = settingsTab) => {
     if (on === !settingsPanel.hidden) return;
     if (on) listScroll = body.scrollTop;
     settingsPanel.hidden = !on;
     body.hidden = on;
+    strip.list.hidden = on;
     heading.textContent = on ? "Settings" : "Reviews";
     settingsButton.textContent = on ? "←" : "⚙";
     settingsButton.title = on ? "Back to reviews" : "Settings";
-    if (on && snapshot) renderSettings(settingsPanel, snapshot);
+    if (on && snapshot) {
+      renderSettings(settingsPanel, snapshot, startTab, (key) => {
+        settingsTab = key;
+        remember(SETTINGS_TAB_KEY, key);
+      });
+    }
     if (!on) body.scrollTop = listScroll;
   };
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
-  const expanded = new Set(SECTIONS.filter((s) => !s.collapsed).map((s) => s.key));
 
   const renderStatus = () => {
     if (!snapshot) return;
@@ -76,40 +150,30 @@ export function mountList(root: HTMLElement): void {
     if (!snapshot) return;
     body.replaceChildren();
     if (!snapshot.hasPat && !snapshot.hasGithubToken) {
-      showSettings(true);
+      showSettings(true, "ado");
       return;
     }
     if (!snapshot.lastRefreshed) {
       body.append(h("p", { class: "empty" }, snapshot.error ? "Nothing loaded yet." : "Loading your reviews…"));
       return;
     }
-    const nextKey = nextReview(snapshot.items, openedAt)?.key;
-    for (const section of SECTIONS) {
-      const mineSection = section.key === "mine";
-      const inThis = snapshot.items.filter((i) => inSection(i, section.key));
-      const items = mineSection ? newestFirst(inThis) : inThis;
-      if (items.length === 0 && section.collapsed) continue;
-      const open = expanded.has(section.key);
-      const heading = h("button", {
-        class: "section",
-        type: "button",
-        ariaExpanded: String(open),
-        onclick: () => {
-          if (open) expanded.delete(section.key);
-          else expanded.add(section.key);
-          renderBody();
-        },
-      }, h("span", { class: "chevron", ariaHidden: "true" }), section.title, h("span", { class: "n" }, String(items.length)));
-      body.append(heading);
-      // A collapsed section still shows the next review, so the marker can't disappear.
-      if (!open) {
-        const next = items.find((i) => i.key === nextKey);
-        if (next) body.append(row(next, snapshot.settings.jiraSite, true));
-        continue;
-      }
-      if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
-      for (const item of items) body.append(row(item, snapshot.settings.jiraSite, item.key === nextKey));
+    const all = snapshot.items;
+    // Chosen once, on the first loaded snapshot, so the tab doesn't jump as counts change.
+    tab ??= defaultListTab(all);
+    // The next review is never hidden, so its tab is its state.
+    const next = nextReview(all, openedAt);
+    for (const t of tabs) {
+      const n = all.filter((i) => inSection(i, t.key)).length;
+      t.count.textContent = String(n);
+      t.tab.dataset.empty = String(n === 0);
+      t.tab.dataset.next = String(t.key === next?.state);
     }
+    strip.select(tab);
+    const current = tab;
+    const inThis = all.filter((i) => inSection(i, current));
+    const items = current === "mine" ? newestFirst(inThis) : inThis;
+    if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
+    for (const item of items) body.append(row(item, snapshot.settings.jiraSite, item.key === next?.key));
   };
 
   void watchSnapshot((s) => {
@@ -226,7 +290,7 @@ function flash(button: HTMLButtonElement, text: string): void {
   }, 1500);
 }
 
-function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
+function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: SettingsTab, onSelect: (key: SettingsTab) => void): void {
   const settings = { ...snapshot.settings };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
   // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
@@ -350,22 +414,38 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot): void {
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
 
-  panel.replaceChildren(
-    h("h2", {}, "Azure DevOps"),
-    h("label", {}, caption("PAT", n.pat), h("span", { class: "inline" }, pat, savePat)),
-    h("label", {}, caption("Organization", n.org), org),
-    h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
-    h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
-    h("h2", {}, "GitHub"),
-    h("label", {}, caption("Token", n.token), h("span", { class: "inline" }, githubToken, saveGithubToken)),
-    h("h2", {}, "General"),
-    // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
-    h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
-    h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
-    h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
-    h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
-    h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
-    h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
-    h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
-  );
+  const tabPanel = (key: SettingsTab, ...children: HTMLElement[]) => h("div", { class: "tabpanel", id: `settings-${key}`, role: "tabpanel" }, ...children);
+  // All three panels live for the whole visit, so switching tabs keeps a pasted but unsaved token.
+  const panels: Record<SettingsTab, HTMLElement> = {
+    ado: tabPanel("ado",
+      h("label", {}, caption("PAT", n.pat), h("span", { class: "inline" }, pat, savePat)),
+      h("label", {}, caption("Organization", n.org), org),
+      h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
+      h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
+    ),
+    github: tabPanel("github",
+      h("label", {}, caption("Token", n.token), h("span", { class: "inline" }, githubToken, saveGithubToken)),
+    ),
+    general: tabPanel("general",
+      // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
+      h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
+      h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
+      h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+      h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
+      h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
+      h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
+      h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
+    ),
+  };
+  const tabs = SETTINGS_TABS.map((t) => ({ key: t.key, tab: h("button", { class: "tab", id: `settings-tab-${t.key}` }, t.label) }));
+  const showTab = (key: SettingsTab) => {
+    strip.select(key);
+    for (const t of SETTINGS_TABS) panels[t.key].hidden = t.key !== key;
+  };
+  const strip = tabList("Settings sections", tabs, (key) => panels[key], (key) => {
+    showTab(key);
+    onSelect(key);
+  });
+  showTab(startTab);
+  panel.replaceChildren(strip.list, ...SETTINGS_TABS.map((t) => panels[t.key]));
 }
