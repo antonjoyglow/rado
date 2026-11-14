@@ -93,17 +93,23 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .body { flex: 1; overflow-y: auto; padding: 4px 0 10px; }
-.section {
-  display: flex; width: 100%; align-items: center; gap: 6px;
-  padding: 10px 14px 4px; border: 0; background: none; text-align: left;
-  color: var(--muted); font-weight: 600; font-size: 12px;
+
+/* Spacing sized so all seven list tabs fit the 440 px Compact window with two-digit counts; otherwise the strip scrolls sideways. */
+.tabs { flex: none; display: flex; padding: 0 2px; overflow-x: auto; scrollbar-width: thin; border-bottom: 1px solid var(--line); }
+.tabs[hidden] { display: none; }
+.settings .tabs { gap: 8px; padding: 0 8px; }
+.tabs .tab {
+  flex: none; display: flex; align-items: center; gap: 2px; padding: 7px 3px 5px;
+  border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
 }
-.section .n { margin-left: auto; }
-.section .chevron {
-  flex: none; width: 7px; height: 7px; margin: 0 3px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
-  transform: rotate(-45deg);
-}
-.section[aria-expanded="true"] .chevron { transform: rotate(45deg); }
+.tab .n { color: var(--muted); font-weight: 400; font-size: 11px; }
+.tab[data-empty="true"] { color: var(--muted); font-weight: 400; }
+.tab:hover { background: var(--hover); }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab .next-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.tab:not([data-next="true"]) .next-dot { display: none; }
 .empty { margin: 4px 14px 8px; color: var(--muted); }
 
 .row[data-next="true"] { box-shadow: inset 3px 0 0 var(--accent); }
@@ -139,10 +145,10 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .row .meta .objected { color: var(--normal); }
 .row .age { flex: none; display: flex; flex-direction: column; align-items: flex-end; color: var(--muted); font-size: 12px; margin-top: 1px; white-space: nowrap; }
 
-.settings { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; }
+.settings { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .settings[hidden] { display: none; }
-.settings h2 { margin: 6px 0 -4px; font-size: 12px; font-weight: 600; }
-.settings h2:first-child { margin-top: 0; }
+.settings .tabpanel { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; }
+.settings .tabpanel[hidden] { display: none; }
 .settings label, .settings .field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
 .settings label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; }
 .settings input::placeholder { color: var(--muted); opacity: 1; }
