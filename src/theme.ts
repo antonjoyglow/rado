@@ -47,7 +47,7 @@ export function customPalette({ background: bg, text: fg, accent }: CustomTheme)
   const hover = [mix(fg, bg, 0.07), mix(away, bg, 0.07)].find((c) => contrast(fg, c) >= READABLE) ?? mix(fg, bg, 0.07);
   // `color` blended toward the text colour just enough to read at 4.5:1 on the background and hover colours.
   const readable = (color: string) =>
-    [0, 0.2, 0.4, 0.6, 0.8].map((share) => mix(fg, color, share)).find((c) => contrast(c, bg) >= READABLE && contrast(c, hover) >= READABLE) ?? fg;
+    Array.from({ length: 20 }, (_, i) => mix(fg, color, i * 0.05)).find((c) => contrast(c, bg) >= READABLE && contrast(c, hover) >= READABLE) ?? fg;
   const status = luminance(bg) < 0.18 ? STATUS_ON_DARK : STATUS_ON_LIGHT;
   return {
     "--bg": bg,

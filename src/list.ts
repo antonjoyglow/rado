@@ -439,8 +439,8 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
         if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
         else ok(n.custom);
       }, (e) => {
-        // Not saved: a later save of another field must not carry it.
-        fill(before);
+        // Not saved: a later save of another field must not carry it, unless a newer pick already replaced it.
+        if (settings.customTheme[key] === value) fill(before);
         fail(n.custom, e);
       });
     };

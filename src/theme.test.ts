@@ -53,6 +53,12 @@ describe("customPalette", () => {
     }
   });
 
+  it("statusColours_stayDistinctWhereTheyNeedALotOfBlending", () => {
+    const p = customPalette({ background: "#d38b86", text: "#383211", accent: "#2561c8" });
+    expect(new Set([p["--urgent"], p["--normal"], p["--clear"]]).size).toBe(3);
+    for (const name of ["--urgent", "--normal", "--clear"]) expect(contrast(p[name], p["--hover"]), name).toBeGreaterThanOrEqual(READABLE);
+  });
+
   it("hover_tintsAwayFromTheTextWhenTowardItWouldNotRead", () => {
     const p = customPalette({ background: "#2e7d32", text: "#ffffff", accent: "#ffd60a" });
     expect(contrast(p["--fg"], p["--hover"])).toBeGreaterThanOrEqual(READABLE);
