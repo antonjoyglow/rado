@@ -26,15 +26,21 @@ pub struct Settings {
     pub list_width: u32,
     #[serde(deserialize_with = "lenient_number::<_, 860>")]
     pub list_height: u32,
-    #[serde(deserialize_with = "lenient_browser")]
+    #[serde(deserialize_with = "lenient_choice")]
     pub browser: Browser,
+    /// Colours of the review list; the counter keeps its own look.
+    #[serde(deserialize_with = "lenient_choice")]
+    pub theme: Theme,
+    /// Colours of the `Custom` theme; kept when another theme is chosen.
+    #[serde(deserialize_with = "lenient_choice")]
+    pub custom_theme: CustomTheme,
     /// Host of the Jira site ticket chips link to; empty hides the chips.
     pub jira_site: String,
 }
 
-/// Like `lenient_number`: a hand-edited `null` or unknown browser falls back to the default browser
-/// instead of failing the whole file.
-fn lenient_browser<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Browser, D::Error> {
+/// Like `lenient_number`: a hand-edited `null`, unknown or misshapen value (browser, theme, custom colours)
+/// falls back to its default instead of failing the whole file.
+fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
@@ -47,6 +53,53 @@ pub enum Browser {
     Chrome,
     #[default]
     System,
+}
+
+/// Colours of the review list. `System` follows Windows' light or dark app mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Theme {
+    #[default]
+    System,
+    Dark,
+    Light,
+    HighContrast,
+    Custom,
+}
+
+/// The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CustomTheme {
+    pub background: String,
+    pub text: String,
+    pub accent: String,
+}
+
+/// Starts from the dark palette.
+impl Default for CustomTheme {
+    fn default() -> Self {
+        Self { background: "#1f2125".into(), text: "#e8eaee".into(), accent: "#6d9ef6".into() }
+    }
+}
+
+impl CustomTheme {
+    /// Each colour as lowercase `#rrggbb`; a colour that isn't one falls back to its default.
+    fn clamped(self) -> Self {
+        let default = Self::default();
+        Self {
+            background: hex_color(&self.background).unwrap_or(default.background),
+            text: hex_color(&self.text).unwrap_or(default.text),
+            accent: hex_color(&self.accent).unwrap_or(default.accent),
+        }
+    }
+}
+
+/// `#RRGGBB` or `rrggbb`, trimmed, as lowercase `#rrggbb`.
+fn hex_color(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    let digits = typed.strip_prefix('#').unwrap_or(typed);
+    (digits.len() == 6 && digits.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", digits.to_ascii_lowercase()))
 }
 
 impl Browser {
@@ -84,6 +137,7 @@ impl Settings {
             list_width: self.list_width.clamp(LIST_WIDTH_RANGE.0, LIST_WIDTH_RANGE.1),
             list_height: self.list_height.clamp(LIST_HEIGHT_RANGE.0, LIST_HEIGHT_RANGE.1),
             jira_site: jira_host(&self.jira_site),
+            custom_theme: self.custom_theme.clamped(),
             ..self
         }
     }
@@ -107,6 +161,8 @@ impl Default for Settings {
             list_width: 640,
             list_height: 860,
             browser: Browser::System,
+            theme: Theme::System,
+            custom_theme: CustomTheme::default(),
             jira_site: String::new(),
         }
     }
@@ -233,6 +289,43 @@ mod tests {
             assert_eq!((settings.organization.as_str(), settings.browser), ("org", expected), "browser {raw}");
         }
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().browser, Browser::System);
+    }
+
+    #[test]
+    fn settings_theme_readsKnownNamesAndFallsBackToSystem() {
+        for (raw, expected) in [
+            ("\"dark\"", Theme::Dark),
+            ("\"light\"", Theme::Light),
+            ("\"highContrast\"", Theme::HighContrast),
+            ("\"custom\"", Theme::Custom),
+            ("\"system\"", Theme::System),
+            ("\"sepia\"", Theme::System),
+            ("null", Theme::System),
+            ("1", Theme::System),
+        ] {
+            let json = format!(r#"{{"organization":"org","theme":{raw}}}"#);
+            let settings = serde_json::from_str::<Settings>(&json).unwrap();
+            assert_eq!((settings.organization.as_str(), settings.theme), ("org", expected), "theme {raw}");
+        }
+        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().theme, Theme::System);
+        assert_eq!(serde_json::to_value(Theme::HighContrast).unwrap(), "highContrast");
+    }
+
+    #[test]
+    fn clamped_customTheme_normalisesHexAndReplacesJunkPerColour() {
+        let json = r##"{"organization":"org","customTheme":{"background":" FFAA00 ","text":"#12345G","accent":"#ABCDEF"}}"##;
+        let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
+        let expected = CustomTheme { background: "#ffaa00".into(), text: CustomTheme::default().text, accent: "#abcdef".into() };
+        assert_eq!((settings.organization.as_str(), settings.custom_theme), ("org", expected));
+    }
+
+    #[test]
+    fn settings_customThemeOfWrongShape_fallsBackToDefaultColours() {
+        for raw in ["null", "\"red\"", "[1,2]", r#"{"background":7}"#, r###"{"background":"##1f2125"}"###] {
+            let json = format!(r#"{{"organization":"org","customTheme":{raw}}}"#);
+            let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
+            assert_eq!((settings.organization.as_str(), settings.custom_theme), ("org", CustomTheme::default()), "customTheme {raw}");
+        }
     }
 
     #[test]
