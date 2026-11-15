@@ -63,18 +63,23 @@ ${StrLoc}
       ${If} $0 = 0
         StrCpy $6 0
         StrCpy $7 $5
-        StrLen $4 "$INSTDIR\rado-mcp.exe"
         ${While} $6 < $2
-          System::Call '*$7(i .r8)'
+          ; the PID and, at offset 4, the start time Restart Manager saw
+          System::Call '*$7(i .r8, l .r3)'
           ; PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
           System::Call 'kernel32::OpenProcess(i 0x00101001, i 0, i r8) p .r9'
           ${If} $9 P<> 0
-            ; kill only a process whose own exe is $INSTDIR\rado-mcp.exe* (checked on the open
-            ; handle): RmGetList also lists processes that merely have the file open, such as
-            ; Explorer's preview pane, and the PID may have been reused since the list was taken
+            ; Kill only a rado-mcp.exe* that is still the process Restart Manager saw, checked on
+            ; the open handle: RmGetList also lists processes that merely have the file open
+            ; (Explorer's preview pane, say), and the PID may have been reused. Not a compare
+            ; with $INSTDIR: run from the Claude desktop app (an MSIX package), the installer
+            ; sees %LOCALAPPDATA% redirected, while the process reports its real path.
+            System::Call 'kernel32::GetProcessTimes(p r9, *l .r4, *l, *l, *l)'
             System::Call 'kernel32::QueryFullProcessImageNameW(p r9, i 0, w .r8, *i ${NSIS_MAX_STRLEN})'
-            StrCpy $8 $8 $4
-            ${If} $8 == "$INSTDIR\rado-mcp.exe"
+            ${GetFileName} $8 $8
+            StrCpy $8 $8 12
+            ${If} $3 == $4
+            ${AndIf} $8 == "rado-mcp.exe"
               System::Call 'kernel32::TerminateProcess(p r9, i 1)'
               System::Call 'kernel32::WaitForSingleObject(p r9, i 5000)'
             ${EndIf}
