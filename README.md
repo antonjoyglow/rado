@@ -119,7 +119,9 @@ npm run app:build    # release exe + NSIS installer under src-tauri/target/relea
 npm run app:update   # build, then update the installed Rado in place and restart it
 ```
 
-The installer updates an existing install in place: it skips Tauri's "uninstall before installing" page and the folder page, keeps your shortcuts and settings, and closes a running Rado first. This comes from `src-tauri/windows/installer.nsi`, Tauri CLI 2.12.4's template with that one change (search it for `Rado:`). After upgrading `@tauri-apps/cli`, re-extract the template and reapply the change.
+The installer updates an existing install in place: it skips Tauri's "uninstall before installing" page and the folder page, keeps your shortcuts and settings, and closes a running Rado first. This comes from `src-tauri/windows/installer.nsi`, Tauri CLI 2.12.4's template with Rado's changes (search it for `Rado:`). After upgrading `@tauri-apps/cli`, re-extract the template and reapply them.
+
+The installer and uninstaller also stop every `rado-mcp.exe` running from the install folder, which takes about 30 seconds (one that won't stop is renamed to `rado-mcp.exe.old` and deleted next time); the Claude sessions that used it lose the `rado` tools until they restart, and new sessions start the new one.
 
 `app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install instead of uninstalling it first, closes a running Rado, and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. To update by hand, run the setup exe with the same flags.
 
