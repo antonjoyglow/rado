@@ -137,8 +137,13 @@ export function mountList(root: HTMLElement): void {
           remember(SETTINGS_TAB_KEY, key);
         })
       : null;
-    if (!on) body.scrollTop = listScroll;
+    if (!on) {
+      body.scrollTop = listScroll;
+      revealTab();
+    }
   };
+  // Larger text can push the selected tab past the strip's edge; a hidden strip can't scroll, so this also runs on return from settings.
+  const revealTab = () => strip.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
@@ -199,8 +204,7 @@ export function mountList(root: HTMLElement): void {
     settingsView?.update(s);
     renderStatus();
     renderBody();
-    // Larger text can push the remembered tab past the strip's edge.
-    if (rescaled) strip.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (rescaled) revealTab();
   });
   setInterval(renderStatus, 1000);
   // Rows opened since the last render change which review is next.
