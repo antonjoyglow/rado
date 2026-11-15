@@ -275,7 +275,7 @@ fn pr_threads(pr: &PullRequest) -> PrThreads {
 
 #[cfg(test)]
 #[allow(non_snake_case)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const ME: &str = "me";
@@ -322,6 +322,11 @@ mod tests {
             "mine": { "issueCount": mine.len(), "nodes": mine }
         }}))
         .unwrap()
+    }
+
+    /// A poll whose PRs all request my review directly.
+    pub fn requested(ids: &[i64]) -> Fetched {
+        parse(&body(ids.iter().map(|&id| node(id, "a", &[ME], &[])).collect(), vec![], vec![])).unwrap()
     }
 
     fn ranked(body: &[u8]) -> Vec<ReviewItem> {

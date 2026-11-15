@@ -1,6 +1,6 @@
 //! Rado's MCP server, for scheduled review agents. It serves the review queue that the Rado app writes after each
-//! poll (`queue.json`) over stdio, and records which PRs already have a draft review. It never reads the PAT;
-//! the review itself goes through the Azure DevOps MCP server.
+//! poll (`queue.json`, in the active workspace's folder) over stdio, and records which PRs already have a draft
+//! review. It never reads the PAT; the review itself goes through the Azure DevOps MCP server.
 
 #[allow(dead_code)]
 #[path = "../queue.rs"]
@@ -39,7 +39,7 @@ fn data_dir() -> PathBuf {
 }
 
 /// One JSON-RPC message in, at most one out; notifications get no reply.
-fn handle(dir: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
+fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => return Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
@@ -54,7 +54,7 @@ fn handle(dir: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
         }),
         "ping" => json!({}),
         "tools/list" => json!({ "tools": tools() }),
-        "tools/call" => call(dir, now, &params),
+        "tools/call" => call(root, now, &params),
         other => return Some(error(id, -32601, &format!("unknown method {other}"))),
     };
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
@@ -95,7 +95,9 @@ fn tools() -> Value {
     ])
 }
 
-fn call(dir: &Path, now: DateTime<Utc>, params: &Value) -> Value {
+fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Value {
+    // Read on every call, so a switch in Rado is followed without restarting this server.
+    let dir = &queue::active_workspace_dir(root).unwrap_or_else(|| root.to_path_buf());
     let outcome = match params["name"].as_str() {
         Some("list_review_queue") => list(dir, now),
         Some("mark_drafted") => mark_drafted(dir, &params["arguments"]),
@@ -267,6 +269,32 @@ mod tests {
         let dir = with_queue("notqueued");
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 99, "commit": "c" }));
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn activeWorkspace_listsAndMarksInItsOwnFolder() {
+        let root = TempDir::new("workspaces");
+        let (a, b) = (queue::workspace_dir(&root.0, "a1"), queue::workspace_dir(&root.0, "b2"));
+        for (dir, id) in [(&a, 1), (&b, 2)] {
+            std::fs::create_dir_all(dir).unwrap();
+            write_json_atomic(&dir.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs: vec![pr(id, "c")] }])).unwrap();
+        }
+        let activate = |id: &str| std::fs::write(root.0.join(queue::SETTINGS_FILE), json!({ "activeWorkspace": id }).to_string()).unwrap();
+
+        activate("b2");
+        assert_eq!(text(&call_tool(&root.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 2);
+        assert_eq!(call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c" })).get("isError"), None);
+        assert!(b.join(DRAFTS_FILE).exists() && !a.join(DRAFTS_FILE).exists());
+
+        activate("a1");
+        assert_eq!(text(&call_tool(&root.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 1);
+    }
+
+    #[test]
+    fn activeWorkspace_unsafeId_fallsBackToTheRootFolder() {
+        let dir = with_queue("unsafe");
+        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"../.."}"#).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "list_review_queue", json!({})).get("isError"), None);
     }
 
     #[test]

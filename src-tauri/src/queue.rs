@@ -2,13 +2,31 @@
 //! serde_json and chrono, so the server can include it without Tauri.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const QUEUE_FILE: &str = "queue.json";
 pub const DRAFTS_FILE: &str = "agent-drafts.json";
+pub const SETTINGS_FILE: &str = "settings.json";
+
+/// Letters, digits and dashes only, so an id read from a hand-edited file can't point outside the data folder.
+pub fn is_workspace_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Where a workspace keeps its queue, drafts, votes and hidden PRs.
+pub fn workspace_dir(root: &Path, id: &str) -> PathBuf {
+    root.join("workspaces").join(id)
+}
+
+/// The active workspace's folder, named by `activeWorkspace` in the settings file; None before the first one exists.
+pub fn active_workspace_dir(root: &Path) -> Option<PathBuf> {
+    let settings: serde_json::Value = read_json(&root.join(SETTINGS_FILE))?;
+    let id = settings["activeWorkspace"].as_str().filter(|id| is_workspace_id(id))?;
+    Some(workspace_dir(root, id))
+}
 
 /// The PRs waiting on my review at the last successful poll: not hidden, and not my own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
