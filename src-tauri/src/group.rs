@@ -47,8 +47,8 @@ pub struct ReviewRow {
     pub ticket: Option<String>,
 }
 
-/// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`, `CVE-2024-3094`.
-const NOT_KEYS: [&str; 4] = ["UTF", "ISO", "SHA", "CVE"];
+/// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`.
+const NOT_KEYS: [&str; 3] = ["UTF", "ISO", "SHA"];
 
 /// The first `KEY-123` in a branch, upper-cased: letters and digits starting with a letter, a dash and digits,
 /// standing alone between non-alphanumeric characters. An upper-case key counts anywhere. With `any_case`, a
@@ -75,7 +75,8 @@ pub fn ticket_key(branch: &str, any_case: bool) -> Option<String> {
         while bytes.get(end).is_some_and(u8::is_ascii_digit) {
             end += 1;
         }
-        if end == digits || alnum(end) {
+        // `CVE-2024-3094`: a second dash and digits make an id, not a key.
+        if end == digits || alnum(end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
             return None;
         }
         let upper = !prefix.bytes().any(|b| b.is_ascii_lowercase());
@@ -398,6 +399,7 @@ mod tests {
             ("feature/ISO-8601", None),
             ("SHA-256-pin", None),
             ("security/CVE-2024-3094", None),
+            ("feature/CVE-42-patch", Some("CVE-42")),
             ("feature/abc-12-login", None),
             ("feature/NOTE-", None),
             ("release-2026", None),
