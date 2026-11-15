@@ -73,6 +73,8 @@ export interface Workspace {
   id: string;
   name: string;
   azureDevOps: { organization: string; teams: string[] };
+  /** `repos` (`owner/name`): every open PR there, other than drafts and mine, counts as waiting on my review. */
+  github: { repos: string[] };
   tracker: Tracker;
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Settings, Workspace } from "./api";
 import { activeWorkspace, parseList, stepWorkspace, trackerFor, trackerKeys, trackerName, trackerValue, workspaceStep } from "./workspaces";
 
-const ws = (id: string, tracker: Workspace["tracker"] = { kind: "none" }): Workspace => ({ id, name: id.toUpperCase(), azureDevOps: { organization: "", teams: [] }, tracker });
+const ws = (id: string, tracker: Workspace["tracker"] = { kind: "none" }): Workspace => ({ id, name: id.toUpperCase(), azureDevOps: { organization: "", teams: [] }, github: { repos: [] }, tracker });
 const list = [ws("a"), ws("b"), ws("c")];
 const key = (k: string, mods: Partial<Record<"ctrlKey" | "altKey" | "shiftKey" | "metaKey", boolean>> = {}) =>
   ({ key: k, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });

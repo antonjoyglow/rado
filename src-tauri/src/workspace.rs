@@ -9,8 +9,10 @@ pub struct Workspace {
     /// Stable across renames; names this workspace's keyring entries and data folder.
     pub id: String,
     pub name: String,
-    /// On once a PAT is saved for this workspace. The GitHub source is just its token.
+    /// On once a PAT is saved for this workspace.
     pub azure_dev_ops: AdoSource,
+    /// On once a GitHub token is saved for this workspace.
+    pub github: GithubSource,
     #[serde(deserialize_with = "lenient_tracker")]
     pub tracker: Tracker,
 }
@@ -21,6 +23,13 @@ pub struct AdoSource {
     pub organization: String,
     /// Team reviewers whose PRs count as mine, by name (`TeamAlpha` matches `[contoso]\TeamAlpha`).
     pub teams: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GithubSource {
+    /// Repos (`owner/name`) whose open PRs, other than drafts and mine, all count as waiting on my review.
+    pub repos: Vec<String>,
 }
 
 /// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
@@ -94,15 +103,40 @@ pub fn lenient_workspaces<'de, D: serde::Deserializer<'de>>(deserializer: D) -> 
 }
 
 impl Workspace {
+    /// Drops watched repos that aren't `owner/name`; `bad_repo` names them before a save.
     pub fn clamped(self) -> Self {
         let teams = self.azure_dev_ops.teams.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        let mut repos: Vec<String> = Vec::new();
+        for repo in self.github.repos.iter().filter_map(|r| github_repo(r)) {
+            if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                repos.push(repo);
+            }
+        }
         Self {
             name: self.name.trim().to_string(),
             azure_dev_ops: AdoSource { organization: self.azure_dev_ops.organization.trim().to_string(), teams },
+            github: GithubSource { repos },
             tracker: self.tracker.clamped(),
             ..self
         }
     }
+
+    /// The first typed watched repo that isn't `owner/name` or its link.
+    pub fn bad_repo(&self) -> Option<&str> {
+        self.github.repos.iter().map(|r| r.trim()).find(|r| !r.is_empty() && github_repo(r).is_none())
+    }
+}
+
+/// `owner/name` from a typed repo or its link: ` https://github.com/acme/web.app/pulls ` gives `acme/web.app`.
+/// `None` for anything else, since it goes into a search query.
+fn github_repo(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
+    let path = without_scheme.strip_prefix("github.com/").or_else(|| without_scheme.strip_prefix("www.github.com/")).unwrap_or(without_scheme);
+    let mut segments = path.split('/');
+    let (owner, name) = (segments.next()?, segments.next()?);
+    let safe = |s: &str| !s.is_empty() && !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    (safe(owner) && safe(name)).then(|| format!("{owner}/{name}"))
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
@@ -152,6 +186,7 @@ impl Legacy {
             id,
             name,
             azure_dev_ops: AdoSource { organization: self.organization, teams: self.teams },
+            github: GithubSource::default(),
             tracker: Tracker::Jira { site: self.jira_site, keys: Vec::new() },
         }
         .clamped()
@@ -292,6 +327,26 @@ mod tests {
         let file: File = serde_json::from_str(json).unwrap();
         assert_eq!(file.workspaces.iter().map(|w| (w.id.as_str(), w.name.as_str())).collect::<Vec<_>>(), [("a1", "Acme"), ("b2", "Ok")]);
         assert_eq!(file.workspaces[1].tracker, Tracker::None);
+    }
+
+    #[test]
+    fn workspace_githubRepos_keepOwnerAndNameAndRejectTheRest() {
+        let with = |repos: &[&str]| Workspace { github: GithubSource { repos: repos.iter().map(|r| r.to_string()).collect() }, ..Workspace::default() };
+        let good = with(&[" coding-tree-io/hoopwise.ai ", "https://github.com/acme/web/pulls", "github.com/Acme/Web", "", "o/r_1"]);
+        assert_eq!(good.bad_repo(), None);
+        assert_eq!(good.clamped().github.repos, ["coding-tree-io/hoopwise.ai", "acme/web", "o/r_1"]);
+        for bad in ["hoopwise.ai", "acme/web app", "acme/", "acme/.x", "o/r:x"] {
+            let typed = with(&["o/r", bad]);
+            assert_eq!(typed.bad_repo(), Some(bad));
+            assert_eq!(typed.clamped().github.repos, ["o/r"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn workspace_withoutGithub_loadsWithNoReposAndWritesThem() {
+        let ws: Workspace = serde_json::from_str(r#"{"id":"a1","name":"A","azureDevOps":{"organization":"o","teams":[]}}"#).unwrap();
+        assert!(ws.github.repos.is_empty());
+        assert_eq!(serde_json::to_value(&ws).unwrap()["github"], serde_json::json!({ "repos": [] }));
     }
 
     #[test]
