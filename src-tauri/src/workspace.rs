@@ -56,8 +56,8 @@ impl Tracker {
 
     fn clamped(self) -> Self {
         let tracker = match self {
-            Tracker::Jira { site, keys } => Tracker::Jira { site: jira_host(&site), keys: clamp_keys(keys) },
-            Tracker::Linear { workspace, keys } => Tracker::Linear { workspace: linear_slug(&workspace), keys: clamp_keys(keys) },
+            Tracker::Jira { site, keys } => Tracker::Jira { site: jira_host(&site), keys },
+            Tracker::Linear { workspace, keys } => Tracker::Linear { workspace: linear_slug(&workspace), keys },
             Tracker::None => Tracker::None,
         };
         match &tracker {
@@ -65,18 +65,6 @@ impl Tracker {
             _ => tracker,
         }
     }
-}
-
-/// Trimmed, upper-cased and without blanks or repeats: ` hoo, Hoo ` gives `HOO`.
-fn clamp_keys(keys: Vec<String>) -> Vec<String> {
-    let mut clamped: Vec<String> = Vec::new();
-    for key in keys {
-        let key = key.trim().to_ascii_uppercase();
-        if !key.is_empty() && !clamped.contains(&key) {
-            clamped.push(key);
-        }
-    }
-    clamped
 }
 
 /// Junk keys are no keys, so the tracker itself still loads.
@@ -261,9 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn tracker_keys_areTrimmedUpperCasedAndUnique() {
-        let typed = Tracker::Linear { workspace: "acme".into(), keys: vec![" hoo ".into(), "".into(), "Hoo".into(), "eng".into()] };
-        assert_eq!(typed.clamped(), Tracker::Linear { workspace: "acme".into(), keys: vec!["HOO".into(), "ENG".into()] });
+    fn tracker_emptyKeys_areStillWritten() {
+        assert_eq!(serde_json::to_value(jira("acme.atlassian.net")).unwrap()["keys"], serde_json::json!([]));
     }
 
     #[test]

@@ -51,7 +51,8 @@ pub struct ReviewRow {
 const NOT_KEYS: [&str; 3] = ["UTF", "ISO", "SHA"];
 
 /// The first `KEY-123` in a branch, upper-cased. With team `keys`, only those count, in any case, at the start
-/// or after `/`, `-` or `_`; `hoo-342-343-title` gives the first number, `HOO-342`. Without them: letters and
+/// or after `/`, `-` or `_`; `hoo-342-343-title` gives the first number, `HOO-342`, and Jira's `MY_PROJ-12`
+/// counts whole. Without them: letters and
 /// digits starting with a letter, a dash and digits, standing alone between non-alphanumeric characters. An
 /// upper-case key counts anywhere. With `any_case`, a lower-case one counts too in Linear's default shape,
 /// `anton/eng-123-title`: letters only, right after a `/`, and followed by more name. `release-2026` and
@@ -100,7 +101,7 @@ fn team_key(branch: &str, keys: &[String]) -> Option<String> {
             return None;
         }
         let mut i = start;
-        while alnum(i) {
+        while alnum(i) || bytes.get(i) == Some(&b'_') {
             i += 1;
         }
         let prefix = &branch[start..i];
@@ -499,9 +500,14 @@ mod tests {
 
     #[test]
     fn ticketKey_teamKeys_matchAnyCaseAtABoundaryOnly() {
-        let keys = ["HOO".to_string(), "ABC".to_string()];
+        let keys = ["HOO".to_string(), "ABC".to_string(), "MY_PROJ".to_string()];
         for (branch, key) in [
             ("feature/ABC-12-login", Some("ABC-12")),
+            ("feature/MY_PROJ-12", Some("MY_PROJ-12")),
+            ("feature/proj-12", None),
+            ("bugfix/HOO-7_null-check", Some("HOO-7")),
+            ("feature/über-hoo-5", Some("HOO-5")),
+            ("feature/ühoo-5", None),
             ("feature/login-abc-12", Some("ABC-12")),
             ("feature/x_Hoo-7", Some("HOO-7")),
             ("chore/node-18-upgrade", None),

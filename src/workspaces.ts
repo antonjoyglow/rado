@@ -206,13 +206,18 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     // The chosen kind stays on screen while its field is still empty, though until then the saved tracker is none.
     let kind = workspace.tracker.kind;
     let keys = trackerKeys(workspace.tracker);
+    const chosen = () => TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
     const saveTracker = (target: HTMLElement) => {
       const before = workspace.tracker;
       const sent = trackerFor(kind, trackerField.value, keys);
       workspace.tracker = sent;
+      const held = sent.kind === "none" && keys.length > 0;
       // A rejected value must not ride along with the next save of another field, nor undo a chip clicked since.
-      void api.saveWorkspace(workspace).then(() => ok(target), (e) => {
-        if (workspace.tracker === sent) workspace.tracker = before;
+      void api.saveWorkspace(workspace).then(() => ok(target, held ? `Not kept until the ${chosen().field} is set` : undefined), (e) => {
+        if (workspace.tracker === sent) {
+          workspace.tracker = before;
+          if (before.kind !== "none") keysField.value = (keys = before.keys).join(", ");
+        }
         fail(target, e);
       });
     };
@@ -237,12 +242,11 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       },
     }, t.name));
     const showTracker = () => {
-      const chosen = TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
       trackerChips.forEach((c, i) => (c.dataset.on = String(TRACKERS[i].kind === kind)));
       trackerField.hidden = kind === "none";
       keysLabel.hidden = kind === "none";
-      trackerField.ariaLabel = chosen.field;
-      trackerField.placeholder = chosen.placeholder;
+      trackerField.ariaLabel = chosen().field;
+      trackerField.placeholder = chosen().placeholder;
     };
     showTracker();
 
