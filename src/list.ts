@@ -72,7 +72,7 @@ function tabList<K extends string>(
 const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
 const THEMES: [Theme, string][] = [["system", "System"], ["dark", "Dark"], ["light", "Light"], ["highContrast", "High contrast"]];
-const LIST_SIZES:[string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
+const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
 
 export function mountList(root: HTMLElement): void {
   // Until the first snapshot brings the saved theme.
