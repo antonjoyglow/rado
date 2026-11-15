@@ -172,7 +172,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
 
   const buildEditor = (original: Workspace, saved: Saved) => {
     const workspace: Workspace = structuredClone(original);
-    const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), keys: note(), token: note() };
+    const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), keys: note(), token: note(), repos: note() };
     const save = (target: HTMLElement) => api.saveWorkspace(workspace).then(() => ok(target), (e) => fail(target, e));
 
     const name = h("input", {
@@ -198,6 +198,19 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     const org = h("input", {
       type: "text", ariaLabel: "Organization", value: workspace.azureDevOps.organization, placeholder: "yourorg, as in dev.azure.com/yourorg",
       onchange: () => { workspace.azureDevOps.organization = org.value.trim(); void save(n.org); },
+    });
+    const repos = h("input", {
+      type: "text", ariaLabel: "Watched repos", value: workspace.github.repos.join(", "), placeholder: "owner/name, as in github.com/owner/name",
+      onchange: () => {
+        const before = workspace.github;
+        const sent = { repos: parseList(repos.value) };
+        workspace.github = sent;
+        // A rejected repo must not ride along with the next save of another field; a failed write still changed it.
+        void api.saveWorkspace(workspace).then(() => ok(n.repos), (e) => {
+          if (workspace.github === sent && String(e).startsWith("Not saved")) workspace.github = before;
+          fail(n.repos, e);
+        });
+      },
     });
     const teams = h("input", {
       type: "text", ariaLabel: "My teams", value: workspace.azureDevOps.teams.join(", "), placeholder: "TeamAlpha",
@@ -277,6 +290,8 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
       h("h2", {}, "GitHub"),
       h("label", {}, caption("Token", n.token), secret("GitHub token", "Paste a token (repo, read:org)", saved.githubToken, n.token, (v) => api.saveGithubToken(workspace.id, v))),
+      h("label", {}, caption("Watched repos (comma-separated)", n.repos), repos,
+        h("span", { class: "hint" }, "Every open PR there counts as waiting on your review, except drafts and yours")),
       h("h2", {}, "Tracker"),
       // Not <label>: a label forwards clicks on its caption to its first button.
       h("div", { class: "field" }, caption("Links ticket keys in branch names to their issues", n.tracker), h("span", { class: "inline" }, ...trackerChips, trackerField)),

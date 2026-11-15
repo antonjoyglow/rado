@@ -237,7 +237,7 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
     let github = async {
         match github_token.as_deref() {
             None => Poll::Off,
-            Some(token) => match github::fetch(token).await {
+            Some(token) => match github::fetch(token, &workspace.github.repos).await {
                 Ok(fetched) => Poll::Fresh(fetched),
                 Err(error) => Poll::Failed(format!("GitHub: {error}")),
             },
@@ -772,12 +772,15 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
     })
 }
 
-/// Saves a workspace's name, Azure DevOps organization and teams, and tracker.
+/// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker.
 #[tauri::command]
 fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
     let mut refetch = false;
     let typed_tracker = workspace.tracker != Tracker::None;
     let result = edit_workspaces(&app, |s| {
+        if let Some(repo) = workspace.bad_repo() {
+            return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
+        }
         let mut workspace = workspace.clamped();
         if typed_tracker && workspace.tracker == Tracker::None {
             return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
@@ -787,17 +790,22 @@ fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
         if workspace.name.is_empty() {
             workspace.name.clone_from(&slot.name);
         }
+        // A changed source is re-polled, and its next good poll is a baseline, so new matches don't each notify.
         let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
+        let github_changed = slot.github != workspace.github;
         *slot = workspace;
-        if ado_changed {
-            let id = slot.id.clone();
-            if let Some(state) = s.state_of(&id) {
+        let id = slot.id.clone();
+        if let Some(state) = s.state_of(&id) {
+            if ado_changed {
                 state.known_actionable.remove(&score::Provider::Ado);
             }
-            if active {
-                s.credentials_generation += 1;
-                refetch = true;
+            if github_changed {
+                state.known_actionable.remove(&score::Provider::GitHub);
             }
+        }
+        if active && (ado_changed || github_changed) {
+            s.credentials_generation += 1;
+            refetch = true;
         }
         Ok(())
     });

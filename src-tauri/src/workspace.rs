@@ -9,9 +9,12 @@ pub struct Workspace {
     /// Stable across renames; names this workspace's keyring entries and data folder.
     pub id: String,
     pub name: String,
-    /// On once a PAT is saved for this workspace. The GitHub source is just its token.
+    /// On once a PAT is saved for this workspace.
     pub azure_dev_ops: AdoSource,
-    #[serde(deserialize_with = "lenient_tracker")]
+    /// On once a GitHub token is saved for this workspace.
+    #[serde(deserialize_with = "lenient")]
+    pub github: GithubSource,
+    #[serde(deserialize_with = "lenient")]
     pub tracker: Tracker,
 }
 
@@ -21,6 +24,13 @@ pub struct AdoSource {
     pub organization: String,
     /// Team reviewers whose PRs count as mine, by name (`TeamAlpha` matches `[contoso]\TeamAlpha`).
     pub teams: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GithubSource {
+    /// Repos (`owner/name`) whose open PRs, other than drafts and mine, all count as waiting on my review.
+    pub repos: Vec<String>,
 }
 
 /// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
@@ -33,13 +43,13 @@ pub enum Tracker {
     /// `site` is the host, such as `acme.atlassian.net`.
     Jira {
         site: String,
-        #[serde(default, deserialize_with = "lenient_keys")]
+        #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
     /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
     Linear {
         workspace: String,
-        #[serde(default, deserialize_with = "lenient_keys")]
+        #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
 }
@@ -67,14 +77,9 @@ impl Tracker {
     }
 }
 
-/// Junk keys are no keys, so the tracker itself still loads.
-fn lenient_keys<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+/// A malformed part loads as its default, so the rest of the workspace (or tracker) survives.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
-}
-
-fn lenient_tracker<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Tracker, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 /// A malformed entry keeps its id and name, so its secrets and data folder stay reachable.
@@ -94,15 +99,49 @@ pub fn lenient_workspaces<'de, D: serde::Deserializer<'de>>(deserializer: D) -> 
 }
 
 impl Workspace {
+    /// Drops watched repos that aren't `owner/name`; `bad_repo` names them before a save.
     pub fn clamped(self) -> Self {
         let teams = self.azure_dev_ops.teams.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        let mut repos: Vec<String> = Vec::new();
+        for repo in self.github.repos.iter().filter_map(|r| github_repo(r)) {
+            if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                repos.push(repo);
+            }
+        }
         Self {
             name: self.name.trim().to_string(),
             azure_dev_ops: AdoSource { organization: self.azure_dev_ops.organization.trim().to_string(), teams },
+            github: GithubSource { repos },
             tracker: self.tracker.clamped(),
             ..self
         }
     }
+
+    /// The first typed watched repo that isn't `owner/name` or its link.
+    pub fn bad_repo(&self) -> Option<&str> {
+        self.github.repos.iter().map(|r| r.trim()).find(|r| !r.is_empty() && github_repo(r).is_none())
+    }
+}
+
+/// `owner/name` from a typed repo or its github.com link: ` https://GitHub.com/acme/web.app.git ` gives
+/// `acme/web.app`. `None` for anything else, another host included, since it goes into a search query.
+fn github_repo(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
+    let mut segments = without_scheme.split('/').peekable();
+    // Owners have no dots, so a first segment with one is a host.
+    if segments.peek()?.contains('.') {
+        let host = segments.next()?;
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+            return None;
+        }
+    }
+    let owner = segments.next()?;
+    let name = segments.next()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    let owner_ok = !owner.is_empty() && owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let name_ok = !name.is_empty() && !name.starts_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    (owner_ok && name_ok).then(|| format!("{owner}/{name}"))
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
@@ -152,6 +191,7 @@ impl Legacy {
             id,
             name,
             azure_dev_ops: AdoSource { organization: self.organization, teams: self.teams },
+            github: GithubSource::default(),
             tracker: Tracker::Jira { site: self.jira_site, keys: Vec::new() },
         }
         .clamped()
@@ -265,7 +305,7 @@ mod tests {
         let tracker = |json: &str| {
             #[derive(Deserialize)]
             struct File {
-                #[serde(deserialize_with = "lenient_tracker")]
+                #[serde(deserialize_with = "lenient")]
                 tracker: Tracker,
             }
             serde_json::from_str::<File>(&format!(r#"{{"tracker":{json}}}"#)).unwrap().tracker
@@ -292,6 +332,43 @@ mod tests {
         let file: File = serde_json::from_str(json).unwrap();
         assert_eq!(file.workspaces.iter().map(|w| (w.id.as_str(), w.name.as_str())).collect::<Vec<_>>(), [("a1", "Acme"), ("b2", "Ok")]);
         assert_eq!(file.workspaces[1].tracker, Tracker::None);
+    }
+
+    #[test]
+    fn workspace_githubRepos_keepOwnerAndNameAndRejectTheRest() {
+        let with = |repos: &[&str]| Workspace { github: GithubSource { repos: repos.iter().map(|r| r.to_string()).collect() }, ..Workspace::default() };
+        let good = with(&[
+            " coding-tree-io/hoopwise.ai ",
+            "https://github.com/acme/web/pulls",
+            "github.com/Acme/Web",
+            "",
+            "o/r_1",
+            "https://GitHub.com/acme/api.git",
+            "WWW.github.com/x-y/z",
+        ]);
+        assert_eq!(good.bad_repo(), None);
+        assert_eq!(good.clamped().github.repos, ["coding-tree-io/hoopwise.ai", "acme/web", "o/r_1", "acme/api", "x-y/z"]);
+        for bad in ["hoopwise.ai", "acme/web app", "acme/", "acme/.x", "o/r:x", "https://gitlab.com/acme/web", "api.github.com/repos/o/r", "a_b/c"] {
+            let typed = with(&["o/r", bad]);
+            assert_eq!(typed.bad_repo(), Some(bad));
+            assert_eq!(typed.clamped().github.repos, ["o/r"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn workspace_malformedGithub_loadsWithNoReposAndKeepsTheRest() {
+        for github in ["null", "7", r#"{"repos":["a/b",5]}"#] {
+            let json = format!(r#"{{"id":"a1","name":"A","azureDevOps":{{"organization":"o","teams":[]}},"github":{github}}}"#);
+            let ws: Workspace = serde_json::from_str(&json).unwrap();
+            assert_eq!((ws.azure_dev_ops.organization.as_str(), ws.github.repos.len()), ("o", 0), "{github}");
+        }
+    }
+
+    #[test]
+    fn workspace_withoutGithub_loadsWithNoReposAndWritesThem() {
+        let ws: Workspace = serde_json::from_str(r#"{"id":"a1","name":"A","azureDevOps":{"organization":"o","teams":[]}}"#).unwrap();
+        assert!(ws.github.repos.is_empty());
+        assert_eq!(serde_json::to_value(&ws).unwrap()["github"], serde_json::json!({ "repos": [] }));
     }
 
     #[test]
