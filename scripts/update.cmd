@@ -9,7 +9,7 @@ call scripts\msvc.cmd npx tauri build || exit /b 1
 set "SETUP="
 for /f "delims=" %%f in ('dir /b /o-d "%CARGO_TARGET_DIR%\release\bundle\nsis\Rado_*_x64-setup.exe"') do if not defined SETUP set "SETUP=%%f"
 if not defined SETUP (echo No installer found under %CARGO_TARGET_DIR%\release\bundle\nsis & exit /b 1)
-echo Updating Rado with %SETUP% ...
+echo Updating Rado with %SETUP% (about 30 seconds more if a Claude session runs the installed rado-mcp.exe) ...
 start "" /wait "%CARGO_TARGET_DIR%\release\bundle\nsis\%SETUP%" /P /UPDATE /R
 if errorlevel 1 (echo The installer failed with exit code %errorlevel% & exit /b 1)
 echo Rado is updated and running.

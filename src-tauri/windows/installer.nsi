@@ -32,6 +32,53 @@ ManifestDPIAwareness PerMonitorV2
 ${StrCase}
 ${StrLoc}
 
+; Rado: every Claude Code session keeps its own rado-mcp.exe running from $INSTDIR, which would
+; make copying or deleting it fail. Stop those copies with Restart Manager, the way CheckIfAppIsRunning
+; closes Rado; it matches by path, so a rado-mcp.exe running from anywhere else is left alone. A copy
+; that still holds the file is renamed to *.old (Windows allows renaming a running exe), and the
+; next run deletes it. Never aborts: a running MCP server must not fail the install.
+; One session for all files: Restart Manager waits about 30 s per shutdown call before it forces a
+; console process, however many processes the call stops.
+!macro RadoFreeMcpServer
+  !insertmacro RestartManager_StartSession $R0
+  ${If} $R0 != ""
+    ${If} ${FileExists} "$INSTDIR\rado-mcp.exe"
+      !insertmacro RestartManager_RegisterFile $R0 "$INSTDIR\rado-mcp.exe"
+    ${EndIf}
+    FindFirst $1 $2 "$INSTDIR\rado-mcp.exe*.old"
+    ${DoWhile} $2 != ""
+      !insertmacro RestartManager_RegisterFile $R0 "$INSTDIR\$2"
+      FindNext $1 $2
+    ${Loop}
+    FindClose $1
+    System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
+    ${If} $0 = ${ERROR_MORE_DATA}
+      DetailPrint "Stopping the Rado MCP server (rado-mcp.exe) that Claude sessions run; this takes about 30 seconds"
+      !insertmacro RestartManager_Shutdown $R0
+    ${EndIf}
+    !insertmacro RestartManager_EndSession $R0
+  ${EndIf}
+  FindFirst $1 $2 "$INSTDIR\rado-mcp.exe*.old"
+  ${DoWhile} $2 != ""
+    Delete "$INSTDIR\$2"
+    FindNext $1 $2
+  ${Loop}
+  FindClose $1
+  ${If} ${FileExists} "$INSTDIR\rado-mcp.exe"
+    ClearErrors
+    Delete "$INSTDIR\rado-mcp.exe"
+    ${If} ${Errors}
+      ClearErrors
+      Rename "$INSTDIR\rado-mcp.exe" "$INSTDIR\rado-mcp.exe.old"
+      ${If} ${Errors}
+        ; an older *.old is still running and couldn't be deleted
+        System::Call 'kernel32::GetTickCount()i.r3'
+        Rename "$INSTDIR\rado-mcp.exe" "$INSTDIR\rado-mcp.exe.$3.old"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 {{#if installer_hooks}}
 !include "{{installer_hooks}}"
 {{/if}}
@@ -692,6 +739,8 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; Rado: stop or move aside a running rado-mcp.exe so the copy below can't fail
+  !insertmacro RadoFreeMcpServer
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -829,6 +878,9 @@ Section Uninstall
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; Rado: stop or move aside a running rado-mcp.exe; a moved copy that is still running goes at reboot
+  !insertmacro RadoFreeMcpServer
+  Delete /REBOOTOK "$INSTDIR\rado-mcp.exe.old"
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
