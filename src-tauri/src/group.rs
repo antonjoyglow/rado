@@ -47,13 +47,14 @@ pub struct ReviewRow {
     pub ticket: Option<String>,
 }
 
-/// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`.
-const NOT_KEYS: [&str; 3] = ["UTF", "ISO", "SHA"];
+/// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`, `CVE-2024-3094`.
+const NOT_KEYS: [&str; 4] = ["UTF", "ISO", "SHA", "CVE"];
 
 /// The first `KEY-123` in a branch, upper-cased: letters and digits starting with a letter, a dash and digits,
-/// standing alone between non-alphanumeric characters. An upper-case key counts anywhere. With `any_case` (Linear
-/// names branches `anton/abc-123-title`), a lower-case one counts too, but only at the start of a path segment and
-/// followed by more name, so `release-2026` and `renovate/node-20` stay plain branches.
+/// standing alone between non-alphanumeric characters. An upper-case key counts anywhere. With `any_case`, a
+/// lower-case one counts too in Linear's default shape, `anton/eng-123-title`: letters only, right after a `/`,
+/// and followed by more name. `release-2026` and `renovate/node-20` stay plain branches; `chore/node-18-upgrade`
+/// still reads as a key, which only the tracker's team keys could rule out.
 pub fn ticket_key(branch: &str, any_case: bool) -> Option<String> {
     let bytes = branch.as_bytes();
     let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
@@ -78,9 +79,11 @@ pub fn ticket_key(branch: &str, any_case: bool) -> Option<String> {
             return None;
         }
         let upper = !prefix.bytes().any(|b| b.is_ascii_lowercase());
-        let segment_start = start == 0 || bytes[start - 1] == b'/';
-        let named_on = matches!(bytes.get(end), Some(b'-' | b'_'));
-        (upper || (any_case && segment_start && named_on)).then(|| branch[start..end].to_ascii_uppercase())
+        let linear_shape = start > 0
+            && bytes[start - 1] == b'/'
+            && prefix.bytes().all(|b| b.is_ascii_alphabetic())
+            && matches!(bytes.get(end), Some(b'-' | b'_'));
+        (upper || (any_case && linear_shape)).then(|| branch[start..end].to_ascii_uppercase())
     })
 }
 
@@ -394,6 +397,7 @@ mod tests {
             ("fix/UTF-8", None),
             ("feature/ISO-8601", None),
             ("SHA-256-pin", None),
+            ("security/CVE-2024-3094", None),
             ("feature/abc-12-login", None),
             ("feature/NOTE-", None),
             ("release-2026", None),
@@ -409,17 +413,19 @@ mod tests {
     fn ticketKey_anyCase_takesLinearBranchesAndUpperCasesTheKey() {
         for (branch, key) in [
             ("anton/eng-123-add-login", Some("ENG-123")),
-            ("eng-7-fix", Some("ENG-7")),
             ("anton/Eng-12_title", Some("ENG-12")),
             ("feature/ABC-12", Some("ABC-12")),
             ("anton/eng-123", None),
+            ("eng-7-fix", None),
+            ("phase-2-rollout", None),
+            ("release/v2-1-hotfix", None),
             ("release-2026", None),
             ("renovate/node-20", None),
             ("dependabot/npm_and_yarn/vite-5.4.2", None),
             ("upgrade-node-20-lts", None),
             ("fix/utf-8-decoding", None),
             ("docs/iso-8601-dates", None),
-            ("sha-256-pin", None),
+            ("ci/sha-256-pin", None),
             ("anton/add-eng-12-x", None),
         ] {
             assert_eq!(ticket_key(branch, true).as_deref(), key, "{branch}");

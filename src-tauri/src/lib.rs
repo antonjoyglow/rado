@@ -776,8 +776,12 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
 #[tauri::command]
 fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
     let mut refetch = false;
+    let typed_tracker = workspace.tracker != Tracker::None;
     let result = edit_workspaces(&app, |s| {
         let mut workspace = workspace.clamped();
+        if typed_tracker && workspace.tracker == Tracker::None {
+            return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
+        }
         let active = workspace.id == s.settings.active_workspace;
         let slot = s.settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("That workspace is gone")?;
         if workspace.name.is_empty() {

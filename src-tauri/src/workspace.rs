@@ -92,7 +92,7 @@ impl Workspace {
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
-pub fn jira_host(site: &str) -> String {
+fn jira_host(site: &str) -> String {
     let site = site.trim();
     let without_scheme = site.find("://").map_or(site, |i| &site[i + 3..]);
     without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default().to_string()
@@ -100,7 +100,7 @@ pub fn jira_host(site: &str) -> String {
 
 /// The slug of a typed Linear workspace: `https://linear.app/Acme/issue/ABC-1` and ` acme ` give `acme`.
 /// Empty when it holds anything but letters, digits, `-` and `_`, since it goes into a URL.
-pub fn linear_slug(typed: &str) -> String {
+fn linear_slug(typed: &str) -> String {
     let typed = typed.trim();
     let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
     let mut segments = without_scheme.split(['/', '?', '#', '\\']);

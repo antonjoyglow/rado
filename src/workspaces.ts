@@ -205,7 +205,15 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     let kind = workspace.tracker.kind;
     const trackerField = h("input", {
       type: "text", value: trackerValue(workspace.tracker),
-      onchange: () => { workspace.tracker = trackerFor(kind, trackerField.value); void save(n.tracker); },
+      onchange: () => {
+        const before = workspace.tracker;
+        workspace.tracker = trackerFor(kind, trackerField.value);
+        // A rejected value must not ride along with the next save of another field.
+        api.saveWorkspace(workspace).then(() => ok(n.tracker), (e) => {
+          workspace.tracker = before;
+          fail(n.tracker, e);
+        });
+      },
     });
     const trackerChips = TRACKERS.map((t) => h("button", {
       type: "button",

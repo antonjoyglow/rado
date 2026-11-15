@@ -250,7 +250,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         void api.openPr(m.id);
       },
     }, prLabel(m)));
-  const ticket = tracker && item.ticket && h("button", {
+  const ticket = item.ticket && h("button", {
     class: "member ticket",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
