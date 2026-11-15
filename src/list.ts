@@ -1,7 +1,7 @@
 import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
 import { activeWorkspace, isTyping, jiraSite, stepWorkspace, switchWorkspace, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
@@ -191,12 +191,16 @@ export function mountList(root: HTMLElement): void {
 
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
+    const rescaled = s.settings.textScale !== snapshot?.settings.textScale;
     snapshot = s;
     applyTheme(document.documentElement, s.settings.theme, s.settings.customTheme);
+    document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
     workspace.render(s);
     settingsView?.update(s);
     renderStatus();
     renderBody();
+    // Larger text can push the remembered tab past the strip's edge.
+    if (rescaled) strip.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
   setInterval(renderStatus, 1000);
   // Rows opened since the last render change which review is next.
@@ -335,7 +339,7 @@ function renderSettings(
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), scale: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), scale: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -370,6 +374,30 @@ function renderSettings(
     const percent = parseScale(scale.value);
     if (percent === null) fail(n.scale, `Use a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
     else setScale(percent);
+  };
+
+  const textScale = h("input", { type: "number", min: String(TEXT_SCALE[0]), max: String(TEXT_SCALE[1]), value: String(settings.textScale), class: "scale", ariaLabel: "Text size in percent" });
+  const textChips = TEXT_CHOICES.map((p) =>
+    h("button", { type: "button", class: "chip", onclick: () => setTextScale(p) }, `${p}%`),
+  );
+  const textSmaller = h("button", { type: "button", title: "Smaller text", onclick: () => setTextScale(stepScale(settings.textScale, -1, TEXT_STEP, TEXT_SCALE)) }, "−");
+  const textBigger = h("button", { type: "button", title: "Bigger text", onclick: () => setTextScale(stepScale(settings.textScale, 1, TEXT_STEP, TEXT_SCALE)) }, "+");
+  const showTextScale = (percent: number) => {
+    textScale.value = String(percent);
+    textChips.forEach((c, i) => (c.dataset.on = String(TEXT_CHOICES[i] === percent)));
+    textSmaller.disabled = percent <= TEXT_SCALE[0];
+    textBigger.disabled = percent >= TEXT_SCALE[1];
+  };
+  const setTextScale = (percent: number) => {
+    settings.textScale = percent;
+    showTextScale(percent);
+    void save(n.text);
+  };
+  showTextScale(settings.textScale);
+  textScale.onchange = () => {
+    const percent = parseWhole(textScale.value, TEXT_SCALE);
+    if (percent === null) fail(n.text, `Use a whole number from ${TEXT_SCALE[0]} to ${TEXT_SCALE[1]}.`);
+    else setTextScale(percent);
   };
 
   const listWidth = h("input", { type: "number", min: String(LIST_WIDTH[0]), max: String(LIST_WIDTH[1]), value: String(settings.listWidth), class: "side", ariaLabel: "List width in px" });
@@ -452,6 +480,7 @@ function renderSettings(
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
       h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
+      h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
       h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
       h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
       customColours,

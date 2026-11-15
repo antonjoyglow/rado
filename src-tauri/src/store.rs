@@ -23,6 +23,9 @@ pub struct Settings {
     /// Size of the `{ reviews | mine }` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub pill_scale: u32,
+    /// Text size of the review list, in percent.
+    #[serde(deserialize_with = "lenient_number::<_, 100>")]
+    pub text_scale: u32,
     /// Size of the review list, in logical pixels; shrunk to fit the screen when shown.
     #[serde(deserialize_with = "lenient_number::<_, 640>")]
     pub list_width: u32,
@@ -146,6 +149,8 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
 /// Smallest and largest counter size, in percent. Below 75% the pixel font stops being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
+/// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
+pub const TEXT_SCALE_RANGE: (u32, u32) = (80, 150);
 /// Smallest and largest review list, in logical pixels. Below these the rows stop fitting their buttons.
 pub const LIST_WIDTH_RANGE: (u32, u32) = (360, 1600);
 pub const LIST_HEIGHT_RANGE: (u32, u32) = (400, 1600);
@@ -156,6 +161,7 @@ impl Settings {
         Self {
             poll_minutes: self.poll_minutes.clamp(1, 120),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
+            text_scale: self.text_scale.clamp(TEXT_SCALE_RANGE.0, TEXT_SCALE_RANGE.1),
             list_width: self.list_width.clamp(LIST_WIDTH_RANGE.0, LIST_WIDTH_RANGE.1),
             list_height: self.list_height.clamp(LIST_HEIGHT_RANGE.0, LIST_HEIGHT_RANGE.1),
             custom_theme: self.custom_theme.clamped(),
@@ -171,6 +177,7 @@ impl Default for Settings {
             poll_minutes: 3,
             notify: true,
             pill_scale: 100,
+            text_scale: 100,
             list_width: 640,
             list_height: 860,
             browser: Browser::System,
@@ -657,10 +664,10 @@ pub(crate) mod tests {
 
     #[test]
     fn clamped_outOfRangeValues_areBroughtIntoRange() {
-        let low = Settings { poll_minutes: 0, pill_scale: 10, ..Settings::default() }.clamped();
-        let high = Settings { poll_minutes: 999, pill_scale: 900, ..Settings::default() }.clamped();
-        assert_eq!((low.poll_minutes, low.pill_scale), (1, 75));
-        assert_eq!((high.poll_minutes, high.pill_scale), (120, 200));
+        let low = Settings { poll_minutes: 0, pill_scale: 10, text_scale: 10, ..Settings::default() }.clamped();
+        let high = Settings { poll_minutes: 999, pill_scale: 900, text_scale: 900, ..Settings::default() }.clamped();
+        assert_eq!((low.poll_minutes, low.pill_scale, low.text_scale), (1, 75, 80));
+        assert_eq!((high.poll_minutes, high.pill_scale, high.text_scale), (120, 200, 150));
     }
 
     #[test]
@@ -669,6 +676,16 @@ pub(crate) mod tests {
             let json = format!(r#"{{"pollMinutes":7,"pillScale":{raw}}}"#);
             let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
             assert_eq!((settings.poll_minutes, settings.pill_scale), (7, expected), "pillScale {raw}");
+        }
+    }
+
+    #[test]
+    fn settings_textScale_defaultsTo100AndToleratesHandEdits() {
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"pollMinutes":7}"#).unwrap().text_scale, 100);
+        for (raw, expected) in [("117", 117), ("99.6", 100), ("-1", 80), ("400", 150), ("\"big\"", 100), ("null", 100)] {
+            let json = format!(r#"{{"pollMinutes":7,"textScale":{raw}}}"#);
+            let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
+            assert_eq!((settings.poll_minutes, settings.text_scale), (7, expected), "textScale {raw}");
         }
     }
 

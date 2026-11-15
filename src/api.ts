@@ -81,6 +81,8 @@ export interface Settings {
   notify: boolean;
   /** Counter size in percent, 75–200. */
   pillScale: number;
+  /** Text size of the review list in percent, 80–150. */
+  textScale: number;
   /** Size of the review list in px; shrunk to fit the screen when shown. */
   listWidth: number;
   listHeight: number;
