@@ -3,6 +3,7 @@ import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
 import { h } from "./dom";
+import { activeWorkspace, isTyping, jiraSite, stepWorkspace, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
 } from "./tabs";
@@ -52,6 +53,8 @@ function tabList<K extends string>(
   }
   const list = h("div", { class: "tabs", role: "tablist", ariaLabel: label }, ...tabs.map((t) => t.tab));
   list.addEventListener("keydown", (e) => {
+    // Ctrl+arrows switch workspaces, not tabs.
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
     const from = tabs.findIndex((t) => t.tab === document.activeElement);
     const to = from < 0 ? null : stepTab(from, e.key, tabs.length);
     if (to === null) return;
@@ -81,6 +84,7 @@ export function mountList(root: HTMLElement): void {
   const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
+  const workspace = workspaceChip(() => showSettings(true, "workspaces"));
 
   // One tab per section, always all seven so they never move. Created once; renderBody updates them in place.
   const tabs = SECTIONS.map((s) => {
@@ -100,7 +104,7 @@ export function mountList(root: HTMLElement): void {
   });
 
   root.append(
-    h("header", {}, heading, refreshButton, settingsButton, closeButton),
+    h("header", {}, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
     status,
     strip.list,
     settingsPanel,
@@ -110,8 +114,10 @@ export function mountList(root: HTMLElement): void {
 
   // Settings replace the list rather than squeezing it; hiding the list keeps its rows and scroll position.
   let listScroll = 0;
-  let settingsTab: SettingsTab = restoreTab(recall(SETTINGS_TAB_KEY), SETTINGS_TABS.map((t) => t.key)) ?? "ado";
+  let settingsTab: SettingsTab = restoreTab(recall(SETTINGS_TAB_KEY), SETTINGS_TABS.map((t) => t.key)) ?? "workspaces";
+  let settingsView: { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } | null = null;
   const showSettings = (on: boolean, startTab: SettingsTab = settingsTab) => {
+    if (on && !settingsPanel.hidden) settingsView?.select(startTab);
     if (on === !settingsPanel.hidden) return;
     if (on) listScroll = body.scrollTop;
     settingsPanel.hidden = !on;
@@ -120,12 +126,12 @@ export function mountList(root: HTMLElement): void {
     heading.textContent = on ? "Settings" : "Reviews";
     settingsButton.textContent = on ? "←" : "⚙";
     settingsButton.title = on ? "Back to reviews" : "Settings";
-    if (on && snapshot) {
-      renderSettings(settingsPanel, snapshot, startTab, (key) => {
-        settingsTab = key;
-        remember(SETTINGS_TAB_KEY, key);
-      });
-    }
+    settingsView = on && snapshot
+      ? renderSettings(settingsPanel, snapshot, startTab, (key) => {
+          settingsTab = key;
+          remember(SETTINGS_TAB_KEY, key);
+        })
+      : null;
     if (!on) body.scrollTop = listScroll;
   };
 
@@ -150,7 +156,7 @@ export function mountList(root: HTMLElement): void {
     if (!snapshot) return;
     body.replaceChildren();
     if (!snapshot.hasPat && !snapshot.hasGithubToken) {
-      showSettings(true, "ado");
+      if (settingsPanel.hidden) showSettings(true, "workspaces");
       return;
     }
     if (!snapshot.lastRefreshed) {
@@ -173,12 +179,15 @@ export function mountList(root: HTMLElement): void {
     const inThis = all.filter((i) => inSection(i, current));
     const items = current === "mine" ? newestFirst(inThis) : inThis;
     if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
-    for (const item of items) body.append(row(item, snapshot.settings.jiraSite, item.key === next?.key));
+    const site = jiraSite(activeWorkspace(snapshot.settings));
+    for (const item of items) body.append(row(item, site, item.key === next?.key));
   };
 
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     snapshot = s;
+    workspace.render(s);
+    settingsView?.update(s);
     renderStatus();
     renderBody();
   });
@@ -186,8 +195,16 @@ export function mountList(root: HTMLElement): void {
   // Rows opened since the last render change which review is next.
   window.addEventListener("focus", renderBody);
   window.addEventListener("keydown", (e) => {
+    const step = workspaceStep(e);
+    if (step !== null && snapshot && !isTyping(e.target)) {
+      e.preventDefault();
+      const to = stepWorkspace(snapshot.settings.workspaces, snapshot.settings.activeWorkspace, step);
+      if (to) void api.switchWorkspace(to);
+      return;
+    }
     if (e.key !== "Escape") return;
-    if (settingsPanel.hidden) void api.hideList();
+    if (workspace.close()) workspace.chip.focus();
+    else if (settingsPanel.hidden) void api.hideList();
     else showSettings(false);
   });
 }
@@ -290,7 +307,12 @@ function flash(button: HTMLButtonElement, text: string): void {
   }, 1500);
 }
 
-function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: SettingsTab, onSelect: (key: SettingsTab) => void): void {
+function renderSettings(
+  panel: HTMLElement,
+  snapshot: Snapshot,
+  startTab: SettingsTab,
+  onSelect: (key: SettingsTab) => void,
+): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
   const settings = { ...snapshot.settings };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
   // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
@@ -306,45 +328,8 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = {
-    pat: note(), org: note(), teams: note(), jira: note(), token: note(), minutes: note(), scale: note(), size: note(), browser: note(),
-    notify: note(), autostart: note(),
-  };
-
-  const pat = h("input", { type: "password", autocomplete: "off", ariaLabel: "PAT", placeholder: snapshot.hasPat ? "•••••••••••••••• saved" : "Paste a PAT (Code: Read)" });
-  const savePat = h("button", {
-    type: "button",
-    onclick: () => api.savePat(pat.value).then(() => {
-      pat.value = "";
-      pat.placeholder = "•••••••••••••••• saved";
-      ok(n.pat, "Saved to Windows Credential Manager");
-    }, (e) => fail(n.pat, e)),
-  }, "Save");
-  const githubToken = h("input", { type: "password", autocomplete: "off", ariaLabel: "GitHub token", placeholder: snapshot.hasGithubToken ? "•••••••••••••••• saved" : "Paste a token (repo, read:org)" });
-  const saveGithubToken = h("button", {
-    type: "button",
-    onclick: () => api.saveGithubToken(githubToken.value).then(() => {
-      githubToken.value = "";
-      githubToken.placeholder = "•••••••••••••••• saved";
-      ok(n.token, "Saved to Windows Credential Manager");
-    }, (e) => fail(n.token, e)),
-  }, "Save");
-
-  const org = h("input", { type: "text", ariaLabel: "Organization", value: settings.organization, placeholder: "yourorg, as in dev.azure.com/yourorg", onchange: () => { settings.organization = org.value.trim(); void save(n.org); } });
-  const teams = h("input", {
-    type: "text",
-    ariaLabel: "My teams",
-    value: settings.teams.join(", "),
-    placeholder: "TeamAlpha",
-    onchange: () => { settings.teams = teams.value.split(",").map((t) => t.trim()).filter(Boolean); void save(n.teams); },
-  });
-  const jira = h("input", {
-    type: "text",
-    ariaLabel: "Jira Cloud site",
-    value: settings.jiraSite,
-    placeholder: "yourcompany.atlassian.net",
-    onchange: () => { settings.jiraSite = jira.value; void save(n.jira); },
-  });
+  const n = { minutes: note(), scale: note(), size: note(), browser: note(), notify: note(), autostart: note() };
+  const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
   const chips = POLL_CHOICES.map((m) =>
@@ -415,17 +400,9 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
   void api.autostart().then((on) => (autostart.checked = on));
 
   const tabPanel = (key: SettingsTab, ...children: HTMLElement[]) => h("div", { class: "tabpanel", id: `settings-${key}`, role: "tabpanel" }, ...children);
-  // All three panels live for the whole visit, so switching tabs keeps a pasted but unsaved token.
+  // Both panels live for the whole visit, so switching tabs keeps a pasted but unsaved token.
   const panels: Record<SettingsTab, HTMLElement> = {
-    ado: tabPanel("ado",
-      h("label", {}, caption("PAT", n.pat), h("span", { class: "inline" }, pat, savePat)),
-      h("label", {}, caption("Organization", n.org), org),
-      h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
-      h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
-    ),
-    github: tabPanel("github",
-      h("label", {}, caption("Token", n.token), h("span", { class: "inline" }, githubToken, saveGithubToken)),
-    ),
+    workspaces: tabPanel("workspaces", workspaces.element),
     general: tabPanel("general",
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
@@ -448,4 +425,11 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
   });
   showTab(startTab);
   panel.replaceChildren(strip.list, ...SETTINGS_TABS.map((t) => panels[t.key]));
+  return {
+    update: workspaces.update,
+    select: (key) => {
+      showTab(key);
+      onSelect(key);
+    },
+  };
 }
