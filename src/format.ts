@@ -75,12 +75,22 @@ export function parseWhole(text: string, [min, max]: readonly [number, number]):
   return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
-/** The − / + buttons: the next multiple of SCALE_STEP down or up, so a typed 110 steps to 100 or 125. */
-export function stepScale(current: number, direction: -1 | 1): number {
+/** List text size limits, button step and chips, in percent; Rust clamps to the same range. */
+export const TEXT_SCALE: readonly [number, number] = [80, 150];
+export const TEXT_STEP = 5;
+export const TEXT_CHOICES = [90, 100, 115, 130] as const;
+
+/** The − / + buttons: the next multiple of `step` down or up, so a typed 110 steps to 100 or 125 at step 25. */
+export function stepScale(
+  current: number,
+  direction: -1 | 1,
+  step = SCALE_STEP,
+  [min, max]: readonly [number, number] = [SCALE_MIN, SCALE_MAX],
+): number {
   const next = direction > 0
-    ? (Math.floor(current / SCALE_STEP) + 1) * SCALE_STEP
-    : (Math.ceil(current / SCALE_STEP) - 1) * SCALE_STEP;
-  return Math.min(SCALE_MAX, Math.max(SCALE_MIN, next));
+    ? (Math.floor(current / step) + 1) * step
+    : (Math.ceil(current / step) - 1) * step;
+  return Math.min(max, Math.max(min, next));
 }
 
 /** Hours from an ISO timestamp to `now`, never negative. */

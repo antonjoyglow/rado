@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -100,6 +100,19 @@ describe("stepScale", () => {
   it.each([
     [100, 1, 125], [100, -1, 75], [110, 1, 125], [110, -1, 100], [200, 1, 200], [75, -1, 75], [190, 1, 200], [80, -1, 75],
   ] as const)("%i step %i -> %i", (current, direction, next) => expect(stepScale(current, direction)).toBe(next));
+});
+
+describe("text size", () => {
+  it.each([["100", 100], [" 80 ", 80], ["117", 117], ["150", 150], ["79", null], ["151", null], ["99.5", null], ["", null]])(
+    "parse %s -> %s",
+    (text, value) => expect(parseWhole(text, TEXT_SCALE)).toBe(value),
+  );
+  it.each([
+    [100, 1, 105], [100, -1, 95], [117, 1, 120], [117, -1, 115], [150, 1, 150], [80, -1, 80], [148, 1, 150], [82, -1, 80],
+  ] as const)("%i step %i -> %i", (current, direction, next) => expect(stepScale(current, direction, TEXT_STEP, TEXT_SCALE)).toBe(next));
+  it("everyChip_isReachedByTheButtons", () => {
+    for (const chip of TEXT_CHOICES) expect(stepScale(stepScale(chip, -1, TEXT_STEP, TEXT_SCALE), 1, TEXT_STEP, TEXT_SCALE)).toBe(chip);
+  });
 });
 
 describe("ageColumn", () => {
