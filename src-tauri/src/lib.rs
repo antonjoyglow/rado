@@ -7,6 +7,7 @@ mod group;
 mod queue;
 mod score;
 mod store;
+mod workspace;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -22,10 +23,11 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use score::{ReviewItem, VoteMemory};
-use store::{Settings, Store};
+use store::{Keyring, Settings, Store};
+use workspace::Workspace;
 
 const PILL: &str = "pill";
 const LIST: &str = "list";
@@ -35,25 +37,44 @@ const PILL_SIZE: (f64, f64) = (112.0, 36.0);
 struct Shared {
     store: Store,
     wake: Notify,
+    /// Mirrors `Inner::credentials_generation`; a change cancels the poll in flight.
+    generation: watch::Sender<u64>,
     inner: Mutex<Inner>,
 }
 
+/// What one workspace has seen. The active workspace's lives in `Inner::ws`; the others wait in `Inner::parked`
+/// until switched back to, so their lists, vote memory and notification baselines survive a switch.
 #[derive(Default)]
-struct Inner {
-    settings: Settings,
+struct WorkspaceState {
     items: Vec<ReviewItem>,
     urls: HashMap<i64, String>,
     memory: VoteMemory,
     hidden: HashSet<i64>,
     related: Vec<group::Related>,
     last_refreshed: Option<DateTime<Utc>>,
-    polling: bool,
     error: Option<String>,
-    has_pat: bool,
-    has_github_token: bool,
     /// Per source, the PRs already waiting on me at its last good poll. A source with no entry yet records
-    /// its PRs without notifying, so a new token or a recovered source doesn't announce everything at once.
+    /// its PRs without notifying, so a new token, a recovered source or a first visit doesn't announce everything at once.
     known_actionable: HashMap<score::Provider, HashSet<i64>>,
+}
+
+/// Which secrets a workspace has saved; the values never leave the store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Saved {
+    pat: bool,
+    github_token: bool,
+}
+
+#[derive(Default)]
+struct Inner {
+    settings: Settings,
+    ws: WorkspaceState,
+    parked: HashMap<String, WorkspaceState>,
+    saved: HashMap<String, Saved>,
+    /// What went wrong loading the settings; kept apart from `ws.error`, which every poll replaces.
+    load_warning: Option<String>,
+    polling: bool,
     credentials_generation: u64,
     list_hidden_at: Option<Instant>,
     list_had_focus: bool,
@@ -68,29 +89,65 @@ struct Snapshot {
     error: Option<String>,
     has_pat: bool,
     has_github_token: bool,
+    /// What went wrong loading the settings, for the whole run.
+    warning: Option<String>,
     settings: Settings,
+    /// By workspace id.
+    saved: HashMap<String, Saved>,
 }
 
 impl Inner {
     fn rows(&self) -> Vec<group::ReviewRow> {
-        group::group(&self.items, &self.related, &self.urls)
+        group::group(&self.ws.items, &self.ws.related, &self.ws.urls)
     }
 
     fn row(&self, key: &str) -> Result<group::ReviewRow, String> {
         self.rows().into_iter().find(|r| r.key == key).ok_or_else(|| "That row is gone; refresh the list".to_string())
     }
 
+    fn active_saved(&self) -> Saved {
+        self.saved.get(&self.settings.active_workspace).copied().unwrap_or_default()
+    }
+
     fn snapshot(&self) -> Snapshot {
+        let saved = self.active_saved();
         Snapshot {
             items: self.rows(),
-            last_refreshed: self.last_refreshed,
+            last_refreshed: self.ws.last_refreshed,
             polling: self.polling,
-            error: self.error.clone(),
-            has_pat: self.has_pat,
-            has_github_token: self.has_github_token,
+            error: self.ws.error.clone(),
+            warning: self.load_warning.clone(),
+            has_pat: saved.pat,
+            has_github_token: saved.github_token,
             settings: self.settings.clone(),
+            saved: self.saved.clone(),
         }
     }
+
+    /// A workspace's state, active or parked.
+    fn state_of(&mut self, id: &str) -> Option<&mut WorkspaceState> {
+        if id == self.settings.active_workspace { Some(&mut self.ws) } else { self.parked.get_mut(id) }
+    }
+
+    /// Makes `id` the active workspace, parking the current one. `load` reads a workspace never visited since start.
+    /// Bumps the generation, so a poll still running for the old workspace is cancelled and its result discarded.
+    fn switch_to(&mut self, id: &str, load: impl FnOnce() -> WorkspaceState) -> bool {
+        if id == self.settings.active_workspace || !self.settings.workspaces.iter().any(|w| w.id == id) {
+            return false;
+        }
+        let target = self.parked.remove(id).unwrap_or_else(load);
+        let previous = std::mem::replace(&mut self.ws, target);
+        let previous_id = std::mem::replace(&mut self.settings.active_workspace, id.to_string());
+        self.parked.insert(previous_id, previous);
+        self.credentials_generation += 1;
+        let saved = self.active_saved();
+        self.polling = saved.pat || saved.github_token;
+        true
+    }
+}
+
+fn load_state(store: &Store, id: &str) -> WorkspaceState {
+    WorkspaceState { memory: store.memory(id), hidden: store.hidden(id), ..WorkspaceState::default() }
 }
 
 fn update(app: &AppHandle, change: impl FnOnce(&mut Inner)) {
@@ -98,6 +155,9 @@ fn update(app: &AppHandle, change: impl FnOnce(&mut Inner)) {
     let snapshot = {
         let mut inner = shared.inner.lock().expect("state lock");
         change(&mut inner);
+        // Sent under the lock, so the watch can't go back to an older generation and cancel a newer poll.
+        let generation = inner.credentials_generation;
+        shared.generation.send_if_modified(|g| std::mem::replace(g, generation) != generation);
         inner.snapshot()
     };
     let _ = app.emit("snapshot", snapshot);
@@ -124,45 +184,68 @@ async fn poll_loop(app: AppHandle) {
     let mut me: Option<(u64, String)> = None;
     loop {
         let shared = app.state::<Shared>();
-        let (settings, generation) = {
+        // Subscribed before reading the generation: a switch after this point cancels the poll below.
+        let mut changed = shared.generation.subscribe();
+        let (workspace, generation) = {
             let inner = shared.inner.lock().expect("state lock");
-            (inner.settings.clone(), inner.credentials_generation)
+            (inner.settings.active().cloned(), inner.credentials_generation)
         };
-        let (pat, github_token) = (shared.store.pat(), shared.store.github_token());
-        if pat.is_none() && github_token.is_none() {
-            update(&app, |s| {
-                (s.has_pat, s.has_github_token) = (false, false);
-                s.error = Some("Add an Azure DevOps PAT or a GitHub token in settings".into());
-            });
-        } else {
-            let (has_pat, has_github_token) = (pat.is_some(), github_token.is_some());
-            update(&app, |s| (s.polling, s.has_pat, s.has_github_token) = (true, has_pat, has_github_token));
-            let ado = async {
-                match pat.as_deref() {
-                    None => Poll::Off,
-                    Some(pat) => match poll_ado(&app, &settings, pat, generation, &mut me).await {
-                        Ok(poll) => Poll::Fresh(poll),
-                        Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
-                    },
-                }
-            };
-            let github = async {
-                match github_token.as_deref() {
-                    None => Poll::Off,
-                    Some(token) => match github::fetch(token).await {
-                        Ok(fetched) => Poll::Fresh(fetched),
-                        Err(error) => Poll::Failed(format!("GitHub: {error}")),
-                    },
-                }
-            };
-            let (ado, github) = tokio::join!(ado, github);
-            apply(&app, generation, ado, github);
+        if let Some(workspace) = workspace {
+            poll_workspace(&app, &workspace, generation, &mut me, &mut changed).await;
         }
         let minutes = shared.inner.lock().expect("state lock").settings.poll_minutes.clamp(1, 120);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)) => {}
             _ = shared.wake.notified() => {}
         }
+    }
+}
+
+/// Polls one workspace, by the id read with `generation`: a switch while it runs drops the result rather than filing it
+/// under the workspace switched to.
+async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
+    let shared = app.state::<Shared>();
+    let (pat, github_token) = (shared.store.pat(&workspace.id), shared.store.github_token(&workspace.id));
+    let saved = Saved { pat: pat.is_some(), github_token: github_token.is_some() };
+    let current = |s: &Inner| s.credentials_generation == generation;
+    if pat.is_none() && github_token.is_none() {
+        update(app, |s| {
+            if current(s) {
+                s.saved.insert(workspace.id.clone(), saved);
+                s.polling = false;
+                s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
+            }
+        });
+        return;
+    }
+    update(app, |s| {
+        if current(s) {
+            s.saved.insert(workspace.id.clone(), saved);
+            s.polling = true;
+        }
+    });
+    let ado = async {
+        match pat.as_deref() {
+            None => Poll::Off,
+            Some(pat) => match poll_ado(app, &workspace.azure_dev_ops, pat, generation, me).await {
+                Ok(poll) => Poll::Fresh(poll),
+                Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
+            },
+        }
+    };
+    let github = async {
+        match github_token.as_deref() {
+            None => Poll::Off,
+            Some(token) => match github::fetch(token).await {
+                Ok(fetched) => Poll::Fresh(fetched),
+                Err(error) => Poll::Failed(format!("GitHub: {error}")),
+            },
+        }
+    };
+    tokio::select! {
+        (ado, github) = async { tokio::join!(ado, github) } => apply(app, &workspace.id, generation, ado, github),
+        // Switched, or a token or organization changed: the answer is stale, and the wake that came with it polls again.
+        _ = changed.changed() => {}
     }
 }
 
@@ -173,7 +256,7 @@ async fn fetch_threads(
     prs: &[ado::PullRequest],
     me: &score::Me<'_>,
 ) -> HashMap<i64, ado::PrThreads> {
-    let mut scratch = app.state::<Shared>().inner.lock().expect("state lock").memory.clone();
+    let mut scratch = app.state::<Shared>().inner.lock().expect("state lock").ws.memory.clone();
     let mine: HashSet<i64> = score::rank(prs, me, &mut scratch, Utc::now()).iter().map(|i| i.id).collect();
     let requests = prs.iter().filter(|pr| mine.contains(&pr.pull_request_id)).map(|pr| async move {
         let stats = client.threads(&pr.repository.project.id, &pr.repository.id, pr.pull_request_id).await;
@@ -188,153 +271,178 @@ async fn fetch_threads(
 
 async fn poll_ado(
     app: &AppHandle,
-    settings: &Settings,
+    source: &workspace::AdoSource,
     pat: &str,
     generation: u64,
     me: &mut Option<(u64, String)>,
 ) -> Result<AdoPoll, String> {
-    if settings.organization.is_empty() {
-        return Err("set your organization in settings".into());
+    if source.organization.is_empty() {
+        return Err("set the organization for this workspace in settings".into());
     }
-    let client = ado::Client::new(&settings.organization, pat);
+    let client = ado::Client::new(&source.organization, pat);
     if me.as_ref().is_none_or(|(g, _)| *g != generation) {
         *me = Some((generation, client.my_id().await?.to_lowercase()));
     }
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
     let prs = client.active_pull_requests().await?;
-    let teams: HashSet<String> = settings.teams.iter().map(|t| t.trim().to_lowercase()).collect();
+    let teams: HashSet<String> = source.teams.iter().map(|t| t.trim().to_lowercase()).collect();
     let threads = fetch_threads(app, &client, &prs, &score::Me { id: &my_id, teams: &teams }).await;
     let urls = prs.iter().map(|pr| (pr.pull_request_id, client.pr_url(pr))).collect();
     Ok(AdoPoll { prs, my_id, teams, threads, urls })
 }
 
-fn apply(app: &AppHandle, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>) {
+/// What a poll's result asks for: files to save, and who to notify.
+#[derive(Default)]
+struct Applied {
+    /// Newly waiting on me since the workspace's last poll.
+    fresh: Vec<ReviewItem>,
+    notify: bool,
+    memory: Option<VoteMemory>,
+    hidden: Option<HashSet<i64>>,
+    queue: Option<queue::Queue>,
+}
+
+fn apply(app: &AppHandle, workspace_id: &str, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>) {
     let shared = app.state::<Shared>();
-    let mut fresh = Vec::new();
-    let mut notify_enabled = false;
-    let mut queue = None;
+    let mut applied = None;
+    // Saved under the lock, so a hide or a delete made after this poll can't be overwritten by its older copy.
     update(app, |s| {
-        // A token or organization saved while this poll ran makes its data stale; the next poll is already due.
-        if s.credentials_generation != generation {
-            s.polling = false;
-            return;
+        applied = apply_poll(s, generation, ado, github, Utc::now());
+        let Some(applied) = &applied else { return };
+        if let Some(memory) = &applied.memory {
+            let _ = shared.store.save_memory(workspace_id, memory);
         }
-        let now = Utc::now();
-        let was_stale: HashSet<i64> = s.items.iter().filter(|i| i.state == score::ReviewState::Stale).map(|i| i.id).collect();
-        let (old_items, old_urls) = (std::mem::take(&mut s.items), std::mem::take(&mut s.urls));
-        let mut items = Vec::new();
-        let mut urls = HashMap::new();
-        let mut errors = Vec::new();
-        let mut fresh_sources = Vec::new();
-        // Pruning hidden PRs needs every source's full list; a failed or partial poll would drop its hidden ones.
-        let mut complete = true;
-        let mut ado_prs = None;
-        let keep = |provider: score::Provider, items: &mut Vec<ReviewItem>, urls: &mut HashMap<i64, String>| {
-            for item in old_items.iter().filter(|i| i.provider == provider) {
-                if let Some(url) = old_urls.get(&item.id) {
-                    urls.insert(item.id, url.clone());
-                }
-                items.push(item.clone());
-            }
-        };
-        match ado {
-            Poll::Off => {
-                s.related.clear();
-                s.known_actionable.remove(&score::Provider::Ado);
-            }
-            Poll::Failed(error) => {
-                errors.push(error);
-                complete = false;
-                keep(score::Provider::Ado, &mut items, &mut urls);
-            }
-            Poll::Fresh(poll) => {
-                fresh_sources.push((score::Provider::Ado, false));
-                let me = score::Me { id: &poll.my_id, teams: &poll.teams };
-                let mut ranked = score::rank(&poll.prs, &me, &mut s.memory, now);
-                score::attach_threads(&mut ranked, &poll.threads, &was_stale, now);
-                let mine: HashSet<i64> = ranked.iter().map(|i| i.id).collect();
-                let branches: HashSet<&str> = ranked.iter().map(|i| i.branch.as_str()).collect();
-                s.related = poll
-                    .prs
-                    .iter()
-                    .filter(|pr| !mine.contains(&pr.pull_request_id) && branches.contains(pr.branch()))
-                    .map(|pr| group::Related {
-                        id: pr.pull_request_id,
-                        repo: pr.repository.name.clone(),
-                        title: pr.title.clone(),
-                        branch: pr.branch().to_string(),
-                        url: poll.urls.get(&pr.pull_request_id).cloned().unwrap_or_default(),
-                        created_at: pr.creation_date,
-                    })
-                    .collect();
-                let _ = shared.store.save_memory(&s.memory);
-                urls.extend(poll.urls);
-                items.extend(ranked);
-                ado_prs = Some(poll.prs);
-            }
+        if let Some(hidden) = &applied.hidden {
+            let _ = shared.store.save_hidden(workspace_id, hidden);
         }
-        match github {
-            Poll::Off => {
-                s.known_actionable.remove(&score::Provider::GitHub);
-            }
-            Poll::Failed(error) => {
-                errors.push(error);
-                complete = false;
-                keep(score::Provider::GitHub, &mut items, &mut urls);
-            }
-            Poll::Fresh(fetched) => {
-                fresh_sources.push((score::Provider::GitHub, fetched.warning.is_some()));
-                if let Some(warning) = &fetched.warning {
-                    errors.push(format!("GitHub: {warning}"));
-                    complete = false;
-                }
-                let (mut ranked, gh_urls, threads) = github::items(&fetched, now);
-                score::attach_threads(&mut ranked, &threads, &was_stale, now);
-                urls.extend(gh_urls);
-                items.extend(ranked);
-            }
-        }
-        items.sort_by(|a, b| b.score.cmp(&a.score).then(b.age_hours.cmp(&a.age_hours)));
-        s.items = items;
-        s.urls = urls;
-        s.polling = false;
-        s.error = (!errors.is_empty()).then(|| errors.join(" · "));
-        if fresh_sources.is_empty() {
-            return;
-        }
-        if complete {
-            let open = s.urls.keys().copied().collect::<HashSet<_>>();
-            let before = s.hidden.len();
-            s.hidden.retain(|id| open.contains(id));
-            if s.hidden.len() != before {
-                let _ = shared.store.save_hidden(&s.hidden);
-            }
-        }
-        mark_hidden(s);
-        for (source, partial) in fresh_sources {
-            let listed: Vec<&ReviewItem> = s.items.iter().filter(|i| i.provider == source).collect();
-            let (known, new) = next_known(s.known_actionable.get(&source), &listed, partial);
-            fresh.extend(listed.into_iter().filter(|i| new.contains(&i.id)).cloned());
-            s.known_actionable.insert(source, known);
-        }
-        s.last_refreshed = Some(now);
-        notify_enabled = s.settings.notify;
-        if let Some(prs) = &ado_prs {
-            let ctx = export::Context { organization: &s.settings.organization, poll_minutes: s.settings.poll_minutes, now };
-            queue = Some(export::queue(&s.items, prs, &s.memory, &s.urls, &ctx));
+        if let Some(queue) = &applied.queue {
+            let _ = shared.store.save_queue(workspace_id, queue);
         }
     });
-    if let Some(queue) = queue {
-        let _ = shared.store.save_queue(&queue);
-    }
-    if notify_enabled && !fresh.is_empty() {
-        let title = match fresh.len() {
+    let Some(applied) = applied else { return };
+    if applied.notify && !applied.fresh.is_empty() {
+        let title = match applied.fresh.len() {
             1 => "A PR needs you".to_string(),
             n => format!("{n} PRs need you"),
         };
-        let body = fresh.iter().take(3).map(|i| format!("{} · {}", i.repo, i.title)).collect::<Vec<_>>().join("\n");
+        let body = applied.fresh.iter().take(3).map(|i| format!("{} · {}", i.repo, i.title)).collect::<Vec<_>>().join("\n");
         let _ = app.notification().builder().title(title).body(body).show();
     }
+}
+
+/// Files a poll's result under the active workspace. None when the poll is stale: a switch, a new token or a changed
+/// organization since it started.
+fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>, now: DateTime<Utc>) -> Option<Applied> {
+    if s.credentials_generation != generation {
+        return None;
+    }
+    let mut applied = Applied::default();
+    let organization = s.settings.active().map(|w| w.azure_dev_ops.organization.clone()).unwrap_or_default();
+    let ws = &mut s.ws;
+    let was_stale: HashSet<i64> = ws.items.iter().filter(|i| i.state == score::ReviewState::Stale).map(|i| i.id).collect();
+    let (old_items, old_urls) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls));
+    let mut items = Vec::new();
+    let mut urls = HashMap::new();
+    let mut errors = Vec::new();
+    let mut fresh_sources = Vec::new();
+    // Pruning hidden PRs needs every source's full list; a failed or partial poll would drop its hidden ones.
+    let mut complete = true;
+    let mut ado_prs = None;
+    let keep = |provider: score::Provider, items: &mut Vec<ReviewItem>, urls: &mut HashMap<i64, String>| {
+        for item in old_items.iter().filter(|i| i.provider == provider) {
+            if let Some(url) = old_urls.get(&item.id) {
+                urls.insert(item.id, url.clone());
+            }
+            items.push(item.clone());
+        }
+    };
+    match ado {
+        Poll::Off => {
+            ws.related.clear();
+            ws.known_actionable.remove(&score::Provider::Ado);
+        }
+        Poll::Failed(error) => {
+            errors.push(error);
+            complete = false;
+            keep(score::Provider::Ado, &mut items, &mut urls);
+        }
+        Poll::Fresh(poll) => {
+            fresh_sources.push((score::Provider::Ado, false));
+            let me = score::Me { id: &poll.my_id, teams: &poll.teams };
+            let mut ranked = score::rank(&poll.prs, &me, &mut ws.memory, now);
+            score::attach_threads(&mut ranked, &poll.threads, &was_stale, now);
+            let mine: HashSet<i64> = ranked.iter().map(|i| i.id).collect();
+            let branches: HashSet<&str> = ranked.iter().map(|i| i.branch.as_str()).collect();
+            ws.related = poll
+                .prs
+                .iter()
+                .filter(|pr| !mine.contains(&pr.pull_request_id) && branches.contains(pr.branch()))
+                .map(|pr| group::Related {
+                    id: pr.pull_request_id,
+                    repo: pr.repository.name.clone(),
+                    title: pr.title.clone(),
+                    branch: pr.branch().to_string(),
+                    url: poll.urls.get(&pr.pull_request_id).cloned().unwrap_or_default(),
+                    created_at: pr.creation_date,
+                })
+                .collect();
+            applied.memory = Some(ws.memory.clone());
+            urls.extend(poll.urls);
+            items.extend(ranked);
+            ado_prs = Some(poll.prs);
+        }
+    }
+    match github {
+        Poll::Off => {
+            ws.known_actionable.remove(&score::Provider::GitHub);
+        }
+        Poll::Failed(error) => {
+            errors.push(error);
+            complete = false;
+            keep(score::Provider::GitHub, &mut items, &mut urls);
+        }
+        Poll::Fresh(fetched) => {
+            fresh_sources.push((score::Provider::GitHub, fetched.warning.is_some()));
+            if let Some(warning) = &fetched.warning {
+                errors.push(format!("GitHub: {warning}"));
+                complete = false;
+            }
+            let (mut ranked, gh_urls, threads) = github::items(&fetched, now);
+            score::attach_threads(&mut ranked, &threads, &was_stale, now);
+            urls.extend(gh_urls);
+            items.extend(ranked);
+        }
+    }
+    items.sort_by(|a, b| b.score.cmp(&a.score).then(b.age_hours.cmp(&a.age_hours)));
+    ws.items = items;
+    ws.urls = urls;
+    s.polling = false;
+    ws.error = (!errors.is_empty()).then(|| errors.join(" · "));
+    if fresh_sources.is_empty() {
+        return Some(applied);
+    }
+    if complete {
+        let open = ws.urls.keys().copied().collect::<HashSet<_>>();
+        let before = ws.hidden.len();
+        ws.hidden.retain(|id| open.contains(id));
+        if ws.hidden.len() != before {
+            applied.hidden = Some(ws.hidden.clone());
+        }
+    }
+    mark_hidden(ws);
+    for (source, partial) in fresh_sources {
+        let listed: Vec<&ReviewItem> = ws.items.iter().filter(|i| i.provider == source).collect();
+        let (known, new) = next_known(ws.known_actionable.get(&source), &listed, partial);
+        applied.fresh.extend(listed.into_iter().filter(|i| new.contains(&i.id)).cloned());
+        ws.known_actionable.insert(source, known);
+    }
+    ws.last_refreshed = Some(now);
+    applied.notify = s.settings.notify;
+    if let Some(prs) = &ado_prs {
+        let ctx = export::Context { organization: &organization, poll_minutes: s.settings.poll_minutes, now };
+        applied.queue = Some(export::queue(&ws.items, prs, &ws.memory, &ws.urls, &ctx));
+    }
+    Some(applied)
 }
 
 /// One source's PRs waiting on me after a poll, and which of them are new since `known` (none when the
@@ -351,9 +459,9 @@ fn next_known(known: Option<&HashSet<i64>>, listed: &[&ReviewItem], partial: boo
     (waiting, new)
 }
 
-fn mark_hidden(s: &mut Inner) {
-    for item in &mut s.items {
-        item.hidden = s.hidden.contains(&item.id);
+fn mark_hidden(ws: &mut WorkspaceState) {
+    for item in &mut ws.items {
+        item.hidden = ws.hidden.contains(&item.id);
     }
 }
 
@@ -475,7 +583,7 @@ fn open_links(app: &AppHandle, urls: Vec<String>) -> Result<(), String> {
             match app.opener().open_url(&url, Some(name)) {
                 Ok(()) => continue,
                 Err(e) => {
-                    update(app, |s| s.error = Some(format!("Couldn't start {name} ({e}); opened in the default browser")));
+                    update(app, |s| s.ws.error = Some(format!("Couldn't start {name} ({e}); opened in the default browser")));
                     program = None;
                 }
             }
@@ -487,7 +595,7 @@ fn open_links(app: &AppHandle, urls: Vec<String>) -> Result<(), String> {
 
 #[tauri::command]
 fn open_pr(app: AppHandle, id: i64) -> Result<(), String> {
-    let url = app.state::<Shared>().inner.lock().expect("state lock").urls.get(&id).cloned();
+    let url = app.state::<Shared>().inner.lock().expect("state lock").ws.urls.get(&id).cloned();
     open_links(&app, vec![url.ok_or("Unknown pull request")?])
 }
 
@@ -502,12 +610,11 @@ fn open_ticket(app: AppHandle, key: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
     let (row, site) = {
         let inner = shared.inner.lock().expect("state lock");
-        (inner.row(&key)?, inner.settings.jira_site.clone())
+        let site = inner.settings.active().and_then(|w| w.tracker.jira_site()).map(str::to_string);
+        (inner.row(&key)?, site)
     };
     let ticket = row.ticket.ok_or("That row's branch names no Jira issue")?;
-    if site.is_empty() {
-        return Err("Set your Jira site in settings".into());
-    }
+    let site = site.ok_or("Set this workspace's Jira site in settings")?;
     open_links(&app, vec![format!("https://{site}/browse/{ticket}")])
 }
 
@@ -532,80 +639,104 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
         };
         for (id, provider) in ids {
             if hidden {
-                s.hidden.insert(id);
+                s.ws.hidden.insert(id);
             } else {
-                s.hidden.remove(&id);
+                s.ws.hidden.remove(&id);
                 // Unhiding is not news: keep it out of the next poll's notification.
-                if let Some(known) = s.known_actionable.get_mut(&provider) {
+                if let Some(known) = s.ws.known_actionable.get_mut(&provider) {
                     known.insert(id);
                 }
             }
         }
-        mark_hidden(s);
-        result = shared.store.save_hidden(&s.hidden);
+        mark_hidden(&mut s.ws);
+        result = shared.store.save_hidden(&s.settings.active_workspace, &s.ws.hidden);
     });
     result
 }
 
+/// After a new secret for `id`: a poll for it running now is stale, and its next good poll is a baseline.
+fn secret_saved(app: &AppHandle, id: &str, provider: score::Provider) {
+    let shared = app.state::<Shared>();
+    let mut active = false;
+    update(app, |s| {
+        let saved = s.saved.entry(id.to_string()).or_default();
+        match provider {
+            score::Provider::Ado => saved.pat = true,
+            score::Provider::GitHub => saved.github_token = true,
+        }
+        active = id == s.settings.active_workspace;
+        if active {
+            s.ws.error = None;
+            s.credentials_generation += 1;
+        }
+        if let Some(state) = s.state_of(id) {
+            state.known_actionable.remove(&provider);
+        }
+    });
+    if active {
+        shared.wake.notify_one();
+    }
+}
+
+fn known_workspace(app: &AppHandle, id: &str) -> Result<(), String> {
+    let inner = app.state::<Shared>();
+    let inner = inner.inner.lock().expect("state lock");
+    inner.settings.workspaces.iter().any(|w| w.id == id).then_some(()).ok_or_else(|| "That workspace is gone".to_string())
+}
+
 #[tauri::command]
-fn save_pat(app: AppHandle, pat: String) -> Result<(), String> {
+fn save_pat(app: AppHandle, workspace: String, pat: String) -> Result<(), String> {
     let pat = pat.trim();
     if pat.is_empty() {
         return Err("The PAT is empty".into());
     }
-    let shared = app.state::<Shared>();
-    shared.store.save_pat(pat)?;
-    update(&app, |s| {
-        s.has_pat = true;
-        s.error = None;
-        s.credentials_generation += 1;
-        s.known_actionable.remove(&score::Provider::Ado);
-    });
-    shared.wake.notify_one();
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.save_pat(&workspace, pat)?;
+    secret_saved(&app, &workspace, score::Provider::Ado);
     Ok(())
 }
 
 #[tauri::command]
-fn save_github_token(app: AppHandle, token: String) -> Result<(), String> {
+fn save_github_token(app: AppHandle, workspace: String, token: String) -> Result<(), String> {
     let token = token.trim();
     if token.is_empty() {
         return Err("The GitHub token is empty".into());
     }
-    let shared = app.state::<Shared>();
-    shared.store.save_github_token(token)?;
-    update(&app, |s| {
-        s.has_github_token = true;
-        s.error = None;
-        s.credentials_generation += 1;
-        s.known_actionable.remove(&score::Provider::GitHub);
-    });
-    shared.wake.notify_one();
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.save_github_token(&workspace, token)?;
+    secret_saved(&app, &workspace, score::Provider::GitHub);
     Ok(())
 }
 
+/// The general settings; the workspaces change only through their own commands.
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    let settings = settings.clamped();
-    shared.store.save_settings(&settings)?;
-    let (resize, resize_list, refetch) = {
-        let old = &shared.inner.lock().expect("state lock").settings;
-        (
-            old.pill_scale != settings.pill_scale,
-            (old.list_width, old.list_height) != (settings.list_width, settings.list_height),
-            old.organization != settings.organization || old.teams != settings.teams || old.poll_minutes != settings.poll_minutes,
-        )
-    };
-    if resize {
-        size_pill(&app, settings.pill_scale, true);
-    }
+    let mut result = Ok(());
+    let (mut resize, mut resize_list, mut refetch, mut pill_scale) = (false, false, false, 0);
     update(&app, |s| {
-        if s.settings.organization != settings.organization || s.settings.teams != settings.teams {
-            s.credentials_generation += 1;
-            s.known_actionable.remove(&score::Provider::Ado);
+        let settings = Settings {
+            workspaces: s.settings.workspaces.clone(),
+            active_workspace: s.settings.active_workspace.clone(),
+            migrating_to: s.settings.migrating_to.clone(),
+            ..settings
         }
+        .clamped();
+        result = shared.store.save_settings(&settings);
+        if result.is_err() {
+            return;
+        }
+        let old = &s.settings;
+        resize = old.pill_scale != settings.pill_scale;
+        resize_list = (old.list_width, old.list_height) != (settings.list_width, settings.list_height);
+        refetch = old.poll_minutes != settings.poll_minutes;
+        pill_scale = settings.pill_scale;
         s.settings = settings;
     });
+    result?;
+    if resize {
+        size_pill(&app, pill_scale, true);
+    }
     if resize_list && let Some(list) = app.get_webview_window(LIST) {
         place_list(&app, &list);
     }
@@ -614,6 +745,109 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         shared.wake.notify_one();
     }
     Ok(())
+}
+
+/// Applies `change` and saves the settings, all under the lock so two edits can't save out of order.
+/// A failed save leaves the change in place for this run and says so.
+fn edit_workspaces<T>(app: &AppHandle, change: impl FnOnce(&mut Inner) -> Result<T, String>) -> Result<T, String> {
+    let shared = app.state::<Shared>();
+    let mut result = Err(String::new());
+    update(app, |s| {
+        result = change(s).and_then(|value| {
+            shared.store.save_settings(&s.settings).map(|()| value).map_err(|e| format!("Changed until Rado quits, but not saved: {e}"))
+        });
+    });
+    result
+}
+
+#[tauri::command]
+fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
+    edit_workspaces(&app, |s| {
+        let id = workspace::new_id();
+        let name = match name.trim() {
+            "" => format!("Workspace {}", s.settings.workspaces.len() + 1),
+            name => name.to_string(),
+        };
+        s.settings.workspaces.push(Workspace { id: id.clone(), name, ..Workspace::default() });
+        Ok(id)
+    })
+}
+
+/// Saves a workspace's name, Azure DevOps organization and teams, and tracker.
+#[tauri::command]
+fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
+    let mut refetch = false;
+    let result = edit_workspaces(&app, |s| {
+        let mut workspace = workspace.clamped();
+        let active = workspace.id == s.settings.active_workspace;
+        let slot = s.settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("That workspace is gone")?;
+        if workspace.name.is_empty() {
+            workspace.name.clone_from(&slot.name);
+        }
+        let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
+        *slot = workspace;
+        if ado_changed {
+            let id = slot.id.clone();
+            if let Some(state) = s.state_of(&id) {
+                state.known_actionable.remove(&score::Provider::Ado);
+            }
+            if active {
+                s.credentials_generation += 1;
+                refetch = true;
+            }
+        }
+        Ok(())
+    });
+    // The bump cancelled the poll in flight; even when the save failed, the change stands for this run and needs a poll.
+    if refetch {
+        app.state::<Shared>().wake.notify_one();
+    }
+    result
+}
+
+#[tauri::command]
+fn switch_workspace(app: AppHandle, id: String) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let mut switched = false;
+    let result = edit_workspaces(&app, |s| {
+        switched = s.switch_to(&id, || load_state(&shared.store, &id));
+        if id == s.settings.active_workspace { Ok(()) } else { Err("That workspace is gone".to_string()) }
+    });
+    if switched {
+        shared.wake.notify_one();
+    }
+    result
+}
+
+/// Deletes a workspace with its secrets and data. The last one stays; deleting the active one switches to its neighbour.
+#[tauri::command]
+fn delete_workspace(app: AppHandle, id: String) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    let (mut switched, mut removed) = (false, false);
+    let result = edit_workspaces(&app, |s| {
+        let list = &s.settings.workspaces;
+        let index = list.iter().position(|w| w.id == id).ok_or("That workspace is gone")?;
+        if list.len() == 1 {
+            return Err("Keep at least one workspace".into());
+        }
+        if id == s.settings.active_workspace {
+            let neighbour = list[if index + 1 < list.len() { index + 1 } else { index - 1 }].id.clone();
+            switched = s.switch_to(&neighbour, || load_state(&shared.store, &neighbour));
+        }
+        s.settings.workspaces.remove(index);
+        s.parked.remove(&id);
+        s.saved.remove(&id);
+        removed = true;
+        Ok(())
+    });
+    if switched {
+        shared.wake.notify_one();
+    }
+    // Its secrets go even when the save failed: a PAT left with nothing pointing at it would never be removed.
+    if removed {
+        shared.store.forget(&id).map_err(|e| format!("Deleted the workspace, but its saved data stayed behind: {e}"))?;
+    }
+    result
 }
 
 #[tauri::command]
@@ -755,10 +989,18 @@ pub fn run() {
         .setup(|app| {
             let config = app.path().app_config_dir()?;
             let data = app.path().app_data_dir()?;
-            let store = Store::new(&config, &data);
-            let inner = Inner { settings: store.settings(), memory: store.memory(), hidden: store.hidden(), has_pat: store.pat().is_some(), has_github_token: store.github_token().is_some(), ..Default::default() };
+            let store = Store::new(&config, &data, Box::new(Keyring::from_env()));
+            let loaded = store.load();
+            let saved = loaded
+                .settings
+                .workspaces
+                .iter()
+                .map(|w| (w.id.clone(), Saved { pat: store.pat(&w.id).is_some(), github_token: store.github_token(&w.id).is_some() }))
+                .collect();
+            let ws = load_state(&store, &loaded.settings.active_workspace);
+            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, ..Default::default() };
             let pill_scale = inner.settings.pill_scale;
-            app.manage(Shared { store, wake: Notify::new(), inner: Mutex::new(inner) });
+            app.manage(Shared { store, wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
             size_pill(app.handle(), pill_scale, false);
             place_pill(app.handle());
@@ -789,6 +1031,10 @@ pub fn run() {
             save_pat,
             save_github_token,
             save_settings,
+            add_workspace,
+            save_workspace,
+            switch_workspace,
+            delete_workspace,
             get_autostart,
             set_autostart,
             quit
@@ -823,6 +1069,86 @@ mod tests {
 
     fn ids(list: &[i64]) -> HashSet<i64> {
         list.iter().copied().collect()
+    }
+
+    /// Two workspaces, `a` (active) and `b`, both with a GitHub token.
+    fn two_workspaces() -> Inner {
+        let ws = |id: &str| Workspace { id: id.into(), name: id.to_uppercase(), ..Workspace::default() };
+        let saved = Saved { pat: false, github_token: true };
+        Inner {
+            settings: Settings { workspaces: vec![ws("a"), ws("b")], active_workspace: "a".into(), ..Settings::default() },
+            saved: HashMap::from([("a".into(), saved), ("b".into(), saved)]),
+            ..Inner::default()
+        }
+    }
+
+    /// Applies a GitHub poll listing `prs` at the current generation and returns the ids it would announce.
+    fn poll(s: &mut Inner, prs: &[i64]) -> HashSet<i64> {
+        let applied = apply_poll(s, s.credentials_generation, Poll::Off, Poll::Fresh(github::tests::requested(prs)), Utc::now()).expect("current poll");
+        applied.fresh.iter().map(|i| i.id).collect()
+    }
+
+    fn listed(s: &Inner) -> HashSet<i64> {
+        s.ws.items.iter().map(|i| i.id).collect()
+    }
+
+    #[test]
+    fn applyPoll_startedBeforeASwitch_isDiscardedAndLeavesTheNewWorkspaceAlone() {
+        let mut s = two_workspaces();
+        poll(&mut s, &[1]);
+        let started = s.credentials_generation;
+
+        assert!(s.switch_to("b", WorkspaceState::default));
+        let late = apply_poll(&mut s, started, Poll::Off, Poll::Fresh(github::tests::requested(&[1, 2])), Utc::now());
+
+        assert!(late.is_none());
+        assert_eq!((s.settings.active_workspace.as_str(), listed(&s), s.ws.last_refreshed, s.polling), ("b", ids(&[]), None, true));
+        assert_eq!(s.parked["a"].items.len(), 1);
+    }
+
+    #[test]
+    fn applyPoll_baselineIsPerWorkspace_soSwitchingAnnouncesOnlyWhatIsNewSinceThatWorkspacesLastPoll() {
+        let mut s = two_workspaces();
+        assert_eq!(poll(&mut s, &[1]), ids(&[]), "a's first poll is its baseline");
+        assert_eq!(poll(&mut s, &[1, 2]), ids(&[2]));
+
+        s.switch_to("b", WorkspaceState::default);
+        assert_eq!(poll(&mut s, &[10, 11]), ids(&[]), "b's first poll is its baseline, not a burst");
+
+        s.switch_to("a", || unreachable!("a is parked"));
+        assert_eq!(listed(&s), ids(&[1, 2]), "a's list is back before it polls");
+        assert_eq!(poll(&mut s, &[1, 2]), ids(&[]), "nothing new in a: no burst on the way back");
+        assert_eq!(poll(&mut s, &[1, 2, 3]), ids(&[3]));
+
+        s.switch_to("b", || unreachable!("b is parked"));
+        assert_eq!(poll(&mut s, &[10, 11, 12]), ids(&[12]), "new in b while it was in the background");
+    }
+
+    #[test]
+    fn switchTo_sameOrUnknownWorkspace_changesNothing() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        assert!(!s.switch_to("a", || unreachable!()));
+        assert!(!s.switch_to("zz", || unreachable!()));
+        assert_eq!((s.settings.active_workspace.as_str(), s.credentials_generation), ("a", generation));
+    }
+
+    #[test]
+    fn switchTo_keepsEachWorkspacesHiddenPrsAndVoteMemoryApart() {
+        let mut s = two_workspaces();
+        s.ws.hidden.insert(1);
+        s.switch_to("b", || WorkspaceState { hidden: ids(&[9]), ..WorkspaceState::default() });
+        assert_eq!(s.ws.hidden, ids(&[9]));
+        s.switch_to("a", || unreachable!());
+        assert_eq!(s.ws.hidden, ids(&[1]));
+    }
+
+    #[test]
+    fn switchTo_workspaceWithNoSecrets_isNotShownAsPolling() {
+        let mut s = two_workspaces();
+        s.saved.insert("b".into(), Saved::default());
+        s.switch_to("b", WorkspaceState::default);
+        assert!(!s.polling);
     }
 
     #[test]

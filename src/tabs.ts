@@ -13,11 +13,10 @@ export const SECTIONS: readonly { key: SectionKey; label: string; title: string 
   { key: "hidden", label: "Hidden", title: "Not mine or hidden" },
 ];
 
-export type SettingsTab = "ado" | "github" | "general";
+export type SettingsTab = "workspaces" | "general";
 
 export const SETTINGS_TABS: readonly { key: SettingsTab; label: string }[] = [
-  { key: "ado", label: "Azure DevOps" },
-  { key: "github", label: "GitHub" },
+  { key: "workspaces", label: "Workspaces" },
   { key: "general", label: "General" },
 ];
 

@@ -200,3 +200,32 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .note[data-kind="error"] { color: var(--urgent); }
 .note[data-kind="ok"] { color: var(--clear); }
 .settings .end { display: flex; justify-content: flex-end; }
+
+/* Workspaces: the header chip, its picker, and the settings tab. */
+header { position: relative; }
+.ws-chip {
+  display: flex; align-items: center; gap: 4px; max-width: 40%; padding: 2px 8px;
+  border: 1px solid var(--line); border-radius: 12px; background: none; font-size: 12px; color: var(--muted);
+}
+.ws-chip .ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-weight: 600; }
+.ws-chip:hover, .ws-chip[aria-expanded="true"] { background: var(--hover); }
+.ws-chip:focus-visible, .ws-picker button:focus-visible, .ws-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ws-picker {
+  position: absolute; z-index: 10; top: 100%; right: 10px; min-width: 200px; max-width: 80%; padding: 4px;
+  display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+.ws-picker[hidden] { display: none; }
+.ws-picker button { padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; overflow-wrap: anywhere; }
+.ws-picker button:hover { background: var(--hover); }
+.ws-picker button[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.ws-picker button[aria-checked="true"]::before { content: "✓ "; }
+.ws-picker .manage { margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; color: var(--muted); }
+.ws-panel { display: flex; flex-direction: column; gap: 14px; }
+.ws-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.settings .ws-item { display: flex; align-items: center; gap: 6px; }
+.settings .ws-item[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.ws-active { color: var(--clear); font-size: 12px; }
+.ws-editor { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ws-editor h2 { margin: 6px 0 0; font-size: 13px; color: var(--fg); }
+.settings button.danger { border-color: var(--urgent); color: var(--urgent); }

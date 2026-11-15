@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, watchSnapshot, type Snapshot } from "./api";
 import { ago, heat, pillCounts } from "./format";
 import { h } from "./dom";
+import { activeWorkspace } from "./workspaces";
 
 const DRAG_THRESHOLD_PX = 4;
 
@@ -25,9 +26,10 @@ export function mountPill(root: HTMLElement): void {
     mine.style.color = heat(counts.mine);
     bar.hidden = mine.hidden = Boolean(problem);
     pill.dataset.polling = String(snapshot.polling);
-    pill.title = snapshot.error
+    const name = activeWorkspace(snapshot.settings)?.name ?? "";
+    pill.title = `${name}: ` + (snapshot.warning ? `${snapshot.warning} · ` : "") + (snapshot.error
       ? snapshot.error
-      : `${counts.reviews} to review · ${counts.mine} of your PR rows need work (a rejection, waiting for author, or an open thread) · refreshed ${ago(snapshot.lastRefreshed, new Date())}`;
+      : `${counts.reviews} to review · ${counts.mine} of your PR rows need work (a rejection, waiting for author, or an open thread) · refreshed ${ago(snapshot.lastRefreshed, new Date())}`);
   };
   void watchSnapshot((s) => {
     snapshot = s;
