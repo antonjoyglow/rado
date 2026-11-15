@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Settings, Workspace } from "./api";
-import { activeWorkspace, parseTeams, stepWorkspace, trackerFor, trackerName, trackerValue, workspaceStep } from "./workspaces";
+import { activeWorkspace, parseList, stepWorkspace, trackerFor, trackerKeys, trackerName, trackerValue, workspaceStep } from "./workspaces";
 
 const ws = (id: string, tracker: Workspace["tracker"] = { kind: "none" }): Workspace => ({ id, name: id.toUpperCase(), azureDevOps: { organization: "", teams: [] }, tracker });
 const list = [ws("a"), ws("b"), ws("c")];
@@ -40,21 +40,26 @@ describe("workspaceStep", () => {
 
 describe("trackers", () => {
   it("an empty field or None is no tracker; otherwise the field goes to the chosen kind", () => {
-    expect(trackerFor("jira", "  ")).toEqual({ kind: "none" });
-    expect(trackerFor("none", "acme")).toEqual({ kind: "none" });
-    expect(trackerFor("jira", " acme.atlassian.net ")).toEqual({ kind: "jira", site: "acme.atlassian.net" });
-    expect(trackerFor("linear", " acme ")).toEqual({ kind: "linear", workspace: "acme" });
+    expect(trackerFor("jira", "  ", ["HOO"])).toEqual({ kind: "none" });
+    expect(trackerFor("none", "acme", [])).toEqual({ kind: "none" });
+    expect(trackerFor("jira", " acme.atlassian.net ", [])).toEqual({ kind: "jira", site: "acme.atlassian.net", keys: [] });
+    expect(trackerFor("linear", " acme ", ["HOO"])).toEqual({ kind: "linear", workspace: "acme", keys: ["HOO"] });
+  });
+
+  it("trackerKeys reads back the team keys, none without a tracker", () => {
+    expect(trackerKeys({ kind: "linear", workspace: "acme", keys: ["HOO"] })).toEqual(["HOO"]);
+    expect(trackerKeys({ kind: "none" })).toEqual([]);
   });
 
   it("trackerValue reads back the field of each kind", () => {
-    expect(trackerValue({ kind: "jira", site: "acme.atlassian.net" })).toBe("acme.atlassian.net");
-    expect(trackerValue({ kind: "linear", workspace: "acme" })).toBe("acme");
+    expect(trackerValue({ kind: "jira", site: "acme.atlassian.net", keys: [] })).toBe("acme.atlassian.net");
+    expect(trackerValue({ kind: "linear", workspace: "acme", keys: [] })).toBe("acme");
     expect(trackerValue({ kind: "none" })).toBe("");
   });
 
   it("trackerName names the active workspace's tracker, or nothing", () => {
     const settings = {
-      workspaces: [ws("a"), ws("b", { kind: "jira", site: "acme.atlassian.net" }), ws("c", { kind: "linear", workspace: "acme" })],
+      workspaces: [ws("a"), ws("b", { kind: "jira", site: "acme.atlassian.net", keys: [] }), ws("c", { kind: "linear", workspace: "acme", keys: [] })],
       activeWorkspace: "b",
     } as Settings;
     expect(trackerName(activeWorkspace(settings))).toBe("Jira");
@@ -64,8 +69,8 @@ describe("trackers", () => {
   });
 });
 
-describe("parseTeams", () => {
+describe("parseList", () => {
   it("splits on commas and drops blanks", () => {
-    expect(parseTeams(" TeamAlpha, ,Beta ,")).toEqual(["TeamAlpha", "Beta"]);
+    expect(parseList(" TeamAlpha, ,Beta ,")).toEqual(["TeamAlpha", "Beta"]);
   });
 });

@@ -23,16 +23,25 @@ pub struct AdoSource {
     pub teams: Vec<String>,
 }
 
-/// Where ticket keys in branch names link to.
+/// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
+/// only branch keys with one of them count.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Tracker {
     #[default]
     None,
     /// `site` is the host, such as `acme.atlassian.net`.
-    Jira { site: String },
+    Jira {
+        site: String,
+        #[serde(default, deserialize_with = "lenient_keys")]
+        keys: Vec<String>,
+    },
     /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
-    Linear { workspace: String },
+    Linear {
+        workspace: String,
+        #[serde(default, deserialize_with = "lenient_keys")]
+        keys: Vec<String>,
+    },
 }
 
 impl Tracker {
@@ -40,22 +49,39 @@ impl Tracker {
     pub fn ticket_url(&self, key: &str) -> Option<String> {
         match self {
             Tracker::None => None,
-            Tracker::Jira { site } => Some(format!("https://{site}/browse/{key}")),
-            Tracker::Linear { workspace } => Some(format!("https://linear.app/{workspace}/issue/{key}")),
+            Tracker::Jira { site, .. } => Some(format!("https://{site}/browse/{key}")),
+            Tracker::Linear { workspace, .. } => Some(format!("https://linear.app/{workspace}/issue/{key}")),
         }
     }
 
     fn clamped(self) -> Self {
         let tracker = match self {
-            Tracker::Jira { site } => Tracker::Jira { site: jira_host(&site) },
-            Tracker::Linear { workspace } => Tracker::Linear { workspace: linear_slug(&workspace) },
+            Tracker::Jira { site, keys } => Tracker::Jira { site: jira_host(&site), keys: clamp_keys(keys) },
+            Tracker::Linear { workspace, keys } => Tracker::Linear { workspace: linear_slug(&workspace), keys: clamp_keys(keys) },
             Tracker::None => Tracker::None,
         };
         match &tracker {
-            Tracker::Jira { site: value } | Tracker::Linear { workspace: value } if value.is_empty() => Tracker::None,
+            Tracker::Jira { site: value, .. } | Tracker::Linear { workspace: value, .. } if value.is_empty() => Tracker::None,
             _ => tracker,
         }
     }
+}
+
+/// Trimmed, upper-cased and without blanks or repeats: ` hoo, Hoo ` gives `HOO`.
+fn clamp_keys(keys: Vec<String>) -> Vec<String> {
+    let mut clamped: Vec<String> = Vec::new();
+    for key in keys {
+        let key = key.trim().to_ascii_uppercase();
+        if !key.is_empty() && !clamped.contains(&key) {
+            clamped.push(key);
+        }
+    }
+    clamped
+}
+
+/// Junk keys are no keys, so the tracker itself still loads.
+fn lenient_keys<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
 }
 
 fn lenient_tracker<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Tracker, D::Error> {
@@ -138,7 +164,7 @@ impl Legacy {
             id,
             name,
             azure_dev_ops: AdoSource { organization: self.organization, teams: self.teams },
-            tracker: Tracker::Jira { site: self.jira_site },
+            tracker: Tracker::Jira { site: self.jira_site, keys: Vec::new() },
         }
         .clamped()
     }
@@ -195,41 +221,55 @@ pub fn new_id() -> String {
 mod tests {
     use super::*;
 
+    fn jira(site: &str) -> Tracker {
+        Tracker::Jira { site: site.into(), keys: Vec::new() }
+    }
+
+    fn linear(workspace: &str) -> Tracker {
+        Tracker::Linear { workspace: workspace.into(), keys: Vec::new() }
+    }
+
     #[test]
     fn tracker_jiraSite_keepsOnlyTheHostAndEmptyIsNone() {
         for (typed, expected) in [
-            ("acme.atlassian.net", Tracker::Jira { site: "acme.atlassian.net".into() }),
-            (" HTTPS://acme.atlassian.net/ ", Tracker::Jira { site: "acme.atlassian.net".into() }),
-            ("https://acme.atlassian.net/jira/software/projects/X", Tracker::Jira { site: "acme.atlassian.net".into() }),
-            ("https://acme.atlassian.net?atlOrigin=x#top", Tracker::Jira { site: "acme.atlassian.net".into() }),
-            (r"acme.atlassian.net\", Tracker::Jira { site: "acme.atlassian.net".into() }),
+            ("acme.atlassian.net", jira("acme.atlassian.net")),
+            (" HTTPS://acme.atlassian.net/ ", jira("acme.atlassian.net")),
+            ("https://acme.atlassian.net/jira/software/projects/X", jira("acme.atlassian.net")),
+            ("https://acme.atlassian.net?atlOrigin=x#top", jira("acme.atlassian.net")),
+            (r"acme.atlassian.net\", jira("acme.atlassian.net")),
             ("https://", Tracker::None),
             ("  ", Tracker::None),
         ] {
-            assert_eq!(Tracker::Jira { site: typed.into() }.clamped(), expected, "{typed:?}");
+            assert_eq!(jira(typed).clamped(), expected, "{typed:?}");
         }
     }
 
     #[test]
     fn tracker_linearWorkspace_keepsOnlyTheSlugAndEmptyOrUnsafeIsNone() {
         for (typed, expected) in [
-            ("acme", Tracker::Linear { workspace: "acme".into() }),
-            (" Acme-Labs ", Tracker::Linear { workspace: "acme-labs".into() }),
-            ("https://linear.app/acme/issue/ABC-12/title", Tracker::Linear { workspace: "acme".into() }),
-            ("Linear.app/acme", Tracker::Linear { workspace: "acme".into() }),
+            ("acme", linear("acme")),
+            (" Acme-Labs ", linear("acme-labs")),
+            ("https://linear.app/acme/issue/ABC-12/title", linear("acme")),
+            ("Linear.app/acme", linear("acme")),
             ("https://linear.app/", Tracker::None),
             ("acme corp", Tracker::None),
-            ("acme?x=1", Tracker::Linear { workspace: "acme".into() }),
+            ("acme?x=1", linear("acme")),
             ("  ", Tracker::None),
         ] {
-            assert_eq!(Tracker::Linear { workspace: typed.into() }.clamped(), expected, "{typed:?}");
+            assert_eq!(linear(typed).clamped(), expected, "{typed:?}");
         }
     }
 
     #[test]
+    fn tracker_keys_areTrimmedUpperCasedAndUnique() {
+        let typed = Tracker::Linear { workspace: "acme".into(), keys: vec![" hoo ".into(), "".into(), "Hoo".into(), "eng".into()] };
+        assert_eq!(typed.clamped(), Tracker::Linear { workspace: "acme".into(), keys: vec!["HOO".into(), "ENG".into()] });
+    }
+
+    #[test]
     fn tracker_ticketUrl_linksToTheIssueOfEachTracker() {
-        assert_eq!(Tracker::Jira { site: "acme.atlassian.net".into() }.ticket_url("ABC-12").as_deref(), Some("https://acme.atlassian.net/browse/ABC-12"));
-        assert_eq!(Tracker::Linear { workspace: "acme".into() }.ticket_url("ENG-7").as_deref(), Some("https://linear.app/acme/issue/ENG-7"));
+        assert_eq!(jira("acme.atlassian.net").ticket_url("ABC-12").as_deref(), Some("https://acme.atlassian.net/browse/ABC-12"));
+        assert_eq!(linear("acme").ticket_url("ENG-7").as_deref(), Some("https://linear.app/acme/issue/ENG-7"));
         assert_eq!(Tracker::None.ticket_url("ABC-12"), None);
     }
 
@@ -243,9 +283,14 @@ mod tests {
             }
             serde_json::from_str::<File>(&format!(r#"{{"tracker":{json}}}"#)).unwrap().tracker
         };
-        assert_eq!(tracker(r#"{"kind":"jira","site":"acme.atlassian.net"}"#), Tracker::Jira { site: "acme.atlassian.net".into() });
-        assert_eq!(tracker(r#"{"kind":"linear","workspace":"acme"}"#), Tracker::Linear { workspace: "acme".into() });
+        assert_eq!(tracker(r#"{"kind":"jira","site":"acme.atlassian.net"}"#), jira("acme.atlassian.net"));
+        assert_eq!(tracker(r#"{"kind":"linear","workspace":"acme"}"#), linear("acme"));
         assert_eq!(tracker(r#"{"kind":"linear"}"#), Tracker::None);
+        assert_eq!(
+            tracker(r#"{"kind":"linear","workspace":"acme","keys":["HOO"]}"#),
+            Tracker::Linear { workspace: "acme".into(), keys: vec!["HOO".into()] }
+        );
+        assert_eq!(tracker(r#"{"kind":"jira","site":"acme.atlassian.net","keys":"HOO"}"#), jira("acme.atlassian.net"));
         assert_eq!(tracker(r#"{"kind":"youtrack","site":"x"}"#), Tracker::None);
     }
 
