@@ -754,9 +754,13 @@ Section Install
   {{/each}}
 
   ; Copy external binaries
+  ; Rado: if rado-mcp.exe could be neither stopped nor moved aside, keep the old one rather than
+  ; stop on NSIS's Abort/Retry/Ignore box
+  SetOverwrite try
   {{#each binaries}}
     File /a "/oname={{this}}" "{{no-escape @key}}"
   {{/each}}
+  SetOverwrite on
 
   ; Create file associations
   {{#each file_associations as |association| ~}}
@@ -878,9 +882,8 @@ Section Uninstall
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  ; Rado: stop or move aside a running rado-mcp.exe; a moved copy that is still running goes at reboot
+  ; Rado: stop or move aside a running rado-mcp.exe; a moved copy that is still running stays behind
   !insertmacro RadoFreeMcpServer
-  Delete /REBOOTOK "$INSTDIR\rado-mcp.exe.old"
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
