@@ -31,23 +31,29 @@ pub enum Tracker {
     None,
     /// `site` is the host, such as `acme.atlassian.net`.
     Jira { site: String },
+    /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
+    Linear { workspace: String },
 }
 
 impl Tracker {
-    pub fn jira_site(&self) -> Option<&str> {
+    /// The issue page for a ticket key such as `ABC-12`.
+    pub fn ticket_url(&self, key: &str) -> Option<String> {
         match self {
-            Tracker::Jira { site } => Some(site),
             Tracker::None => None,
+            Tracker::Jira { site } => Some(format!("https://{site}/browse/{key}")),
+            Tracker::Linear { workspace } => Some(format!("https://linear.app/{workspace}/issue/{key}")),
         }
     }
 
     fn clamped(self) -> Self {
-        match self {
-            Tracker::Jira { site } => match jira_host(&site) {
-                host if host.is_empty() => Tracker::None,
-                site => Tracker::Jira { site },
-            },
-            other => other,
+        let tracker = match self {
+            Tracker::Jira { site } => Tracker::Jira { site: jira_host(&site) },
+            Tracker::Linear { workspace } => Tracker::Linear { workspace: linear_slug(&workspace) },
+            Tracker::None => Tracker::None,
+        };
+        match &tracker {
+            Tracker::Jira { site: value } | Tracker::Linear { workspace: value } if value.is_empty() => Tracker::None,
+            _ => tracker,
         }
     }
 }
@@ -86,10 +92,21 @@ impl Workspace {
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
-pub fn jira_host(site: &str) -> String {
+fn jira_host(site: &str) -> String {
     let site = site.trim();
     let without_scheme = site.find("://").map_or(site, |i| &site[i + 3..]);
     without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default().to_string()
+}
+
+/// The slug of a typed Linear workspace: `https://linear.app/Acme/issue/ABC-1` and ` acme ` give `acme`.
+/// Empty when it holds anything but letters, digits, `-` and `_`, since it goes into a URL.
+fn linear_slug(typed: &str) -> String {
+    let typed = typed.trim();
+    let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
+    let mut segments = without_scheme.split(['/', '?', '#', '\\']);
+    let first = segments.next().unwrap_or_default();
+    let slug = if first.eq_ignore_ascii_case("linear.app") { segments.next().unwrap_or_default() } else { first };
+    if slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') { slug.to_ascii_lowercase() } else { String::new() }
 }
 
 /// The settings of the single Azure DevOps org from before workspaces, read from the same file.
@@ -191,6 +208,45 @@ mod tests {
         ] {
             assert_eq!(Tracker::Jira { site: typed.into() }.clamped(), expected, "{typed:?}");
         }
+    }
+
+    #[test]
+    fn tracker_linearWorkspace_keepsOnlyTheSlugAndEmptyOrUnsafeIsNone() {
+        for (typed, expected) in [
+            ("acme", Tracker::Linear { workspace: "acme".into() }),
+            (" Acme-Labs ", Tracker::Linear { workspace: "acme-labs".into() }),
+            ("https://linear.app/acme/issue/ABC-12/title", Tracker::Linear { workspace: "acme".into() }),
+            ("Linear.app/acme", Tracker::Linear { workspace: "acme".into() }),
+            ("https://linear.app/", Tracker::None),
+            ("acme corp", Tracker::None),
+            ("acme?x=1", Tracker::Linear { workspace: "acme".into() }),
+            ("  ", Tracker::None),
+        ] {
+            assert_eq!(Tracker::Linear { workspace: typed.into() }.clamped(), expected, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn tracker_ticketUrl_linksToTheIssueOfEachTracker() {
+        assert_eq!(Tracker::Jira { site: "acme.atlassian.net".into() }.ticket_url("ABC-12").as_deref(), Some("https://acme.atlassian.net/browse/ABC-12"));
+        assert_eq!(Tracker::Linear { workspace: "acme".into() }.ticket_url("ENG-7").as_deref(), Some("https://linear.app/acme/issue/ENG-7"));
+        assert_eq!(Tracker::None.ticket_url("ABC-12"), None);
+    }
+
+    #[test]
+    fn tracker_storedForms_loadAndJunkIsNone() {
+        let tracker = |json: &str| {
+            #[derive(Deserialize)]
+            struct File {
+                #[serde(deserialize_with = "lenient_tracker")]
+                tracker: Tracker,
+            }
+            serde_json::from_str::<File>(&format!(r#"{{"tracker":{json}}}"#)).unwrap().tracker
+        };
+        assert_eq!(tracker(r#"{"kind":"jira","site":"acme.atlassian.net"}"#), Tracker::Jira { site: "acme.atlassian.net".into() });
+        assert_eq!(tracker(r#"{"kind":"linear","workspace":"acme"}"#), Tracker::Linear { workspace: "acme".into() });
+        assert_eq!(tracker(r#"{"kind":"linear"}"#), Tracker::None);
+        assert_eq!(tracker(r#"{"kind":"youtrack","site":"x"}"#), Tracker::None);
     }
 
     #[test]

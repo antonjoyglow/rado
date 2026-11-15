@@ -34,7 +34,7 @@ export interface ReviewItem extends PrRef {
   members: Member[];
   /** Age of the row's most recently opened PR. */
   newestAgeHours: number;
-  /** The Jira issue key in the branch name, if any. */
+  /** The tracker's issue key in the branch name, if any; none without a tracker. */
   ticket: string | null;
   author: string;
   target: string;
@@ -58,8 +58,8 @@ export interface ReviewItem extends PrRef {
   actionable: boolean;
 }
 
-/** Where ticket keys in branch names link to. A Linear workspace slug is the planned next kind. */
-export type Tracker = { kind: "none" } | { kind: "jira"; site: string };
+/** Where ticket keys in branch names link to: a Jira host, or a Linear workspace slug (`acme` in linear.app/acme). */
+export type Tracker = { kind: "none" } | { kind: "jira"; site: string } | { kind: "linear"; workspace: string };
 
 /** A named set of sources; only the active one is polled. A source is on once its secret is saved. */
 export interface Workspace {

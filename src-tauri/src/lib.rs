@@ -27,7 +27,7 @@ use tokio::sync::{Notify, watch};
 
 use score::{ReviewItem, VoteMemory};
 use store::{Keyring, Settings, Store};
-use workspace::Workspace;
+use workspace::{Tracker, Workspace};
 
 const PILL: &str = "pill";
 const LIST: &str = "list";
@@ -98,7 +98,8 @@ struct Snapshot {
 
 impl Inner {
     fn rows(&self) -> Vec<group::ReviewRow> {
-        group::group(&self.ws.items, &self.ws.related, &self.ws.urls)
+        let tracker = self.settings.active().map(|w| &w.tracker).unwrap_or(&Tracker::None);
+        group::group(&self.ws.items, &self.ws.related, &self.ws.urls, tracker)
     }
 
     fn row(&self, key: &str) -> Result<group::ReviewRow, String> {
@@ -608,14 +609,12 @@ fn open_row(app: AppHandle, key: String) -> Result<(), String> {
 #[tauri::command]
 fn open_ticket(app: AppHandle, key: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    let (row, site) = {
+    let (row, tracker) = {
         let inner = shared.inner.lock().expect("state lock");
-        let site = inner.settings.active().and_then(|w| w.tracker.jira_site()).map(str::to_string);
-        (inner.row(&key)?, site)
+        (inner.row(&key)?, inner.settings.active().map(|w| w.tracker.clone()).unwrap_or_default())
     };
-    let ticket = row.ticket.ok_or("That row's branch names no Jira issue")?;
-    let site = site.ok_or("Set this workspace's Jira site in settings")?;
-    open_links(&app, vec![format!("https://{site}/browse/{ticket}")])
+    let ticket = row.ticket.ok_or("That row's branch names no ticket")?;
+    open_links(&app, vec![tracker.ticket_url(&ticket).ok_or("Set this workspace's tracker in settings")?])
 }
 
 #[tauri::command]
@@ -777,8 +776,12 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
 #[tauri::command]
 fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
     let mut refetch = false;
+    let typed_tracker = workspace.tracker != Tracker::None;
     let result = edit_workspaces(&app, |s| {
         let mut workspace = workspace.clamped();
+        if typed_tracker && workspace.tracker == Tracker::None {
+            return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
+        }
         let active = workspace.id == s.settings.active_workspace;
         let slot = s.settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("That workspace is gone")?;
         if workspace.name.is_empty() {
