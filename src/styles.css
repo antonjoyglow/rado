@@ -188,6 +188,10 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .settings .inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg); }
 .settings input.minutes, .settings input.scale { flex: none; width: 64px; }
 .settings input.side { flex: none; width: 72px; }
+.settings .field[hidden] { display: none; }
+.settings .colour-name { width: 76px; }
+.settings input.hex { flex: none; width: 84px; }
+.settings input[type="color"] { width: 34px; height: 26px; padding: 1px 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .settings button:disabled { opacity: 0.4; }
 .settings button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); }
 .chip[data-on="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
