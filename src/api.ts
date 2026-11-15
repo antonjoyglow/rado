@@ -70,11 +70,15 @@ export interface Settings {
   listHeight: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
+  /** Colours of the review list; the counter keeps its own look. */
+  theme: Theme;
   /** Host of the Jira site ticket chips link to, such as `yourcompany.atlassian.net`; empty hides the chips. */
   jiraSite: string;
 }
 
 export type Browser = "system" | "edge" | "chrome";
+/** "system" follows Windows' light or dark app mode. */
+export type Theme = "system" | "dark" | "light" | "highContrast";
 
 export interface Snapshot {
   items: ReviewItem[];

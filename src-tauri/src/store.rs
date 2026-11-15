@@ -26,15 +26,18 @@ pub struct Settings {
     pub list_width: u32,
     #[serde(deserialize_with = "lenient_number::<_, 860>")]
     pub list_height: u32,
-    #[serde(deserialize_with = "lenient_browser")]
+    #[serde(deserialize_with = "lenient_choice")]
     pub browser: Browser,
+    /// Colours of the review list; the counter keeps its own look.
+    #[serde(deserialize_with = "lenient_choice")]
+    pub theme: Theme,
     /// Host of the Jira site ticket chips link to; empty hides the chips.
     pub jira_site: String,
 }
 
-/// Like `lenient_number`: a hand-edited `null` or unknown browser falls back to the default browser
+/// Like `lenient_number`: a hand-edited `null` or unknown choice (browser, theme) falls back to its default
 /// instead of failing the whole file.
-fn lenient_browser<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Browser, D::Error> {
+fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
@@ -47,6 +50,17 @@ pub enum Browser {
     Chrome,
     #[default]
     System,
+}
+
+/// Colours of the review list. `System` follows Windows' light or dark app mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Theme {
+    #[default]
+    System,
+    Dark,
+    Light,
+    HighContrast,
 }
 
 impl Browser {
@@ -107,6 +121,7 @@ impl Default for Settings {
             list_width: 640,
             list_height: 860,
             browser: Browser::System,
+            theme: Theme::System,
             jira_site: String::new(),
         }
     }
@@ -233,6 +248,25 @@ mod tests {
             assert_eq!((settings.organization.as_str(), settings.browser), ("org", expected), "browser {raw}");
         }
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().browser, Browser::System);
+    }
+
+    #[test]
+    fn settings_theme_readsKnownNamesAndFallsBackToSystem() {
+        for (raw, expected) in [
+            ("\"dark\"", Theme::Dark),
+            ("\"light\"", Theme::Light),
+            ("\"highContrast\"", Theme::HighContrast),
+            ("\"system\"", Theme::System),
+            ("\"sepia\"", Theme::System),
+            ("null", Theme::System),
+            ("1", Theme::System),
+        ] {
+            let json = format!(r#"{{"organization":"org","theme":{raw}}}"#);
+            let settings = serde_json::from_str::<Settings>(&json).unwrap();
+            assert_eq!((settings.organization.as_str(), settings.theme), ("org", expected), "theme {raw}");
+        }
+        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().theme, Theme::System);
+        assert_eq!(serde_json::to_value(Theme::HighContrast).unwrap(), "highContrast");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { api, watchSnapshot, type Browser, type ReviewItem, type Snapshot, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
 import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
@@ -71,9 +71,12 @@ function tabList<K extends string>(
 
 const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
-const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
+const THEMES: [Theme, string][] = [["system", "System"], ["dark", "Dark"], ["light", "Light"], ["highContrast", "High contrast"]];
+const LIST_SIZES:[string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
 
 export function mountList(root: HTMLElement): void {
+  // Until the first snapshot brings the saved theme.
+  document.documentElement.dataset.theme = "system";
   const status = h("div", { class: "status" });
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
@@ -179,6 +182,7 @@ export function mountList(root: HTMLElement): void {
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     snapshot = s;
+    document.documentElement.dataset.theme = s.settings.theme;
     renderStatus();
     renderBody();
   });
@@ -307,7 +311,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = {
-    pat: note(), org: note(), teams: note(), jira: note(), token: note(), minutes: note(), scale: note(), size: note(), browser: note(),
+    pat: note(), org: note(), teams: note(), jira: note(), token: note(), minutes: note(), scale: note(), size: note(), theme: note(), browser: note(),
     notify: note(), autostart: note(),
   };
 
@@ -410,6 +414,15 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
     void save(n.browser);
   };
 
+  const themes = THEMES.map(([value, label]) =>
+    h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
+  );
+  const setTheme = (value: Theme) => {
+    settings.theme = value;
+    themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === value)));
+    void save(n.theme);
+  };
+
   const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
@@ -431,6 +444,7 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
       h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
       h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+      h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
