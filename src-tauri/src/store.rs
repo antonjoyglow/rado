@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -128,7 +129,13 @@ impl Default for Settings {
 
 /// The OS credential store, behind a seam so migration can be tested without touching it.
 pub trait Secrets: Send + Sync {
-    fn get(&self, user: &str) -> Option<String>;
+    /// `Ok(None)` when there is no such entry; `Err` when the store couldn't be read.
+    fn read(&self, user: &str) -> Result<Option<String>, String>;
+
+    fn get(&self, user: &str) -> Option<String> {
+        self.read(user).ok().flatten()
+    }
+
     fn set(&self, user: &str, value: &str) -> Result<(), String>;
     /// Deleting an entry that isn't there succeeds.
     fn delete(&self, user: &str) -> Result<(), String>;
@@ -147,8 +154,12 @@ impl Keyring {
 }
 
 impl Secrets for Keyring {
-    fn get(&self, user: &str) -> Option<String> {
-        keyring::Entry::new(&self.service, user).ok()?.get_password().ok()
+    fn read(&self, user: &str) -> Result<Option<String>, String> {
+        match keyring::Entry::new(&self.service, user).and_then(|e| e.get_password()) {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!("Credential Manager: {e}")),
+        }
     }
 
     fn set(&self, user: &str, value: &str) -> Result<(), String> {
@@ -175,13 +186,15 @@ pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
     secrets: Box<dyn Secrets>,
+    /// Set when the settings file couldn't be copied aside, so that saving would destroy the only copy.
+    frozen: AtomicBool,
 }
 
 impl Store {
     pub fn new(config_dir: &Path, data_dir: &Path, secrets: Box<dyn Secrets>) -> Self {
         let _ = std::fs::create_dir_all(config_dir);
         let _ = std::fs::create_dir_all(data_dir);
-        Self { config_dir: config_dir.into(), data_dir: data_dir.into(), secrets }
+        Self { config_dir: config_dir.into(), data_dir: data_dir.into(), secrets, frozen: AtomicBool::new(false) }
     }
 
     fn settings_path(&self) -> PathBuf {
@@ -217,6 +230,7 @@ impl Store {
             settings.active_workspace.clone_from(&id);
             settings.migrating_to = Some(id);
             if file.is_some() && let Err(e) = self.back_up(&path) {
+                self.frozen.store(true, Ordering::Relaxed);
                 warnings.push(e);
                 return Loaded { settings: settings.clamped(), warning: Some(warnings.join(" · ")) };
             }
@@ -248,7 +262,10 @@ impl Store {
         let copy = self.config_dir.join(format!("settings.unreadable-{secs}.json"));
         match std::fs::copy(path, &copy) {
             Ok(_) => format!("settings.json couldn't be read; kept it as {} and started with defaults", copy.display()),
-            Err(e) => format!("settings.json couldn't be read or copied ({e}); started with defaults"),
+            Err(e) => {
+                self.frozen.store(true, Ordering::Relaxed);
+                format!("settings.json couldn't be read or copied ({e}); running on defaults without saving over it")
+            }
         }
     }
 
@@ -271,8 +288,8 @@ impl Store {
             }
         }
         for (legacy, key) in [(workspace::LEGACY_PAT_KEY, workspace::pat_key(id)), (workspace::LEGACY_GITHUB_KEY, workspace::github_key(id))] {
-            let Some(value) = self.secrets.get(legacy) else { continue };
-            if self.secrets.get(&key).is_none() {
+            let Some(value) = self.secrets.read(legacy)? else { continue };
+            if self.secrets.read(&key)?.is_none() {
                 self.secrets.set(&key, &value)?;
                 if self.secrets.get(&key).as_deref() != Some(value.as_str()) {
                     return Err(format!("{key} didn't read back"));
@@ -285,6 +302,9 @@ impl Store {
 
     /// Written whole and renamed into place: `rado-mcp` reads the active workspace from it.
     pub fn save_settings(&self, settings: &Settings) -> Result<(), String> {
+        if self.frozen.load(Ordering::Relaxed) {
+            return Err("settings.json couldn't be copied aside, so Rado won't save over it this run".into());
+        }
         queue::write_json_atomic(&self.settings_path(), settings)
     }
 
@@ -360,6 +380,7 @@ pub(crate) mod tests {
     pub struct MemorySecrets {
         entries: Arc<Mutex<HashMap<String, String>>>,
         fail_writes: Arc<Mutex<bool>>,
+        fail_reads: Arc<Mutex<bool>>,
     }
 
     impl MemorySecrets {
@@ -377,8 +398,11 @@ pub(crate) mod tests {
     }
 
     impl Secrets for MemorySecrets {
-        fn get(&self, user: &str) -> Option<String> {
-            self.entries.lock().unwrap().get(user).cloned()
+        fn read(&self, user: &str) -> Result<Option<String>, String> {
+            if *self.fail_reads.lock().unwrap() {
+                return Err("unavailable".into());
+            }
+            Ok(self.entries.lock().unwrap().get(user).cloned())
         }
 
         fn set(&self, user: &str, value: &str) -> Result<(), String> {
@@ -515,6 +539,37 @@ pub(crate) mod tests {
 
         assert_eq!((second.settings.active_workspace.as_str(), second.settings.migrating_to, second.warning), (id.as_str(), None, None));
         assert_eq!(secrets.keys(), [pat_key(&id)]);
+    }
+
+    #[test]
+    fn load_credentialStoreUnreadable_keepsTheOldEntryAndRetriesNextStart() {
+        let dir = TempDir::new("unreadable");
+        std::fs::write(dir.0.join("settings.json"), OLD_FILE).unwrap();
+        let secrets = MemorySecrets::with(&[(LEGACY_PAT_KEY, "pat")]);
+        *secrets.fail_reads.lock().unwrap() = true;
+
+        let first = store(&dir, &secrets).load();
+
+        assert!(first.settings.migrating_to.is_some());
+        *secrets.fail_reads.lock().unwrap() = false;
+        let id = first.settings.active_workspace;
+        store(&dir, &secrets).load();
+        assert_eq!(secrets.keys(), [pat_key(&id)]);
+    }
+
+    #[test]
+    fn load_fileThatCannotBeReadOrCopied_isNeverSavedOver() {
+        let dir = TempDir::new("uncopyable");
+        std::fs::create_dir(dir.0.join("settings.json")).unwrap();
+        std::fs::write(dir.0.join("settings.json").join("inside"), "keep").unwrap();
+        let store = store(&dir, &MemorySecrets::default());
+
+        let loaded = store.load();
+
+        assert!(loaded.warning.unwrap().contains("without saving over it"));
+        assert_eq!(loaded.settings.workspaces.len(), 1);
+        assert!(store.save_settings(&loaded.settings).is_err());
+        assert_eq!(std::fs::read_to_string(dir.0.join("settings.json").join("inside")).unwrap(), "keep");
     }
 
     #[test]

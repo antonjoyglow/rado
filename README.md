@@ -90,7 +90,7 @@ The extension asks for the `tabs` and `tabGroups` permissions, and it runs on `d
   - It leaves out hidden and quiet PRs, your own PRs, and PRs already drafted at their current commit.
   - It refuses when the queue is older than three polls (at least 30 minutes), which means Rado isn't running or can't reach Azure DevOps.
   - A Not mine, Hide or Show takes effect at the next poll.
-- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json`, so later runs skip the PR until someone pushes again. Nothing changes in Azure DevOps or in Rado's list.
+- `mark_drafted(prId, commit)`: records the draft in the active workspace's `agent-drafts.json`, so later runs skip the PR until someone pushes again. `commit` must be the PR's `sourceCommit` in the current queue, so a PR id from another workspace's organization isn't marked by mistake. Nothing changes in Azure DevOps or in Rado's list.
 
 **Build and register it**
 

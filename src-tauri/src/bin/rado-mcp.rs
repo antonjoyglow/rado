@@ -97,12 +97,13 @@ fn tools() -> Value {
 
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Value {
     // Read on every call, so a switch in Rado is followed without restarting this server.
-    let dir = &queue::active_workspace_dir(root).unwrap_or_else(|| root.to_path_buf());
-    let outcome = match params["name"].as_str() {
-        Some("list_review_queue") => list(dir, now),
-        Some("mark_drafted") => mark_drafted(dir, &params["arguments"]),
+    let dir = queue::active_workspace_dir(root)
+        .ok_or_else(|| format!("Rado has no active workspace in {}. Start Rado once to set it up.", root.display()));
+    let outcome = dir.and_then(|dir| match params["name"].as_str() {
+        Some("list_review_queue") => list(&dir, now),
+        Some("mark_drafted") => mark_drafted(&dir, &params["arguments"]),
         other => Err(format!("Unknown tool {other:?}")),
-    };
+    });
     match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
@@ -137,8 +138,10 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     let pr_id = args["prId"].as_i64().ok_or("prId (an integer) is required")?;
     let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
     let queue = read_queue(dir)?;
-    if !queue.contains(pr_id) {
-        return Err(format!("PR {pr_id} is not in Rado's review queue"));
+    // Matching the commit too keeps a PR id from another workspace's organization from being marked here.
+    let queued = queue.branches.iter().flat_map(|b| &b.prs).any(|p| p.pr_id == pr_id && p.source_commit.as_deref() == Some(commit));
+    if !queued {
+        return Err(format!("PR {pr_id} at {commit} is not in Rado's review queue; list it again"));
     }
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
@@ -176,10 +179,14 @@ mod tests {
         make_queue(vec![]).refreshed + chrono::Duration::minutes(minutes_after_refresh)
     }
 
+    /// A data folder whose active workspace `w1` has a queue.
     fn with_queue(name: &str) -> TempDir {
         let dir = TempDir::new(name);
+        let workspace = queue::workspace_dir(&dir.0, "w1");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"w1"}"#).unwrap();
         let q = make_queue(vec![Branch { branch: "ABC-1".into(), prs: vec![pr(1, "c1"), pr(2, "c2")] }]);
-        write_json_atomic(&dir.0.join(QUEUE_FILE), &q).unwrap();
+        write_json_atomic(&workspace.join(QUEUE_FILE), &q).unwrap();
         dir
     }
 
@@ -246,7 +253,8 @@ mod tests {
 
     #[test]
     fn listReviewQueue_noQueueFile_saysToStartRado() {
-        let dir = TempDir::new("missing");
+        let dir = with_queue("missing");
+        std::fs::remove_file(queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE)).unwrap();
         let result = call_tool(&dir.0, at(0), "list_review_queue", json!({}));
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"].as_str().unwrap().contains("Start Rado"));
@@ -272,6 +280,14 @@ mod tests {
     }
 
     #[test]
+    fn markDrafted_sameIdAtAnotherCommit_isAnError() {
+        let dir = with_queue("othercommit");
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c2" }));
+        assert_eq!(result["isError"], true);
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
     fn activeWorkspace_listsAndMarksInItsOwnFolder() {
         let root = TempDir::new("workspaces");
         let (a, b) = (queue::workspace_dir(&root.0, "a1"), queue::workspace_dir(&root.0, "b2"));
@@ -291,10 +307,17 @@ mod tests {
     }
 
     #[test]
-    fn activeWorkspace_unsafeId_fallsBackToTheRootFolder() {
-        let dir = with_queue("unsafe");
-        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"../.."}"#).unwrap();
-        assert_eq!(call_tool(&dir.0, at(1), "list_review_queue", json!({})).get("isError"), None);
+    fn activeWorkspace_missingOrUnsafe_isAnError() {
+        for settings in [None, Some(r#"{"activeWorkspace":"../.."}"#)] {
+            let dir = TempDir::new("unsafe");
+            write_json_atomic(&dir.0.join(QUEUE_FILE), &make_queue(vec![])).unwrap();
+            if let Some(settings) = settings {
+                std::fs::write(dir.0.join(queue::SETTINGS_FILE), settings).unwrap();
+            }
+            let result = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
+            assert_eq!(result["isError"], true, "{settings:?}");
+            assert!(result["content"][0]["text"].as_str().unwrap().contains("no active workspace"));
+        }
     }
 
     #[test]

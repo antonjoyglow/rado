@@ -72,6 +72,8 @@ struct Inner {
     ws: WorkspaceState,
     parked: HashMap<String, WorkspaceState>,
     saved: HashMap<String, Saved>,
+    /// What went wrong loading the settings; shown for the whole run, since polls replace `ws.error`.
+    load_warning: Option<String>,
     polling: bool,
     credentials_generation: u64,
     list_hidden_at: Option<Instant>,
@@ -111,7 +113,10 @@ impl Inner {
             items: self.rows(),
             last_refreshed: self.ws.last_refreshed,
             polling: self.polling,
-            error: self.ws.error.clone(),
+            error: match (&self.load_warning, &self.ws.error) {
+                (Some(warning), Some(error)) => Some(format!("{warning} · {error}")),
+                (warning, error) => warning.clone().or_else(|| error.clone()),
+            },
             has_pat: saved.pat,
             has_github_token: saved.github_token,
             settings: self.settings.clone(),
@@ -147,12 +152,14 @@ fn load_state(store: &Store, id: &str) -> WorkspaceState {
 
 fn update(app: &AppHandle, change: impl FnOnce(&mut Inner)) {
     let shared = app.state::<Shared>();
-    let (snapshot, generation) = {
+    let snapshot = {
         let mut inner = shared.inner.lock().expect("state lock");
         change(&mut inner);
-        (inner.snapshot(), inner.credentials_generation)
+        // Sent under the lock, so the watch can't go back to an older generation and cancel a newer poll.
+        let generation = inner.credentials_generation;
+        shared.generation.send_if_modified(|g| std::mem::replace(g, generation) != generation);
+        inner.snapshot()
     };
-    shared.generation.send_if_modified(|g| std::mem::replace(g, generation) != generation);
     let _ = app.emit("snapshot", snapshot);
 }
 
@@ -298,17 +305,21 @@ struct Applied {
 fn apply(app: &AppHandle, workspace_id: &str, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>) {
     let shared = app.state::<Shared>();
     let mut applied = None;
-    update(app, |s| applied = apply_poll(s, generation, ado, github, Utc::now()));
+    // Saved under the lock, so a hide or a delete made after this poll can't be overwritten by its older copy.
+    update(app, |s| {
+        applied = apply_poll(s, generation, ado, github, Utc::now());
+        let Some(applied) = &applied else { return };
+        if let Some(memory) = &applied.memory {
+            let _ = shared.store.save_memory(workspace_id, memory);
+        }
+        if let Some(hidden) = &applied.hidden {
+            let _ = shared.store.save_hidden(workspace_id, hidden);
+        }
+        if let Some(queue) = &applied.queue {
+            let _ = shared.store.save_queue(workspace_id, queue);
+        }
+    });
     let Some(applied) = applied else { return };
-    if let Some(memory) = &applied.memory {
-        let _ = shared.store.save_memory(workspace_id, memory);
-    }
-    if let Some(hidden) = &applied.hidden {
-        let _ = shared.store.save_hidden(workspace_id, hidden);
-    }
-    if let Some(queue) = &applied.queue {
-        let _ = shared.store.save_queue(workspace_id, queue);
-    }
     if applied.notify && !applied.fresh.is_empty() {
         let title = match applied.fresh.len() {
             1 => "A PR needs you".to_string(),
@@ -766,7 +777,7 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
 #[tauri::command]
 fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
     let mut refetch = false;
-    edit_workspaces(&app, |s| {
+    let result = edit_workspaces(&app, |s| {
         let mut workspace = workspace.clamped();
         let active = workspace.id == s.settings.active_workspace;
         let slot = s.settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("That workspace is gone")?;
@@ -786,57 +797,53 @@ fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
             }
         }
         Ok(())
-    })?;
+    });
+    // The bump cancelled the poll in flight; even when the save failed, the change stands for this run and needs a poll.
     if refetch {
         app.state::<Shared>().wake.notify_one();
     }
-    Ok(())
+    result
 }
 
 #[tauri::command]
 fn switch_workspace(app: AppHandle, id: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    let switched = edit_workspaces(&app, |s| {
-        if !s.settings.workspaces.iter().any(|w| w.id == id) {
-            return Err("That workspace is gone".to_string());
-        }
-        Ok(s.switch_to(&id, || load_state(&shared.store, &id)))
-    })?;
+    let mut switched = false;
+    let result = edit_workspaces(&app, |s| {
+        switched = s.switch_to(&id, || load_state(&shared.store, &id));
+        if switched || id == s.settings.active_workspace { Ok(()) } else { Err("That workspace is gone".to_string()) }
+    });
     if switched {
         shared.wake.notify_one();
     }
-    Ok(())
+    result
 }
 
 /// Deletes a workspace with its secrets and data. The last one stays; deleting the active one switches to its neighbour.
 #[tauri::command]
 fn delete_workspace(app: AppHandle, id: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    {
-        let inner = shared.inner.lock().expect("state lock");
-        let list = &inner.settings.workspaces;
-        if !list.iter().any(|w| w.id == id) {
-            return Err("That workspace is gone".into());
-        }
+    let mut switched = false;
+    let result = edit_workspaces(&app, |s| {
+        let list = &s.settings.workspaces;
+        let index = list.iter().position(|w| w.id == id).ok_or("That workspace is gone")?;
         if list.len() == 1 {
             return Err("Keep at least one workspace".into());
         }
-    }
-    let mut switched = false;
-    edit_workspaces(&app, |s| {
-        let index = s.settings.workspaces.iter().position(|w| w.id == id).ok_or("That workspace is gone")?;
         if id == s.settings.active_workspace {
-            let neighbour = s.settings.workspaces[if index + 1 < s.settings.workspaces.len() { index + 1 } else { index - 1 }].id.clone();
+            let neighbour = list[if index + 1 < list.len() { index + 1 } else { index - 1 }].id.clone();
             switched = s.switch_to(&neighbour, || load_state(&shared.store, &neighbour));
         }
         s.settings.workspaces.remove(index);
         s.parked.remove(&id);
         s.saved.remove(&id);
         Ok(())
-    })?;
+    });
     if switched {
         shared.wake.notify_one();
     }
+    // A failed save leaves it in settings.json; its secrets must still be there when it comes back on the next start.
+    result?;
     shared.store.forget(&id).map_err(|e| format!("Deleted the workspace, but its saved data stayed behind: {e}"))
 }
 
@@ -987,8 +994,8 @@ pub fn run() {
                 .iter()
                 .map(|w| (w.id.clone(), Saved { pat: store.pat(&w.id).is_some(), github_token: store.github_token(&w.id).is_some() }))
                 .collect();
-            let ws = WorkspaceState { error: loaded.warning, ..load_state(&store, &loaded.settings.active_workspace) };
-            let inner = Inner { settings: loaded.settings, ws, saved, ..Default::default() };
+            let ws = load_state(&store, &loaded.settings.active_workspace);
+            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, ..Default::default() };
             let pill_scale = inner.settings.pill_scale;
             app.manage(Shared { store, wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.

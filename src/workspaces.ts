@@ -48,9 +48,10 @@ export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; 
         type: "button",
         role: "menuitemradio",
         ariaChecked: String(w.id === active),
+        data: { id: w.id },
         onclick: () => {
           close();
-          if (w.id !== active) void api.switchWorkspace(w.id);
+          void api.switchWorkspace(w.id);
         },
       }, w.name)),
       h("button", { type: "button", role: "menuitem", class: "manage", onclick: () => { close(); onManage(); } }, "Manage workspaces…"),
@@ -83,8 +84,8 @@ export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; 
     const name = activeWorkspace(s.settings)?.name ?? "";
     label.textContent = name;
     chip.title = `Workspace: ${name} · ${KEYS_HINT}`;
-    chip.hidden = s.settings.workspaces.length === 0;
-    if (!picker.hidden) open();
+    // An open picker keeps its items and focus; only the check mark follows a switch made with the keys.
+    for (const b of items()) if (b.dataset.id) b.ariaChecked = String(b.dataset.id === s.settings.activeWorkspace);
   };
   return { chip, picker, render, close };
 }
@@ -146,7 +147,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
 
   const buildEditor = (original: Workspace, saved: Saved) => {
     const workspace: Workspace = structuredClone(original);
-    const n = { name: note(), pat: note(), org: note(), teams: note(), jira: note(), token: note(), remove: note() };
+    const n = { name: note(), pat: note(), org: note(), teams: note(), jira: note(), token: note() };
     const save = (target: HTMLElement) => api.saveWorkspace(workspace).then(() => ok(target), (e) => fail(target, e));
 
     const name = h("input", {
@@ -189,10 +190,11 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("button", {
         type: "button",
         class: "danger",
-        onclick: () => api.deleteWorkspace(workspace.id).then(() => {
-          selected = snapshot.settings.activeWorkspace;
-          return refresh();
-        }, (e) => fail(n.remove, e)),
+        // The editor is rebuilt when the workspace goes, so the outcome is reported beside the list.
+        onclick: () => api.deleteWorkspace(workspace.id).then(
+          () => ok(listNote, `Deleted “${workspace.name}”`),
+          (e) => fail(listNote, e),
+        ).then(refresh),
       }, "Delete"),
       h("button", { type: "button", onclick: askRemove }, "Cancel"),
     );
@@ -210,7 +212,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("label", {}, caption("Token", n.token), secret("GitHub token", "Paste a token (repo, read:org)", saved.githubToken, n.token, (v) => api.saveGithubToken(workspace.id, v))),
       h("h2", {}, "Tracker"),
       h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
-      h("div", { class: "field" }, caption("", n.remove), removeSlot),
+      removeSlot,
     );
     renderActive(workspace);
   };
