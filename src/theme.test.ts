@@ -26,8 +26,19 @@ describe("contrast", () => {
 describe("customPalette", () => {
   it("setsEveryListVariable", () => {
     expect(Object.keys(customPalette(DARK)).sort()).toEqual(
-      ["--accent", "--bg", "--clear", "--fg", "--hover", "--line", "--low", "--muted", "--normal", "--on-accent", "--urgent"],
+      ["--accent", "--bg", "--clear", "--fg", "--hover", "--line", "--muted", "--normal", "--on-accent", "--urgent"],
     );
+  });
+
+  it("statusText_readsOnMidToneBackgrounds", () => {
+    // Picks whose text itself reads; below that, unreadable() warns instead.
+    for (const [background, text] of [["#808080", "#000000"], ["#3366cc", "#ffffff"], ["#b5309a", "#ffffff"], ["#2e7d32", "#ffffff"]]) {
+      const p = customPalette({ background, text, accent: "#ffd60a" });
+      for (const name of ["--muted", "--urgent", "--normal", "--clear"]) {
+        expect(contrast(p[name], p["--bg"]), `${name} on ${background}`).toBeGreaterThanOrEqual(READABLE);
+        expect(contrast(p[name], p["--hover"]), `${name} on hover of ${background}`).toBeGreaterThanOrEqual(READABLE);
+      }
+    }
   });
 
   it("keepsThePicksAsTheyAre", () => {
@@ -40,6 +51,13 @@ describe("customPalette", () => {
       const p = customPalette(picks);
       expect(contrast(p["--muted"], p["--hover"]), JSON.stringify(picks)).toBeGreaterThanOrEqual(READABLE);
     }
+  });
+
+  it("hover_tintsAwayFromTheTextWhenTowardItWouldNotRead", () => {
+    const p = customPalette({ background: "#2e7d32", text: "#ffffff", accent: "#ffd60a" });
+    expect(contrast(p["--fg"], p["--hover"])).toBeGreaterThanOrEqual(READABLE);
+    // 7% of #e8eaee over #1f2125: lighter, toward the text.
+    expect(customPalette(DARK)["--hover"]).toBe("#2d2f33");
   });
 
   it("textThatBarelyReads_isUsedForMutedToo", () => {

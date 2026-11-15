@@ -425,26 +425,30 @@ function renderSettings(panel: HTMLElement, snapshot: Snapshot, startTab: Settin
     customColours.hidden = value !== "custom";
     void save(n.theme);
   };
-  // A copy, so a live preview never edits the snapshot. Dragging in a picker previews; letting go saves.
+  // A copy, so the snapshot keeps the saved colours. The saved snapshot repaints the list.
   settings.customTheme = { ...settings.customTheme };
-  const saveCustom = () => save(n.custom).then(() => {
-    const hard = unreadable(settings.customTheme);
-    if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
-  });
   const colourRows = CUSTOM_COLOURS.map(([key, label]) => {
     const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
     const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
-    const set = (value: string, commit: boolean) => {
-      settings.customTheme[key] = picker.value = typed.value = value;
-      applyTheme(document.documentElement, "custom", settings.customTheme);
-      if (commit) void saveCustom();
+    const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
+    const set = (value: string) => {
+      const before = settings.customTheme[key];
+      fill(value);
+      api.saveSettings(settings).then(() => {
+        const hard = unreadable(settings.customTheme);
+        if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
+        else ok(n.custom);
+      }, (e) => {
+        // Not saved: a later save of another field must not carry it.
+        fill(before);
+        fail(n.custom, e);
+      });
     };
-    picker.oninput = () => set(picker.value, false);
-    picker.onchange = () => set(picker.value, true);
+    picker.onchange = () => set(picker.value);
     typed.onchange = () => {
       const value = parseHex(typed.value);
       if (value === null) fail(n.custom, "Use a hex colour such as #1f2125.");
-      else set(value, true);
+      else set(value);
     };
     return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
   });

@@ -33,25 +33,32 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// The status colours of the light and dark palettes in styles.css.
-const STATUS_ON_LIGHT = { "--urgent": "#c22d2d", "--normal": "#a35f08", "--low": "#8a9099", "--clear": "#1d7a44" };
-const STATUS_ON_DARK = { "--urgent": "#f26b6b", "--normal": "#d98a1c", "--low": "#8a9099", "--clear": "#4cc07f" };
+// Starting hues for status text, from the light and dark palettes in styles.css.
+const STATUS_ON_LIGHT = { "--urgent": "#c22d2d", "--normal": "#a35f08", "--clear": "#1d7a44" };
+const STATUS_ON_DARK = { "--urgent": "#f26b6b", "--normal": "#d98a1c", "--clear": "#4cc07f" };
+
+/** Every variable a custom theme sets; `--low` is only a dot, so the stylesheet's grey stays. */
+const VARIABLES = ["--bg", "--fg", "--muted", "--line", "--hover", "--accent", "--on-accent", "--urgent", "--normal", "--clear"];
 
 /** Every list colour variable, derived from the three picked colours. */
 export function customPalette({ background: bg, text: fg, accent }: CustomTheme): Record<string, string> {
-  const hover = mix(fg, bg, 0.07);
-  // As faint as still reads at 4.5:1 on the hover colour, else the text colour itself.
-  const muted = [0.6, 0.7, 0.8, 0.9].map((share) => mix(fg, bg, share)).find((c) => contrast(c, hover) >= READABLE) ?? fg;
-  const onAccent = contrast("#000000", accent) >= contrast("#ffffff", accent) ? "#000000" : "#ffffff";
+  // A tint toward the text colour, unless that tint costs the text its 4.5:1; then a tint the other way.
+  const away = luminance(fg) > luminance(bg) ? "#000000" : "#ffffff";
+  const hover = [mix(fg, bg, 0.07), mix(away, bg, 0.07)].find((c) => contrast(fg, c) >= READABLE) ?? mix(fg, bg, 0.07);
+  // `color` blended toward the text colour just enough to read at 4.5:1 on the background and hover colours.
+  const readable = (color: string) =>
+    [0, 0.2, 0.4, 0.6, 0.8].map((share) => mix(fg, color, share)).find((c) => contrast(c, bg) >= READABLE && contrast(c, hover) >= READABLE) ?? fg;
+  const status = luminance(bg) < 0.18 ? STATUS_ON_DARK : STATUS_ON_LIGHT;
   return {
     "--bg": bg,
     "--fg": fg,
-    "--muted": muted,
+    // As faint as still reads.
+    "--muted": readable(mix(fg, bg, 0.6)),
     "--line": mix(fg, bg, 0.18),
     "--hover": hover,
     "--accent": accent,
-    "--on-accent": onAccent,
-    ...(luminance(bg) < 0.18 ? STATUS_ON_DARK : STATUS_ON_LIGHT),
+    "--on-accent": contrast("#000000", accent) >= contrast("#ffffff", accent) ? "#000000" : "#ffffff",
+    ...Object.fromEntries(Object.entries(status).map(([name, color]) => [name, readable(color)])),
   };
 }
 
@@ -66,9 +73,9 @@ export function unreadable({ background, text, accent }: CustomTheme): string[] 
 /** Sets the list's theme on `root`; a custom theme's colours go inline so they beat every stylesheet rule. */
 export function applyTheme(root: HTMLElement, theme: Theme, custom: CustomTheme): void {
   root.dataset.theme = theme;
-  const palette = customPalette(custom);
-  for (const [name, value] of Object.entries(palette)) {
-    if (theme === "custom") root.style.setProperty(name, value);
-    else root.style.removeProperty(name);
+  if (theme === "custom") {
+    for (const [name, value] of Object.entries(customPalette(custom))) root.style.setProperty(name, value);
+  } else {
+    for (const name of VARIABLES) root.style.removeProperty(name);
   }
 }

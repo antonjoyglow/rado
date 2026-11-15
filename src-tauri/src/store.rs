@@ -38,8 +38,8 @@ pub struct Settings {
     pub jira_site: String,
 }
 
-/// Like `lenient_number`: a hand-edited `null` or unknown choice (browser, theme) falls back to its default
-/// instead of failing the whole file.
+/// Like `lenient_number`: a hand-edited `null`, unknown or misshapen value (browser, theme, custom colours)
+/// falls back to its default instead of failing the whole file.
 fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
@@ -97,7 +97,8 @@ impl CustomTheme {
 
 /// `#RRGGBB` or `rrggbb`, trimmed, as lowercase `#rrggbb`.
 fn hex_color(typed: &str) -> Option<String> {
-    let digits = typed.trim().trim_start_matches('#');
+    let typed = typed.trim();
+    let digits = typed.strip_prefix('#').unwrap_or(typed);
     (digits.len() == 6 && digits.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", digits.to_ascii_lowercase()))
 }
 
@@ -320,7 +321,7 @@ mod tests {
 
     #[test]
     fn settings_customThemeOfWrongShape_fallsBackToDefaultColours() {
-        for raw in ["null", "\"red\"", "[1,2]", r#"{"background":7}"#] {
+        for raw in ["null", "\"red\"", "[1,2]", r#"{"background":7}"#, r###"{"background":"##1f2125"}"###] {
             let json = format!(r#"{{"organization":"org","customTheme":{raw}}}"#);
             let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
             assert_eq!((settings.organization.as_str(), settings.custom_theme), ("org", CustomTheme::default()), "customTheme {raw}");
