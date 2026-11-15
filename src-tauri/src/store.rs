@@ -519,7 +519,7 @@ pub(crate) mod tests {
         assert_eq!((s.poll_minutes, s.notify, s.pill_scale), (5, false, 120));
         let [ws] = s.workspaces.as_slice() else { panic!("one workspace: {:?}", s.workspaces) };
         assert_eq!((ws.name.as_str(), ws.azure_dev_ops.organization.as_str(), ws.azure_dev_ops.teams.as_slice()), ("contoso", "contoso", ["TeamAlpha".to_string()].as_slice()));
-        assert_eq!(ws.tracker, Tracker::Jira { site: "acme.atlassian.net".into() });
+        assert_eq!(ws.tracker, Tracker::Jira { site: "acme.atlassian.net".into(), keys: Vec::new() });
         assert_eq!((s.active_workspace.as_str(), s.migrating_to.as_deref()), (ws.id.as_str(), None));
         assert_eq!(secrets.keys(), { let mut k = vec![github_key(&ws.id), pat_key(&ws.id)]; k.sort(); k });
         assert_eq!((secrets.get(&pat_key(&ws.id)).as_deref(), secrets.get(&github_key(&ws.id)).as_deref()), (Some("pat"), Some("gh")));

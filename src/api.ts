@@ -58,8 +58,14 @@ export interface ReviewItem extends PrRef {
   actionable: boolean;
 }
 
-/** Where ticket keys in branch names link to: a Jira host, or a Linear workspace slug (`acme` in linear.app/acme). */
-export type Tracker = { kind: "none" } | { kind: "jira"; site: string } | { kind: "linear"; workspace: string };
+/**
+ * Where ticket keys in branch names link to: a Jira host, or a Linear workspace slug (`acme` in linear.app/acme).
+ * `keys` are the team or project keys (`HOO`); when set, only branch keys with one of them count.
+ */
+export type Tracker =
+  | { kind: "none" }
+  | { kind: "jira"; site: string; keys: string[] }
+  | { kind: "linear"; workspace: string; keys: string[] };
 
 /** A named set of sources; only the active one is polled. A source is on once its secret is saved. */
 export interface Workspace {

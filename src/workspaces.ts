@@ -23,14 +23,16 @@ export const trackerName = (workspace: Workspace | undefined): string => {
 export const trackerValue = (tracker: Tracker): string =>
   tracker.kind === "jira" ? tracker.site : tracker.kind === "linear" ? tracker.workspace : "";
 
-/** A tracker of `kind` with `value` as its field; an empty field is no tracker. */
-export function trackerFor(kind: TrackerKind, value: string): Tracker {
+export const trackerKeys = (tracker: Tracker): string[] => (tracker.kind === "none" ? [] : tracker.keys);
+
+/** A tracker of `kind` with `value` as its field and `keys` as its team keys; an empty field is no tracker. */
+export function trackerFor(kind: TrackerKind, value: string, keys: string[]): Tracker {
   const v = value.trim();
   if (!v || kind === "none") return { kind: "none" };
-  return kind === "jira" ? { kind, site: v } : { kind, workspace: v };
+  return kind === "jira" ? { kind, site: v, keys } : { kind, workspace: v, keys };
 }
 
-export const parseTeams = (text: string): string[] => text.split(",").map((t) => t.trim()).filter(Boolean);
+export const parseList = (text: string): string[] => text.split(",").map((t) => t.trim()).filter(Boolean);
 
 /** Ctrl+← and Ctrl+→ step through workspaces; any other key, or another modifier with them, is not a step. */
 export function workspaceStep(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey">): -1 | 1 | null {
@@ -170,7 +172,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
 
   const buildEditor = (original: Workspace, saved: Saved) => {
     const workspace: Workspace = structuredClone(original);
-    const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), token: note() };
+    const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), keys: note(), token: note() };
     const save = (target: HTMLElement) => api.saveWorkspace(workspace).then(() => ok(target), (e) => fail(target, e));
 
     const name = h("input", {
@@ -199,23 +201,33 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     });
     const teams = h("input", {
       type: "text", ariaLabel: "My teams", value: workspace.azureDevOps.teams.join(", "), placeholder: "TeamAlpha",
-      onchange: () => { workspace.azureDevOps.teams = parseTeams(teams.value); void save(n.teams); },
+      onchange: () => { workspace.azureDevOps.teams = parseList(teams.value); void save(n.teams); },
     });
     // The chosen kind stays on screen while its field is still empty, though until then the saved tracker is none.
     let kind = workspace.tracker.kind;
-    const trackerField = h("input", {
-      type: "text", value: trackerValue(workspace.tracker),
-      onchange: () => {
-        const before = workspace.tracker;
-        const sent = trackerFor(kind, trackerField.value);
-        workspace.tracker = sent;
-        // A rejected value must not ride along with the next save of another field, nor undo a chip clicked since.
-        void api.saveWorkspace(workspace).then(() => ok(n.tracker), (e) => {
-          if (workspace.tracker === sent) workspace.tracker = before;
-          fail(n.tracker, e);
-        });
-      },
+    let keys = trackerKeys(workspace.tracker);
+    const chosen = () => TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
+    const saveTracker = (target: HTMLElement) => {
+      const before = workspace.tracker;
+      const sent = trackerFor(kind, trackerField.value, keys);
+      workspace.tracker = sent;
+      const held = sent.kind === "none" && keys.length > 0;
+      // A rejected value must not ride along with the next save of another field, nor undo a chip clicked since.
+      void api.saveWorkspace(workspace).then(() => ok(target, held ? `Not kept until the ${chosen().field} is set` : undefined), (e) => {
+        if (workspace.tracker === sent) {
+          workspace.tracker = before;
+          if (before.kind !== "none") keysField.value = (keys = before.keys).join(", ");
+        }
+        fail(target, e);
+      });
+    };
+    const trackerField = h("input", { type: "text", value: trackerValue(workspace.tracker), onchange: () => saveTracker(n.tracker) });
+    const keysField = h("input", {
+      type: "text", ariaLabel: "Team keys", value: keys.join(", "), placeholder: "HOO, ENG",
+      onchange: () => { keys = parseList(keysField.value); saveTracker(n.keys); },
     });
+    const keysLabel = h("label", {}, caption("Team keys (comma-separated)", n.keys), keysField,
+      h("span", { class: "hint" }, "Set these to stop chips on branches like sprint-3"));
     const trackerChips = TRACKERS.map((t) => h("button", {
       type: "button",
       class: "chip",
@@ -230,11 +242,11 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       },
     }, t.name));
     const showTracker = () => {
-      const chosen = TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
       trackerChips.forEach((c, i) => (c.dataset.on = String(TRACKERS[i].kind === kind)));
       trackerField.hidden = kind === "none";
-      trackerField.ariaLabel = chosen.field;
-      trackerField.placeholder = chosen.placeholder;
+      keysLabel.hidden = kind === "none";
+      trackerField.ariaLabel = chosen().field;
+      trackerField.placeholder = chosen().placeholder;
     };
     showTracker();
 
@@ -268,6 +280,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("h2", {}, "Tracker"),
       // Not <label>: a label forwards clicks on its caption to its first button.
       h("div", { class: "field" }, caption("Links ticket keys in branch names to their issues", n.tracker), h("span", { class: "inline" }, ...trackerChips, trackerField)),
+      keysLabel,
       removeSlot,
     );
     renderActive(workspace);

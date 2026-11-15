@@ -50,12 +50,17 @@ pub struct ReviewRow {
 /// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`.
 const NOT_KEYS: [&str; 3] = ["UTF", "ISO", "SHA"];
 
-/// The first `KEY-123` in a branch, upper-cased: letters and digits starting with a letter, a dash and digits,
-/// standing alone between non-alphanumeric characters. An upper-case key counts anywhere. With `any_case`, a
-/// lower-case one counts too in Linear's default shape, `anton/eng-123-title`: letters only, right after a `/`,
-/// and followed by more name. `release-2026` and `renovate/node-20` stay plain branches; `chore/node-18-upgrade`
-/// still reads as a key, which only the tracker's team keys could rule out.
-pub fn ticket_key(branch: &str, any_case: bool) -> Option<String> {
+/// The first `KEY-123` in a branch, upper-cased. With team `keys`, only those count, in any case, at the start
+/// or after `/`, `-` or `_`; `hoo-342-343-title` gives the first number, `HOO-342`, and Jira's `MY_PROJ-12`
+/// counts whole. Without them: letters and
+/// digits starting with a letter, a dash and digits, standing alone between non-alphanumeric characters. An
+/// upper-case key counts anywhere. With `any_case`, a lower-case one counts too in Linear's default shape,
+/// `anton/eng-123-title`: letters only, right after a `/`, and followed by more name. `release-2026` and
+/// `renovate/node-20` stay plain branches; `chore/node-18-upgrade` reads as a key, which team keys rule out.
+pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<String> {
+    if !keys.is_empty() {
+        return team_key(branch, keys);
+    }
     let bytes = branch.as_bytes();
     let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
     (0..bytes.len()).find_map(|start| {
@@ -85,6 +90,30 @@ pub fn ticket_key(branch: &str, any_case: bool) -> Option<String> {
             && prefix.bytes().all(|b| b.is_ascii_alphabetic())
             && matches!(bytes.get(end), Some(b'-' | b'_'));
         (upper || (any_case && linear_shape)).then(|| branch[start..end].to_ascii_uppercase())
+    })
+}
+
+fn team_key(branch: &str, keys: &[String]) -> Option<String> {
+    let bytes = branch.as_bytes();
+    let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
+    (0..bytes.len()).find_map(|start| {
+        if start > 0 && !matches!(bytes[start - 1], b'/' | b'-' | b'_') {
+            return None;
+        }
+        let mut i = start;
+        while alnum(i) || bytes.get(i) == Some(&b'_') {
+            i += 1;
+        }
+        let prefix = &branch[start..i];
+        if i == start || bytes.get(i) != Some(&b'-') || !keys.iter().any(|k| k.eq_ignore_ascii_case(prefix)) {
+            return None;
+        }
+        let digits = i + 1;
+        let mut end = digits;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        (end > digits && !alnum(end)).then(|| branch[start..end].to_ascii_uppercase())
     })
 }
 
@@ -163,8 +192,8 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
             let newest_age_hours = mine.iter().map(|m| m.age_hours).min().unwrap_or_default();
             let ticket = match tracker {
                 Tracker::None => None,
-                Tracker::Jira { .. } => ticket_key(branch, false),
-                Tracker::Linear { .. } => ticket_key(branch, true),
+                Tracker::Jira { keys, .. } => ticket_key(branch, false, keys),
+                Tracker::Linear { keys, .. } => ticket_key(branch, true, keys),
             };
             ReviewRow { key, summary, members, newest_age_hours, ticket }
         })
@@ -353,11 +382,11 @@ mod tests {
     }
 
     fn jira() -> Tracker {
-        Tracker::Jira { site: "acme.atlassian.net".into() }
+        Tracker::Jira { site: "acme.atlassian.net".into(), keys: Vec::new() }
     }
 
     fn linear() -> Tracker {
-        Tracker::Linear { workspace: "acme".into() }
+        Tracker::Linear { workspace: "acme".into(), keys: Vec::new() }
     }
 
     #[test]
@@ -407,7 +436,7 @@ mod tests {
             ("featureABC-12", None),
             ("main", None),
         ] {
-            assert_eq!(ticket_key(branch, false).as_deref(), key, "{branch}");
+            assert_eq!(ticket_key(branch, false, &[]).as_deref(), key, "{branch}");
         }
     }
 
@@ -430,8 +459,75 @@ mod tests {
             ("ci/sha-256-pin", None),
             ("anton/add-eng-12-x", None),
         ] {
-            assert_eq!(ticket_key(branch, true).as_deref(), key, "{branch}");
+            assert_eq!(ticket_key(branch, true, &[]).as_deref(), key, "{branch}");
         }
+    }
+
+    /// Real branch names from a GitHub repo whose Linear team key is `HOO`: (branch, with keys `HOO`, with no keys).
+    const HOO_BRANCHES: [(&str, Option<&str>, Option<&str>); 22] = [
+        ("claude/hoo-342-343-355-player-card-panels", Some("HOO-342"), None),
+        ("antoncharalampidis/hoo-243-246-contracts-table", Some("HOO-243"), None),
+        ("codex/hoo-190-211-219-222-corrections", Some("HOO-190"), None),
+        ("codex/hoo-130-132-133-evidence", Some("HOO-130"), None),
+        ("hoo-312-overall-tournament-ranks", Some("HOO-312"), None),
+        ("hoo-315-shot-assist-quality", Some("HOO-315"), None),
+        ("antonchar/dependabot-120-d7f992", None, Some("DEPENDABOT-120")),
+        ("codex/luna-6-high-default", None, Some("LUNA-6")),
+        ("claude/sprint-3-player-deepdive", None, Some("SPRINT-3")),
+        ("codex/sprint-2-tactical-direction", None, Some("SPRINT-2")),
+        ("arch/wave-7-tickerq-migration", None, Some("WAVE-7")),
+        ("arch/wave-3-user-slices", None, Some("WAVE-3")),
+        ("codex/sprint-1-linear-stories", None, Some("SPRINT-1")),
+        ("jtsompos/hoo-404-fit-pooling", Some("HOO-404"), Some("HOO-404")),
+        ("codex/hoo-427-player-characteristics-v1", Some("HOO-427"), Some("HOO-427")),
+        ("antonchar/hoo-436-completion-and-progress-f6da32", Some("HOO-436"), Some("HOO-436")),
+        ("admin/hoo-344-season-development-chart-separate-domestic-vs-european", Some("HOO-344"), Some("HOO-344")),
+        ("research/hoo-387-synergy-eda", Some("HOO-387"), Some("HOO-387")),
+        ("dependabot/npm_and_yarn/hoopwise-ui/pnpm-d06417c1ec", None, None),
+        ("claude/pnpm-deps-2026-10-30", None, None),
+        ("antonchar/primeng-22-1-4", None, None),
+        ("antonchar/timescale-4gb-settings", None, None),
+    ];
+
+    #[test]
+    fn ticketKey_linearRepoBranches_teamKeysMatchOnlyHooAndNoKeysKeepTheOldHeuristic() {
+        let keys = ["HOO".to_string()];
+        for (branch, with_keys, without) in HOO_BRANCHES {
+            assert_eq!(ticket_key(branch, true, &keys).as_deref(), with_keys, "{branch} with HOO");
+            assert_eq!(ticket_key(branch, true, &[]).as_deref(), without, "{branch} without keys");
+        }
+    }
+
+    #[test]
+    fn ticketKey_teamKeys_matchAnyCaseAtABoundaryOnly() {
+        let keys = ["HOO".to_string(), "ABC".to_string(), "MY_PROJ".to_string()];
+        for (branch, key) in [
+            ("feature/ABC-12-login", Some("ABC-12")),
+            ("feature/MY_PROJ-12", Some("MY_PROJ-12")),
+            ("feature/proj-12", None),
+            ("bugfix/HOO-7_null-check", Some("HOO-7")),
+            ("feature/über-hoo-5", Some("HOO-5")),
+            ("feature/ühoo-5", None),
+            ("feature/login-abc-12", Some("ABC-12")),
+            ("feature/x_Hoo-7", Some("HOO-7")),
+            ("chore/node-18-upgrade", None),
+            ("feature/xhoo-12", None),
+            ("feature/hoo.12", None),
+            ("feature/hoo-", None),
+            ("feature/hoo-12x", None),
+            ("feature/hoo-v2", None),
+            ("feature/ENG-12", None),
+        ] {
+            assert_eq!(ticket_key(branch, false, &keys).as_deref(), key, "{branch}");
+        }
+    }
+
+    #[test]
+    fn group_trackerWithTeamKeys_usesThem() {
+        let tracker = Tracker::Linear { workspace: "acme".into(), keys: vec!["HOO".into()] };
+        let ticket = |branch: &str| group(&[on(Provider::GitHub, branch)], &[], &urls(&[1]), &tracker)[0].ticket.clone();
+        assert_eq!(ticket("hoo-312-overall-tournament-ranks").as_deref(), Some("HOO-312"));
+        assert_eq!(ticket("claude/sprint-3-player-deepdive"), None);
     }
 
     #[test]
