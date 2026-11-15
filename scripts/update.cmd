@@ -10,6 +10,7 @@ set "SETUP="
 for /f "delims=" %%f in ('dir /b /o-d "%CARGO_TARGET_DIR%\release\bundle\nsis\Rado_*_x64-setup.exe"') do if not defined SETUP set "SETUP=%%f"
 if not defined SETUP (echo No installer found under %CARGO_TARGET_DIR%\release\bundle\nsis & exit /b 1)
 echo Updating Rado with %SETUP% ...
-start "" /wait "%CARGO_TARGET_DIR%\release\bundle\nsis\%SETUP%" /P /UPDATE /R
+rem run-outside.ps1 starts it outside the Claude desktop app's package, which would redirect the install.
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run-outside.ps1 "%CARGO_TARGET_DIR%\release\bundle\nsis\%SETUP%" "/P /UPDATE /R"
 if errorlevel 1 (echo The installer failed with exit code %errorlevel% & exit /b 1)
 echo Rado is updated and running.
