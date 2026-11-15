@@ -124,7 +124,7 @@ The installer updates an existing install in place: it skips Tauri's "uninstall 
 
 The installer and uninstaller also stop every `rado-mcp.exe` running from the install folder (one that won't stop is renamed to `rado-mcp.exe.old` and deleted next time); the Claude sessions that used it lose the `rado` tools until they restart, and new sessions start the new one.
 
-`app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install instead of uninstalling it first, closes a running Rado, and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. To update by hand, run the setup exe with the same flags.
+`app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install instead of uninstalling it first, closes a running Rado, and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`): run directly from a Claude desktop session, it would install into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. To update by hand, run the setup exe with the same flags.
 
 The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. On this machine, Rust would otherwise pick a Visual Studio install that has no C++ libraries.
 
