@@ -4,11 +4,31 @@ import { h } from "./dom";
 export const activeWorkspace = (settings: Settings): Workspace | undefined =>
   settings.workspaces.find((w) => w.id === settings.activeWorkspace);
 
-/** The Jira host ticket chips link to; empty hides them. */
-export const jiraSite = (workspace: Workspace | undefined): string =>
-  workspace?.tracker.kind === "jira" ? workspace.tracker.site : "";
+type TrackerKind = Tracker["kind"];
 
-export const trackerFor = (site: string): Tracker => (site.trim() ? { kind: "jira", site: site.trim() } : { kind: "none" });
+/** The chooser in the workspace editor: each tracker's name and its one field. */
+export const TRACKERS: readonly { kind: TrackerKind; name: string; field: string; placeholder: string }[] = [
+  { kind: "none", name: "None", field: "", placeholder: "" },
+  { kind: "jira", name: "Jira", field: "Jira Cloud site", placeholder: "yourcompany.atlassian.net" },
+  { kind: "linear", name: "Linear", field: "Linear workspace", placeholder: "yourteam, as in linear.app/yourteam" },
+];
+
+/** The name ticket chips are titled with ("Open ABC-12 in Linear"); empty without a tracker. */
+export const trackerName = (workspace: Workspace | undefined): string => {
+  const kind = workspace?.tracker.kind ?? "none";
+  return kind === "none" ? "" : TRACKERS.find((t) => t.kind === kind)?.name ?? "";
+};
+
+/** The tracker's one field: the Jira site or the Linear workspace. */
+export const trackerValue = (tracker: Tracker): string =>
+  tracker.kind === "jira" ? tracker.site : tracker.kind === "linear" ? tracker.workspace : "";
+
+/** A tracker of `kind` with `value` as its field; an empty field is no tracker. */
+export function trackerFor(kind: TrackerKind, value: string): Tracker {
+  const v = value.trim();
+  if (!v || kind === "none") return { kind: "none" };
+  return kind === "jira" ? { kind, site: v } : { kind, workspace: v };
+}
 
 export const parseTeams = (text: string): string[] => text.split(",").map((t) => t.trim()).filter(Boolean);
 
@@ -150,7 +170,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
 
   const buildEditor = (original: Workspace, saved: Saved) => {
     const workspace: Workspace = structuredClone(original);
-    const n = { name: note(), pat: note(), org: note(), teams: note(), jira: note(), token: note() };
+    const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), token: note() };
     const save = (target: HTMLElement) => api.saveWorkspace(workspace).then(() => ok(target), (e) => fail(target, e));
 
     const name = h("input", {
@@ -181,10 +201,33 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       type: "text", ariaLabel: "My teams", value: workspace.azureDevOps.teams.join(", "), placeholder: "TeamAlpha",
       onchange: () => { workspace.azureDevOps.teams = parseTeams(teams.value); void save(n.teams); },
     });
-    const jira = h("input", {
-      type: "text", ariaLabel: "Jira Cloud site", value: jiraSite(workspace), placeholder: "yourcompany.atlassian.net",
-      onchange: () => { workspace.tracker = trackerFor(jira.value); void save(n.jira); },
+    // The chosen kind stays on screen while its field is still empty, though until then the saved tracker is none.
+    let kind = workspace.tracker.kind;
+    const trackerField = h("input", {
+      type: "text", value: trackerValue(workspace.tracker),
+      onchange: () => { workspace.tracker = trackerFor(kind, trackerField.value); void save(n.tracker); },
     });
+    const trackerChips = TRACKERS.map((t) => h("button", {
+      type: "button",
+      class: "chip",
+      onclick: () => {
+        if (t.kind === kind) return;
+        kind = t.kind;
+        trackerField.value = "";
+        showTracker();
+        workspace.tracker = { kind: "none" };
+        void save(n.tracker);
+        if (kind !== "none") trackerField.focus();
+      },
+    }, t.name));
+    const showTracker = () => {
+      const chosen = TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
+      trackerChips.forEach((c, i) => (c.dataset.on = String(TRACKERS[i].kind === kind)));
+      trackerField.hidden = kind === "none";
+      trackerField.ariaLabel = chosen.field;
+      trackerField.placeholder = chosen.placeholder;
+    };
+    showTracker();
 
     const removeSlot = h("span", { class: "inline" });
     const askRemove = () => removeSlot.replaceChildren(h("button", { type: "button", onclick: confirmRemove }, "Delete workspace…"));
@@ -214,7 +257,8 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("h2", {}, "GitHub"),
       h("label", {}, caption("Token", n.token), secret("GitHub token", "Paste a token (repo, read:org)", saved.githubToken, n.token, (v) => api.saveGithubToken(workspace.id, v))),
       h("h2", {}, "Tracker"),
-      h("label", {}, caption("Jira Cloud site, for ticket links from branch names", n.jira), jira),
+      // Not <label>: a label forwards clicks on its caption to its first button.
+      h("div", { class: "field" }, caption("Links ticket keys in branch names to their issues", n.tracker), h("span", { class: "inline" }, ...trackerChips, trackerField)),
       removeSlot,
     );
     renderActive(workspace);

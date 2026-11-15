@@ -4,7 +4,7 @@ import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
-import { activeWorkspace, isTyping, jiraSite, stepWorkspace, switchWorkspace, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
+import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
 } from "./tabs";
@@ -190,8 +190,8 @@ export function mountList(root: HTMLElement): void {
     const inThis = all.filter((i) => inSection(i, current));
     const items = current === "mine" ? newestFirst(inThis) : inThis;
     if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
-    const site = jiraSite(activeWorkspace(snapshot.settings));
-    for (const item of items) body.append(row(item, site, item.key === next?.key));
+    const tracker = trackerName(activeWorkspace(snapshot.settings));
+    for (const item of items) body.append(row(item, tracker, item.key === next?.key));
   };
 
   void watchSnapshot((s) => {
@@ -226,7 +226,7 @@ export function mountList(root: HTMLElement): void {
 
 const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", low: "Low" };
 
-function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
+function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   const aggregate = item.members.length > 1;
   // Plain text, so the outlined chips are exactly the things that open something.
   const facts = [
@@ -250,10 +250,10 @@ function row(item: ReviewItem, jiraSite: string, isNext: boolean): HTMLElement {
         void api.openPr(m.id);
       },
     }, prLabel(m)));
-  const ticket = jiraSite && item.ticket && h("button", {
+  const ticket = tracker && item.ticket && h("button", {
     class: "member ticket",
     type: "button",
-    title: `Open ${item.ticket} in Jira`,
+    title: `Open ${item.ticket} in ${tracker}`,
     onclick: (e: MouseEvent) => {
       e.stopPropagation();
       void api.openTicket(item.key);
