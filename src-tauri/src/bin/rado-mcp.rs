@@ -257,7 +257,7 @@ mod tests {
         std::fs::remove_file(queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE)).unwrap();
         let result = call_tool(&dir.0, at(0), "list_review_queue", json!({}));
         assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("Start Rado"));
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("has not written a review queue"));
     }
 
     #[test]

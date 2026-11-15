@@ -3,7 +3,7 @@ import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
 import { h } from "./dom";
-import { activeWorkspace, isTyping, jiraSite, stepWorkspace, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
+import { activeWorkspace, isTyping, jiraSite, stepWorkspace, switchWorkspace, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
 } from "./tabs";
@@ -150,6 +150,7 @@ export function mountList(root: HTMLElement): void {
     } else {
       status.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
     }
+    if (snapshot.warning) status.append(h("div", { class: "hint" }, snapshot.warning));
   };
 
   const renderBody = () => {
@@ -199,7 +200,7 @@ export function mountList(root: HTMLElement): void {
     if (step !== null && snapshot && !isTyping(e.target)) {
       e.preventDefault();
       const to = stepWorkspace(snapshot.settings.workspaces, snapshot.settings.activeWorkspace, step);
-      if (to) void api.switchWorkspace(to);
+      if (to) switchWorkspace(to);
       return;
     }
     if (e.key !== "Escape") return;

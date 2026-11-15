@@ -99,6 +99,8 @@ export interface Snapshot {
   error: string | null;
   hasPat: boolean;
   hasGithubToken: boolean;
+  /** What went wrong loading the settings, shown for the whole run. */
+  warning: string | null;
   settings: Settings;
   /** By workspace id. */
   saved: Record<string, Saved>;

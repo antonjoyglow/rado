@@ -27,7 +27,7 @@ export function mountPill(root: HTMLElement): void {
     bar.hidden = mine.hidden = Boolean(problem);
     pill.dataset.polling = String(snapshot.polling);
     const name = activeWorkspace(snapshot.settings)?.name ?? "";
-    pill.title = `${name}: ` + (snapshot.error
+    pill.title = `${name}: ` + (snapshot.warning ? `${snapshot.warning} · ` : "") + (snapshot.error
       ? snapshot.error
       : `${counts.reviews} to review · ${counts.mine} of your PR rows need work (a rejection, waiting for author, or an open thread) · refreshed ${ago(snapshot.lastRefreshed, new Date())}`);
   };

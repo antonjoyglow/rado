@@ -568,8 +568,10 @@ pub(crate) mod tests {
 
         assert!(loaded.warning.unwrap().contains("without saving over it"));
         assert_eq!(loaded.settings.workspaces.len(), 1);
+        // With the obstacle gone, only the guard stops the save.
+        std::fs::remove_dir_all(dir.0.join("settings.json")).unwrap();
         assert!(store.save_settings(&loaded.settings).is_err());
-        assert_eq!(std::fs::read_to_string(dir.0.join("settings.json").join("inside")).unwrap(), "keep");
+        assert!(!dir.0.join("settings.json").exists());
     }
 
     #[test]

@@ -72,7 +72,7 @@ struct Inner {
     ws: WorkspaceState,
     parked: HashMap<String, WorkspaceState>,
     saved: HashMap<String, Saved>,
-    /// What went wrong loading the settings; shown for the whole run, since polls replace `ws.error`.
+    /// What went wrong loading the settings; kept apart from `ws.error`, which every poll replaces.
     load_warning: Option<String>,
     polling: bool,
     credentials_generation: u64,
@@ -89,6 +89,8 @@ struct Snapshot {
     error: Option<String>,
     has_pat: bool,
     has_github_token: bool,
+    /// What went wrong loading the settings, for the whole run.
+    warning: Option<String>,
     settings: Settings,
     /// By workspace id.
     saved: HashMap<String, Saved>,
@@ -113,10 +115,8 @@ impl Inner {
             items: self.rows(),
             last_refreshed: self.ws.last_refreshed,
             polling: self.polling,
-            error: match (&self.load_warning, &self.ws.error) {
-                (Some(warning), Some(error)) => Some(format!("{warning} · {error}")),
-                (warning, error) => warning.clone().or_else(|| error.clone()),
-            },
+            error: self.ws.error.clone(),
+            warning: self.load_warning.clone(),
             has_pat: saved.pat,
             has_github_token: saved.github_token,
             settings: self.settings.clone(),
@@ -291,7 +291,7 @@ async fn poll_ado(
     Ok(AdoPoll { prs, my_id, teams, threads, urls })
 }
 
-/// What a poll leaves to do outside the state lock.
+/// What a poll's result asks for: files to save, and who to notify.
 #[derive(Default)]
 struct Applied {
     /// Newly waiting on me since the workspace's last poll.
@@ -811,7 +811,7 @@ fn switch_workspace(app: AppHandle, id: String) -> Result<(), String> {
     let mut switched = false;
     let result = edit_workspaces(&app, |s| {
         switched = s.switch_to(&id, || load_state(&shared.store, &id));
-        if switched || id == s.settings.active_workspace { Ok(()) } else { Err("That workspace is gone".to_string()) }
+        if id == s.settings.active_workspace { Ok(()) } else { Err("That workspace is gone".to_string()) }
     });
     if switched {
         shared.wake.notify_one();
@@ -823,7 +823,7 @@ fn switch_workspace(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 fn delete_workspace(app: AppHandle, id: String) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    let mut switched = false;
+    let (mut switched, mut removed) = (false, false);
     let result = edit_workspaces(&app, |s| {
         let list = &s.settings.workspaces;
         let index = list.iter().position(|w| w.id == id).ok_or("That workspace is gone")?;
@@ -837,14 +837,17 @@ fn delete_workspace(app: AppHandle, id: String) -> Result<(), String> {
         s.settings.workspaces.remove(index);
         s.parked.remove(&id);
         s.saved.remove(&id);
+        removed = true;
         Ok(())
     });
     if switched {
         shared.wake.notify_one();
     }
-    // A failed save leaves it in settings.json; its secrets must still be there when it comes back on the next start.
-    result?;
-    shared.store.forget(&id).map_err(|e| format!("Deleted the workspace, but its saved data stayed behind: {e}"))
+    // Its secrets go even when the save failed: a PAT left with nothing pointing at it would never be removed.
+    if removed {
+        shared.store.forget(&id).map_err(|e| format!("Deleted the workspace, but its saved data stayed behind: {e}"))?;
+    }
+    result
 }
 
 #[tauri::command]
