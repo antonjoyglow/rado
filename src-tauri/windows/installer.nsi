@@ -56,10 +56,12 @@ ${StrLoc}
     System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
     ${If} $0 = ${ERROR_MORE_DATA}
       DetailPrint "Stopping the Rado MCP server (rado-mcp.exe) that Claude sessions run"
-      IntOp $4 $1 * 668
+      ; room for 8 more, in case sessions start servers between the two calls
+      IntOp $2 $1 + 8
+      IntOp $4 $2 * 668
       System::Alloc $4
       Pop $5
-      System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i r1r2, p r5, *i .r3) i .r0'
+      System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i r2r2, p r5, *i .r3) i .r0'
       ${If} $0 = 0
         StrCpy $6 0
         StrCpy $7 $5
