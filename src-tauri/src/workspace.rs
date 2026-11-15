@@ -12,8 +12,9 @@ pub struct Workspace {
     /// On once a PAT is saved for this workspace.
     pub azure_dev_ops: AdoSource,
     /// On once a GitHub token is saved for this workspace.
+    #[serde(deserialize_with = "lenient")]
     pub github: GithubSource,
-    #[serde(deserialize_with = "lenient_tracker")]
+    #[serde(deserialize_with = "lenient")]
     pub tracker: Tracker,
 }
 
@@ -42,13 +43,13 @@ pub enum Tracker {
     /// `site` is the host, such as `acme.atlassian.net`.
     Jira {
         site: String,
-        #[serde(default, deserialize_with = "lenient_keys")]
+        #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
     /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
     Linear {
         workspace: String,
-        #[serde(default, deserialize_with = "lenient_keys")]
+        #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
 }
@@ -76,14 +77,9 @@ impl Tracker {
     }
 }
 
-/// Junk keys are no keys, so the tracker itself still loads.
-fn lenient_keys<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+/// A malformed part loads as its default, so the rest of the workspace (or tracker) survives.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     Ok(serde_json::from_value(Value::deserialize(deserializer)?).unwrap_or_default())
-}
-
-fn lenient_tracker<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Tracker, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 /// A malformed entry keeps its id and name, so its secrets and data folder stay reachable.
@@ -127,16 +123,25 @@ impl Workspace {
     }
 }
 
-/// `owner/name` from a typed repo or its link: ` https://github.com/acme/web.app/pulls ` gives `acme/web.app`.
-/// `None` for anything else, since it goes into a search query.
+/// `owner/name` from a typed repo or its github.com link: ` https://GitHub.com/acme/web.app.git ` gives
+/// `acme/web.app`. `None` for anything else, another host included, since it goes into a search query.
 fn github_repo(typed: &str) -> Option<String> {
     let typed = typed.trim();
     let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
-    let path = without_scheme.strip_prefix("github.com/").or_else(|| without_scheme.strip_prefix("www.github.com/")).unwrap_or(without_scheme);
-    let mut segments = path.split('/');
-    let (owner, name) = (segments.next()?, segments.next()?);
-    let safe = |s: &str| !s.is_empty() && !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
-    (safe(owner) && safe(name)).then(|| format!("{owner}/{name}"))
+    let mut segments = without_scheme.split('/').peekable();
+    // Owners have no dots, so a first segment with one is a host.
+    if segments.peek()?.contains('.') {
+        let host = segments.next()?;
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com") {
+            return None;
+        }
+    }
+    let owner = segments.next()?;
+    let name = segments.next()?;
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    let owner_ok = !owner.is_empty() && owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let name_ok = !name.is_empty() && !name.starts_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    (owner_ok && name_ok).then(|| format!("{owner}/{name}"))
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
@@ -300,7 +305,7 @@ mod tests {
         let tracker = |json: &str| {
             #[derive(Deserialize)]
             struct File {
-                #[serde(deserialize_with = "lenient_tracker")]
+                #[serde(deserialize_with = "lenient")]
                 tracker: Tracker,
             }
             serde_json::from_str::<File>(&format!(r#"{{"tracker":{json}}}"#)).unwrap().tracker
@@ -332,13 +337,30 @@ mod tests {
     #[test]
     fn workspace_githubRepos_keepOwnerAndNameAndRejectTheRest() {
         let with = |repos: &[&str]| Workspace { github: GithubSource { repos: repos.iter().map(|r| r.to_string()).collect() }, ..Workspace::default() };
-        let good = with(&[" coding-tree-io/hoopwise.ai ", "https://github.com/acme/web/pulls", "github.com/Acme/Web", "", "o/r_1"]);
+        let good = with(&[
+            " coding-tree-io/hoopwise.ai ",
+            "https://github.com/acme/web/pulls",
+            "github.com/Acme/Web",
+            "",
+            "o/r_1",
+            "https://GitHub.com/acme/api.git",
+            "WWW.github.com/x-y/z",
+        ]);
         assert_eq!(good.bad_repo(), None);
-        assert_eq!(good.clamped().github.repos, ["coding-tree-io/hoopwise.ai", "acme/web", "o/r_1"]);
-        for bad in ["hoopwise.ai", "acme/web app", "acme/", "acme/.x", "o/r:x"] {
+        assert_eq!(good.clamped().github.repos, ["coding-tree-io/hoopwise.ai", "acme/web", "o/r_1", "acme/api", "x-y/z"]);
+        for bad in ["hoopwise.ai", "acme/web app", "acme/", "acme/.x", "o/r:x", "https://gitlab.com/acme/web", "api.github.com/repos/o/r", "a_b/c"] {
             let typed = with(&["o/r", bad]);
             assert_eq!(typed.bad_repo(), Some(bad));
             assert_eq!(typed.clamped().github.repos, ["o/r"], "{bad}");
+        }
+    }
+
+    #[test]
+    fn workspace_malformedGithub_loadsWithNoReposAndKeepsTheRest() {
+        for github in ["null", "7", r#"{"repos":["a/b",5]}"#] {
+            let json = format!(r#"{{"id":"a1","name":"A","azureDevOps":{{"organization":"o","teams":[]}},"github":{github}}}"#);
+            let ws: Workspace = serde_json::from_str(&json).unwrap();
+            assert_eq!((ws.azure_dev_ops.organization.as_str(), ws.github.repos.len()), ("o", 0), "{github}");
         }
     }
 

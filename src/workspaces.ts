@@ -205,9 +205,9 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
         const before = workspace.github;
         const sent = { repos: parseList(repos.value) };
         workspace.github = sent;
-        // A rejected repo must not ride along with the next save of another field.
+        // A rejected repo must not ride along with the next save of another field; a failed write still changed it.
         void api.saveWorkspace(workspace).then(() => ok(n.repos), (e) => {
-          if (workspace.github === sent) workspace.github = before;
+          if (workspace.github === sent && String(e).startsWith("Not saved")) workspace.github = before;
           fail(n.repos, e);
         });
       },

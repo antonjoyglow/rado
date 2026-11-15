@@ -791,21 +791,19 @@ fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
             workspace.name.clone_from(&slot.name);
         }
         // A changed source is re-polled, and its next good poll is a baseline, so new matches don't each notify.
-        let changed: Vec<score::Provider> = [
-            (score::Provider::Ado, slot.azure_dev_ops != workspace.azure_dev_ops),
-            (score::Provider::GitHub, slot.github != workspace.github),
-        ]
-        .into_iter()
-        .filter_map(|(provider, changed)| changed.then_some(provider))
-        .collect();
+        let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
+        let github_changed = slot.github != workspace.github;
         *slot = workspace;
         let id = slot.id.clone();
         if let Some(state) = s.state_of(&id) {
-            for provider in &changed {
-                state.known_actionable.remove(provider);
+            if ado_changed {
+                state.known_actionable.remove(&score::Provider::Ado);
+            }
+            if github_changed {
+                state.known_actionable.remove(&score::Provider::GitHub);
             }
         }
-        if active && !changed.is_empty() {
+        if active && (ado_changed || github_changed) {
             s.credentials_generation += 1;
             refetch = true;
         }
