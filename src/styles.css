@@ -15,8 +15,11 @@
   color: var(--fg);
 }
 
+/* The list sets data-theme from settings: system, dark, light or highContrast. Light is the :root values above.
+   The counter sets none and uses no variables, so no theme reaches it. Dark appears twice because a media query
+   can't share a rule with a plain selector. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-theme="system"] {
     --bg: #1f2125;
     --fg: #e8eaee;
     --muted: #9aa0aa;
@@ -28,6 +31,33 @@
     --normal: #d98a1c;
     --clear: #4cc07f;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #1f2125;
+  --fg: #e8eaee;
+  --muted: #9aa0aa;
+  --line: #33363c;
+  --hover: #2a2d32;
+  --accent: #6d9ef6;
+  --on-accent: #111317;
+  --urgent: #f26b6b;
+  --normal: #d98a1c;
+  --clear: #4cc07f;
+}
+
+:root[data-theme="highContrast"] {
+  --bg: #000000;
+  --fg: #ffffff;
+  --muted: #d0d0d0;
+  --line: #a0a0a0;
+  --hover: #262626;
+  --accent: #ffd60a;
+  --on-accent: #000000;
+  --urgent: #ff8080;
+  --normal: #ffb347;
+  --low: #b8b8b8;
+  --clear: #5ee08f;
 }
 
 * { box-sizing: border-box; }
@@ -158,6 +188,10 @@ header h1 { flex: 1; margin: 0; font-size: 15px; }
 .settings .inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg); }
 .settings input.minutes, .settings input.scale { flex: none; width: 64px; }
 .settings input.side { flex: none; width: 72px; }
+.settings .field[hidden] { display: none; }
+.settings .colour-name { width: 76px; }
+.settings input.hex { flex: none; width: 84px; }
+.settings input[type="color"] { width: 34px; height: 26px; padding: 1px 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .settings button:disabled { opacity: 0.4; }
 .settings button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); }
 .chip[data-on="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }

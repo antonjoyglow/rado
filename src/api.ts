@@ -86,11 +86,22 @@ export interface Settings {
   listHeight: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
+  /** Colours of the review list; the counter keeps its own look. */
+  theme: Theme;
+  customTheme: CustomTheme;
   workspaces: Workspace[];
   activeWorkspace: string;
 }
 
 export type Browser = "system" | "edge" | "chrome";
+/** "system" follows Windows' light or dark app mode. */
+export type Theme = "system" | "dark" | "light" | "highContrast" | "custom";
+/** The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest. */
+export interface CustomTheme {
+  background: string;
+  text: string;
+  accent: string;
+}
 
 export interface Snapshot {
   items: ReviewItem[];

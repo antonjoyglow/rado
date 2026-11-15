@@ -1,4 +1,5 @@
-import { api, watchSnapshot, type Browser, type ReviewItem, type Snapshot, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale,
 } from "./format";
@@ -74,9 +75,13 @@ function tabList<K extends string>(
 
 const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
+const THEMES: [Theme, string][] = [["system", "System"], ["dark", "Dark"], ["light", "Light"], ["highContrast", "High contrast"], ["custom", "Custom"]];
+const CUSTOM_COLOURS: [keyof CustomTheme, string][] = [["background", "Background"], ["text", "Text"], ["accent", "Accent"]];
 const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
 
 export function mountList(root: HTMLElement): void {
+  // Until the first snapshot brings the saved theme.
+  document.documentElement.dataset.theme = "system";
   const status = h("div", { class: "status" });
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
@@ -187,6 +192,7 @@ export function mountList(root: HTMLElement): void {
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     snapshot = s;
+    applyTheme(document.documentElement, s.settings.theme, s.settings.customTheme);
     workspace.render(s);
     settingsView?.update(s);
     renderStatus();
@@ -329,7 +335,7 @@ function renderSettings(
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), scale: note(), size: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), scale: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -396,6 +402,44 @@ function renderSettings(
     void save(n.browser);
   };
 
+  const themes = THEMES.map(([value, label]) =>
+    h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
+  );
+  const setTheme = (value: Theme) => {
+    settings.theme = value;
+    themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === value)));
+    customColours.hidden = value !== "custom";
+    void save(n.theme);
+  };
+  // A copy, so the snapshot keeps the saved colours. The saved snapshot repaints the list.
+  settings.customTheme = { ...settings.customTheme };
+  const colourRows = CUSTOM_COLOURS.map(([key, label]) => {
+    const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
+    const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
+    const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
+    const set = (value: string) => {
+      const before = settings.customTheme[key];
+      fill(value);
+      api.saveSettings(settings).then(() => {
+        const hard = unreadable(settings.customTheme);
+        if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
+        else ok(n.custom);
+      }, (e) => {
+        // Not saved: a later save of another field must not carry it, unless a newer pick already replaced it.
+        if (settings.customTheme[key] === value) fill(before);
+        fail(n.custom, e);
+      });
+    };
+    picker.onchange = () => set(picker.value);
+    typed.onchange = () => {
+      const value = parseHex(typed.value);
+      if (value === null) fail(n.custom, "Use a hex colour such as #1f2125.");
+      else set(value);
+    };
+    return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
+  });
+  const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
+
   const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
@@ -409,6 +453,8 @@ function renderSettings(
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
       h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
       h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+      h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
+      customColours,
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
