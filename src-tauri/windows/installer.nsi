@@ -56,25 +56,32 @@ ${StrLoc}
     System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i .r2, p 0, *i .r3) i .r0'
     ${If} $0 = ${ERROR_MORE_DATA}
       DetailPrint "Stopping the Rado MCP server (rado-mcp.exe) that Claude sessions run"
-      StrCpy $2 $1
       IntOp $4 $1 * 668
       System::Alloc $4
       Pop $5
-      System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i r2r2, p r5, *i .r3) i .r0'
+      System::Call 'RSTRTMGR::RmGetList(i R0, *i .r1, *i r1r2, p r5, *i .r3) i .r0'
       ${If} $0 = 0
         StrCpy $6 0
+        StrCpy $7 $5
+        StrLen $4 "$INSTDIR\rado-mcp.exe"
         ${While} $6 < $2
-          IntOp $7 $6 * 668
-          IntPtrOp $7 $5 + $7
           System::Call '*$7(i .r8)'
-          ; PROCESS_TERMINATE | SYNCHRONIZE
-          System::Call 'kernel32::OpenProcess(i 0x00100001, i 0, i r8) p .r9'
+          ; PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+          System::Call 'kernel32::OpenProcess(i 0x00101001, i 0, i r8) p .r9'
           ${If} $9 P<> 0
-            System::Call 'kernel32::TerminateProcess(p r9, i 1)'
-            System::Call 'kernel32::WaitForSingleObject(p r9, i 5000)'
+            ; kill only a process whose own exe is $INSTDIR\rado-mcp.exe* (checked on the open
+            ; handle): RmGetList also lists processes that merely have the file open, such as
+            ; Explorer's preview pane, and the PID may have been reused since the list was taken
+            System::Call 'kernel32::QueryFullProcessImageNameW(p r9, i 0, w .r8, *i ${NSIS_MAX_STRLEN})'
+            StrCpy $8 $8 $4
+            ${If} $8 == "$INSTDIR\rado-mcp.exe"
+              System::Call 'kernel32::TerminateProcess(p r9, i 1)'
+              System::Call 'kernel32::WaitForSingleObject(p r9, i 5000)'
+            ${EndIf}
             System::Call 'kernel32::CloseHandle(p r9)'
           ${EndIf}
           IntOp $6 $6 + 1
+          IntPtrOp $7 $7 + 668
         ${EndWhile}
       ${EndIf}
       System::Free $5
