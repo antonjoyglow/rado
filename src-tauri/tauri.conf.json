@@ -33,7 +33,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDRURBRUIwRDkzNkQ3NDAKUldSQTF6YlpzSzd0akVqdlRKeEdPR21XSENuVmxzUGRBblVCMlc1bTNZVVJyS0xsS29lWit6VHUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1OUY5MEE5RkQ2Q0Y5MEQKUldRTitXejlxWkNmOVgvYkdxZ3R5alRGaGRDbmZPR1lrRitWWndiL29SWGllWGpEWTQyWVNuT1YK",
       "endpoints": ["https://github.com/antonjoyglow/rado/releases/latest/download/latest.json"]
     }
   },
