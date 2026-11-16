@@ -26,11 +26,12 @@ pub struct Settings {
     /// Text size of the review list, in percent.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub text_scale: u32,
-    /// Size of the review list, in logical pixels; shrunk to fit the screen when shown.
-    #[serde(deserialize_with = "lenient_number::<_, 640>")]
-    pub list_width: u32,
-    #[serde(deserialize_with = "lenient_number::<_, 860>")]
-    pub list_height: u32,
+    /// Size of the review list, in percent of the work area of the counter's screen. Files from 0.9.0 and
+    /// earlier hold `listWidth` / `listHeight` in pixels instead; those are ignored.
+    #[serde(deserialize_with = "lenient_number::<_, 33>")]
+    pub list_width_percent: u32,
+    #[serde(deserialize_with = "lenient_number::<_, 50>")]
+    pub list_height_percent: u32,
     #[serde(deserialize_with = "lenient_choice")]
     pub browser: Browser,
     /// Colours of the review list; the counter has its own, in `counter`.
@@ -196,9 +197,9 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
 /// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
 pub const TEXT_SCALE_RANGE: (u32, u32) = (80, 150);
-/// Smallest and largest review list, in logical pixels. Below these the rows stop fitting their buttons.
-pub const LIST_WIDTH_RANGE: (u32, u32) = (360, 1600);
-pub const LIST_HEIGHT_RANGE: (u32, u32) = (400, 1600);
+/// Smallest and largest review list, in percent of its screen, matching `LIST_*_PERCENT` in `format.ts`.
+pub const LIST_WIDTH_PERCENT_RANGE: (u32, u32) = (20, 100);
+pub const LIST_HEIGHT_PERCENT_RANGE: (u32, u32) = (25, 100);
 
 impl Settings {
     /// Pulls values typed or edited by hand back into their allowed ranges.
@@ -207,8 +208,8 @@ impl Settings {
             poll_minutes: self.poll_minutes.clamp(1, 120),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
             text_scale: self.text_scale.clamp(TEXT_SCALE_RANGE.0, TEXT_SCALE_RANGE.1),
-            list_width: self.list_width.clamp(LIST_WIDTH_RANGE.0, LIST_WIDTH_RANGE.1),
-            list_height: self.list_height.clamp(LIST_HEIGHT_RANGE.0, LIST_HEIGHT_RANGE.1),
+            list_width_percent: self.list_width_percent.clamp(LIST_WIDTH_PERCENT_RANGE.0, LIST_WIDTH_PERCENT_RANGE.1),
+            list_height_percent: self.list_height_percent.clamp(LIST_HEIGHT_PERCENT_RANGE.0, LIST_HEIGHT_PERCENT_RANGE.1),
             custom_theme: self.custom_theme.clamped(),
             counter: self.counter.clamped(),
             workspaces: self.workspaces.into_iter().map(Workspace::clamped).collect(),
@@ -224,8 +225,8 @@ impl Default for Settings {
             notify: true,
             pill_scale: 100,
             text_scale: 100,
-            list_width: 640,
-            list_height: 860,
+            list_width_percent: 33,
+            list_height_percent: 50,
             browser: Browser::System,
             theme: Theme::System,
             custom_theme: CustomTheme::default(),
@@ -785,13 +786,19 @@ pub(crate) mod tests {
 
     #[test]
     fn settings_listSize_defaultsWhenMissingOrJunkAndIsClamped() {
-        let old: Settings = serde_json::from_str(r#"{"pollMinutes":7}"#).unwrap();
-        assert_eq!((old.list_width, old.list_height), (640, 860));
-        for (raw_w, raw_h, expected) in [("\"wide\"", "null", (640, 860)), ("10", "99999", (360, 1600)), ("700.4", "900", (700, 900))] {
-            let json = format!(r#"{{"pollMinutes":7,"listWidth":{raw_w},"listHeight":{raw_h}}}"#);
+        for (raw_w, raw_h, expected) in [("\"wide\"", "null", (33, 50)), ("10", "140", (20, 100)), ("40.4", "75", (40, 75))] {
+            let json = format!(r#"{{"pollMinutes":7,"listWidthPercent":{raw_w},"listHeightPercent":{raw_h}}}"#);
             let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
-            assert_eq!((settings.poll_minutes, (settings.list_width, settings.list_height)), (7, expected), "{raw_w} x {raw_h}");
+            assert_eq!((settings.poll_minutes, (settings.list_width_percent, settings.list_height_percent)), (7, expected), "{raw_w} x {raw_h}");
         }
+    }
+
+    #[test]
+    fn settings_090PixelListSize_isIgnoredForTheDefaults() {
+        let old = serde_json::from_str::<Settings>(r#"{"pollMinutes":7,"listWidth":820,"listHeight":1040}"#).unwrap().clamped();
+        assert_eq!((old.poll_minutes, old.list_width_percent, old.list_height_percent), (7, 33, 50));
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved.get("listWidth").is_none() && saved.get("listHeight").is_none());
     }
 
     #[test]

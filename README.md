@@ -49,7 +49,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/settings-general.png" width="640" alt="Settings, General tab in the light theme">
 
-**Settings → General.** Check every (polling interval), text size, list size, theme (shown: *Light*), browser, notifications and start with Windows.
+**Settings → General.** Check every (polling interval), text size, list width and height, theme (shown: *Light*), browser, notifications and start with Windows.
 
 <img src="docs/screenshots/settings-counter.png" width="640" alt="Settings, Counter tab with a live preview">
 
@@ -75,6 +75,8 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ### List
 
+- It opens against the screen edge on the counter's side (left or right), level with the counter and kept on screen, on the counter's screen. The counter is hidden while the list is open and comes back when it closes: ✕, **Esc**, or a click anywhere else.
+- *List width* (20–100% of the screen, chips for 25%, 33%, Half and Full; never under 360 px) and *List height* (25–100%, chips for Half and Full) are in **Settings → General**. The default is 33% wide and half the screen high. Pixel sizes saved by 0.9.0 are dropped for these defaults.
 - Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. Arrow keys, Home and End move between tabs.
 - The list reopens on the tab you last chose. Before you choose one, it opens the first of *Review*, *Re-review* and *Mine* that had rows at start. Each tab keeps its scroll position.
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
@@ -145,7 +147,7 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list size, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
 

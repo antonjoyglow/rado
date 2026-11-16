@@ -43,7 +43,7 @@ export function mountPill(root: HTMLElement): void {
     }
   });
   pill.addEventListener("mouseup", () => {
-    if (start) void api.toggleList();
+    if (start) void api.openList();
     start = null;
   });
 }
