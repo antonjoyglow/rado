@@ -95,10 +95,7 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
 
   /** What the last successful save wrote. */
   let saved = { counter: settings.counter, scale: settings.pillScale };
-  /**
-   * Applies and saves a change. When the newest change fails to save, everything goes back to `saved`,
-   * so a later save elsewhere can't carry an unsaved value, even when overlapping saves both failed.
-   */
+  /** Applies and saves a change; when the newest change fails to save, the tab goes back to `saved`. */
   const commit = (n: HTMLElement, change: Partial<CounterStyle>, scale = settings.pillScale) => {
     const sent = { counter: { ...settings.counter, ...change }, scale };
     settings.counter = sent.counter;
