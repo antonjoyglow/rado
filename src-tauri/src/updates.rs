@@ -57,8 +57,9 @@ async fn check(app: &AppHandle) -> Option<Update> {
     result.ok().flatten()
 }
 
-/// Downloads and starts the installer. On Windows the process exits once the installer runs, so a return is a failure.
-async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
+/// Downloads and starts the installer. On Windows the process exits once the installer runs, so a return is a
+/// failure, recorded in `UpdateState.error`.
+async fn install(app: &AppHandle, update: Update) {
     // Taken under the state lock, so the loop and the Install button can't both start one.
     let mut started = false;
     crate::update(app, |s| {
@@ -68,7 +69,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
         }
     });
     if !started {
-        return Ok(());
+        return;
     }
     let (mut received, mut shown) = (0u64, 0u8);
     let result = update
@@ -85,13 +86,11 @@ async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
             },
             || {},
         )
-        .await
-        .map_err(|e| format!("Couldn't install {}: {e}", update.version));
+        .await;
     crate::update(app, |s| {
         s.update.installing = None;
-        s.update.error = result.as_ref().err().cloned();
+        s.update.error = result.err().map(|e| format!("Couldn't install {}: {e}", update.version));
     });
-    result
 }
 
 /// Checks a minute after start and every 6 hours; with `auto_update` on, installs what it finds once the list is closed.
@@ -106,7 +105,7 @@ pub async fn update_loop(app: AppHandle) {
                 tokio::time::sleep(LIST_OPEN_RETRY).await;
             }
             if auto_update(&app) {
-                let _ = install(&app, found).await;
+                install(&app, found).await;
             }
         }
         tokio::time::sleep(CHECK_EVERY).await;
@@ -123,7 +122,7 @@ pub async fn check_update(app: AppHandle) {
 pub async fn install_update(app: AppHandle) {
     match check(&app).await {
         Some(found) => {
-            let _ = install(&app, found).await;
+            install(&app, found).await;
         }
         None => crate::update(&app, |s| {
             if s.update.error.is_none() {
