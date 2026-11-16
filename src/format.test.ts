@@ -133,6 +133,9 @@ describe("parseWhole", () => {
   it("rejectsOutOfRangeFractionsAndText", () => {
     for (const text of ["359", "1601", "640.5", "", "wide"]) expect(parseWhole(text, LIST_WIDTH), text).toBeNull();
   });
+  it("rejectsBlank_evenWhenZeroIsInRange", () => {
+    for (const text of ["", "  "]) expect(parseWhole(text, [0, 100]), JSON.stringify(text)).toBeNull();
+  });
 });
 
 describe("datesTooltip", () => {

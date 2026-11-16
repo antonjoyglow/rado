@@ -87,7 +87,7 @@ export interface Saved {
 export interface Settings {
   pollMinutes: number;
   notify: boolean;
-  /** Counter size in percent, 75–200. */
+  /** Counter size in percent, 75–200; set in the Counter tab. */
   pillScale: number;
   /** Text size of the review list in percent, 80–150. */
   textScale: number;
@@ -96,9 +96,10 @@ export interface Settings {
   listHeight: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
-  /** Colours of the review list; the counter keeps its own look. */
+  /** Colours of the review list; the counter has its own, in `counter`. */
   theme: Theme;
   customTheme: CustomTheme;
+  counter: CounterStyle;
   workspaces: Workspace[];
   activeWorkspace: string;
 }
@@ -111,6 +112,17 @@ export interface CustomTheme {
   background: string;
   text: string;
   accent: string;
+}
+
+/** The counter's look. A number colour of null is heat: blue at 0 through to red at 10 or more. */
+export interface CounterStyle {
+  reviews: string | null;
+  mine: string | null;
+  /** The `{`, `|` and `}`, as `#rrggbb`. */
+  braces: string;
+  /** Opacity in percent: 20–100 at rest, 0–100 near the cursor. */
+  restOpacity: number;
+  hoverOpacity: number;
 }
 
 export interface Snapshot {
