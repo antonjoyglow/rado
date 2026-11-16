@@ -85,7 +85,12 @@ const LIST_HEIGHTS: [string, number][] = [["Half", 50], ["Full", 100]];
 export function mountList(root: HTMLElement): void {
   // Until the first snapshot brings the saved theme.
   document.documentElement.dataset.theme = "system";
-  const status = h("div", { class: "status" });
+  // The text is redrawn every second for the "ago" times; the Download line only on a snapshot, so a click or
+  // keyboard focus on its button survives.
+  const statusText = h("div");
+  const newerText = h("span");
+  const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void api.openNewerRelease() }, "Download"));
+  const status = h("div", { class: "status" }, statusText, newerLine);
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
@@ -154,22 +159,17 @@ export function mountList(root: HTMLElement): void {
 
   const renderStatus = () => {
     if (!snapshot) return;
-    status.replaceChildren();
+    statusText.replaceChildren();
     status.dataset.kind = snapshot.polling ? "busy" : snapshot.error ? "error" : "ok";
     if (snapshot.polling) {
       const seconds = pollingSince ? Math.round((Date.now() - pollingSince) / 1000) : 0;
-      status.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
+      statusText.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
     } else if (snapshot.error) {
-      status.append(snapshot.error);
+      statusText.append(snapshot.error);
     } else {
-      status.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
+      statusText.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
     }
-    if (snapshot.warning) status.append(h("div", { class: "hint" }, snapshot.warning));
-    const newer = snapshot.newerRelease;
-    if (newer) {
-      const download = h("button", { type: "button", class: "link", title: newer.url, onclick: () => void api.openNewerRelease() }, "Download");
-      status.append(h("div", { class: "newer" }, `Rado ${newer.version} is available · `, download));
-    }
+    if (snapshot.warning) statusText.append(h("div", { class: "hint" }, snapshot.warning));
   };
 
   const renderBody = () => {
@@ -211,6 +211,8 @@ export function mountList(root: HTMLElement): void {
     document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
     workspace.render(s);
     settingsView?.update(s);
+    newerLine.hidden = !s.newerRelease;
+    newerText.textContent = s.newerRelease ? `Rado ${s.newerRelease.version} is available · ` : "";
     renderStatus();
     renderBody();
     if (rescaled) revealTab();
