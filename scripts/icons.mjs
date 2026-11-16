@@ -12,7 +12,7 @@ const icons = "src-tauri/icons";
 const tauri = (...args) => execSync(`npx tauri icon ${args.map((a) => `"${a}"`).join(" ")}`, { stdio: "inherit" });
 
 tauri("docs/logo.svg", "-o", icons);
-for (const dir of ["android", "ios"]) rmSync(join(icons, dir), { recursive: true, force: true });
+for (const extra of ["android", "ios", "64x64.png"]) rmSync(join(icons, extra), { recursive: true, force: true });
 
 const tmp = mkdtempSync(join(tmpdir(), "rado-icons-"));
 tauri(join(icons, "tray.svg"), "-o", tmp, "-p", "16,24,32");
