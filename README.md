@@ -1,6 +1,6 @@
 # Rado
 
-Rado is a Windows tray app that shows the pull requests waiting for your review, across Azure DevOps and GitHub. A small counter on your desktop shows how many reviews you have and how many of your own PRs need work. Click it for a ranked list. Workspaces keep separate setups apart, for example your company's Azure DevOps and Jira and a side project's GitHub and Linear. It's built for developers who review across several repos and want one place to see what's waiting.
+Rado is a Windows tray app that shows the pull requests waiting for your review, across Azure DevOps and GitHub. A small counter on your desktop shows how many reviews you have and how many of your own PRs need work. Click it for a ranked list. Workspaces keep separate setups apart, for example your company's Azure DevOps and Jira and a side project's GitHub and Linear.
 
 ## Quick setup
 
@@ -29,7 +29,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/review-list.png" width="640" alt="The review list">
 
-**The list.** One tab per section; the top-ranked review is marked *Review next*. Each row has a ticket chip (`ENG-42`) and one chip per PR; a dashed chip is a PR on the same branch that you aren't asked to review. Click the title to open every PR in the row.
+**The list.** One tab per section; the top-ranked review is marked *Review next*. Each row has a ticket chip (`ENG-42`) and one chip per PR; a dashed chip is a PR on the same branch that you aren't asked to review. Click a row to open every PR in it, or a chip to open one.
 
 <img src="docs/screenshots/workspace-picker.png" width="640" alt="The workspace picker open under the header chip">
 
@@ -45,7 +45,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/settings-general.png" width="640" alt="Settings, General tab in the light theme">
 
-**Settings → General.** Polling, counter size, text size, list size, theme (shown: *Light*), browser, notifications and start with Windows.
+**Settings → General.** Check every (polling interval), counter size, text size, list size, theme (shown: *Light*), browser, notifications and start with Windows.
 
 <img src="src-tauri/icons/32x32.png" width="32" alt="Rado's tray icon">
 
@@ -58,7 +58,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 - `{ reviews | mine }` in white pixel braces. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
 - Each number is coloured by count: blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
 - `{!}`: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
-- Always on top. It sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it.
+- Always on top. It sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
 - *Counter size* in settings: 75% to 200%; − / + step by 25%, or type a whole percent. Sizes other than 100% and 200% are slightly soft. It grows around its right edge.
 
 ### List
@@ -70,7 +70,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 - **Rows:** PRs with the same source branch in different repos form one row (*N PRs · branch*), titled and placed by their highest-ranked PR, with summed approvals and comments. GitHub and Azure DevOps PRs never share a row. PR chips read `repo !n` (Azure DevOps) or `repo #n` (GitHub).
 - **Row details:** `✓ n` approved, `✗ n` rejected or waiting for author, comments with open threads (system threads such as votes and pushes don't count), *required*, *draft*, and `→ main` when it merges into `master`, `main`, `qa` or `release`. On the right: *opened* and *active* (the latest push, vote, comment, reviewer or status change; activity in the first five minutes counts as opening). An aggregate uses its earliest PR's opening and its latest activity. Hover for each PR's exact times.
 - **Copy** copies the PR link; for an aggregate, one `repo: link` line per PR.
-- **Not mine** (on a review) or **Hide** (on your own PR) drops the row from the count and notifications until it closes. On GitHub that's until it leaves Rado's GitHub results, for example once a teammate covers a team request. Hidden PRs are forgotten only after a poll in which every source answered in full. **Show** on the *Hidden* tab brings one back. Hiding is local; the server still lists you as a reviewer.
+- **Not mine** (on a review) or **Hide** (on your own PR) drops the row from the count and notifications until it closes. On GitHub that's until it leaves Rado's GitHub results, for example once a teammate covers a team request. Hidden PRs are forgotten only after a poll in which every source answered in full. **Show** on the *Hidden* tab brings one back. Hiding is local; Azure DevOps or GitHub still lists you as a reviewer.
 - **Quiet:** a review with no activity for 21 days leaves the count, notifications and the MCP queue, and moves to *Quiet*. Any activity brings it back, with a notification. Your own PRs never go quiet; a PR whose threads failed to load stays where it was.
 - **Esc** closes the workspace picker, then leaves settings, then hides the list.
 
@@ -80,7 +80,7 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 
 ### Workspaces
 
-- A workspace is a named set of sources (an Azure DevOps organization with its PAT and teams, a GitHub token, or both) and a tracker. Only the active one is polled, counted and notified about.
+- A workspace is a named set of sources (an Azure DevOps organization with its PAT and teams, a GitHub token, or both) and a tracker.
 - The order doesn't wrap: Ctrl+→ on the last workspace does nothing. The keys don't switch while you type in a field.
 - A switch drops any poll still running for the old workspace and refreshes the new one at once. Each workspace keeps its own list, votes, hidden PRs and notification baseline, so switching back shows its last list and only reviews that are new since its last poll notify. A workspace's first poll since Rado started records its reviews without notifying.
 - Deleting a workspace (after a confirm) removes its tokens and data. The last workspace can't be deleted.
@@ -88,7 +88,7 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 
 ### Trackers
 
-- A ticket key in a branch name (`ABC-12`, as in `feature/ABC-12-login`) becomes a chip that opens the issue in the workspace's Jira site or Linear workspace. Rado only builds the link; no tracker token is needed. Pasting a Jira or Linear link into the field works too.
+- A ticket key in a branch name (`ABC-12`, as in `feature/ABC-12-login`) becomes a chip that opens the issue in the workspace's Jira site or Linear workspace. Rado only builds the link; no tracker token is needed. With no tracker set, there are no chips. Pasting a Jira or Linear link into the field works too.
 - Without team keys, upper-case keys count anywhere in the branch. With Linear, lower-case keys also count in Linear's branch shape (`anton/eng-123-add-login`). `release-2026`, `renovate/node-20`, `UTF-8`, `ISO-8601`, `SHA-256` and `CVE-2024-…` never make chips, but `chore/node-18-upgrade` and `sprint-3-onboarding` do (NODE-18, SPRINT-3).
 - With **team keys** set, only those keys count, in any case, at the start of the branch or after `/`, `-` or `_`. `hoo-312-ranks` gives HOO-312 and `claude/hoo-342-343-panels` gives HOO-342; `sprint-3` gives nothing.
 
@@ -100,12 +100,13 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 - **GitHub:** one GraphQL call per poll searches every repo the token can see: reviews requested from you or your teams (team-only shows as *team*), open PRs you reviewed, and your own open PRs.
   - A push after your approval or change request moves it to *Re-review*. Your vote is your last approval or change request; a later comment doesn't replace it, and a dismissed vote counts as changed.
   - Your latest review approved: *Approved*; requested changes: *Author*. A PR you only commented on, and aren't requested on, isn't listed.
-  - **Watched repos** count every open PR there as a review, except drafts and your own (bots' PRs included). They score like a team request and then follow your vote. Changing the list re-polls without a notification per PR.
+  - **Watched repos** count every open PR there as a review, except drafts and your own (bots' PRs included). They score like a team request and then follow your vote. Pasting a repo link works too. Changing the list re-polls without a notification per PR.
+  - `✓` / `✗` count each reviewer's latest approval or change request; comments include review-thread comments.
   - GitHub has no "required reviewer" flag, so GitHub PRs never get that bonus. Last activity is the PR's `updatedAt`. A search with more than 100 results lists the first 100 and says so.
 
 ### Browser and tab groups
 
-**Open links in** (settings): *System default*, *Edge* or *Chrome*. If the chosen browser can't start, the link opens in the default one and the status line says why.
+**Open links in** (settings): *System default*, *Edge* or *Chrome*, for every link Rado opens: PRs, *Review next* and tickets. If the chosen browser can't start, the link opens in the default one and the status line says why.
 
 Every PR link Rado opens ends in `#rado=<branch>` (plus `&group` from an aggregate). The extension in `browser-extension/`, for Edge and Chrome, uses that tag to:
 - name the tab `repo:branch` (`WebApp:ABC-4827`), and keep that name while you stay on the PR;
@@ -118,7 +119,7 @@ Without it, links open as ordinary tabs. To install, open `edge://extensions` or
 `rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each good poll, from the active workspace (looked up on every call, so it follows a switch). It never reads your PAT. The agent reviews through the Azure DevOps MCP server and only drafts; it never posts or votes. GitHub PRs aren't in the queue yet.
 
 - `list_review_queue`: reviews waiting on you, best-ranked first, grouped by branch. Each PR has `project`, `repoId`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach Azure DevOps. Not mine, Hide and Show take effect at the next poll.
-- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. `commit` must be the PR's current `sourceCommit`. Nothing changes in Azure DevOps or in Rado's list.
+- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. `commit` must be the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. Nothing changes in Azure DevOps or in Rado's list.
 
 Register the installed server with the command in [Quick setup](#quick-setup), or a source build with `npm run mcp:build` and `claude mcp add --scope user rado -- "<repo>\src-tauri\target\release\rado-mcp.exe"`. A Claude session holding the server locks the exe; close it before you rebuild.
 
@@ -132,7 +133,7 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: polling, counter size, text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%), list size, theme, browser, notifications, start with Windows and **Quit**. Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), counter size, text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list size, theme, browser, notifications, start with Windows and **Quit**. Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). The counter keeps its own look.
 
@@ -149,7 +150,7 @@ npm run app:update   # build, then update the installed Rado in place and restar
 
 The installer updates an existing install in place: it skips Tauri's "uninstall before installing" page and the folder page, keeps your shortcuts and settings, and closes a running Rado first. This comes from `src-tauri/windows/installer.nsi`, Tauri CLI 2.12.4's template with Rado's changes (search it for `Rado:`). After upgrading `@tauri-apps/cli`, re-extract the template and reapply them.
 
-The installer and uninstaller also stop every `rado-mcp.exe` running from the install folder (one that won't stop is renamed to `rado-mcp.exe.old` and deleted next time). Claude sessions using it lose the `rado` tools until they restart.
+The installer and uninstaller also stop every `rado-mcp.exe` running from the install folder (one that won't stop is renamed to `rado-mcp.exe.old` and deleted next time). Claude sessions using it lose the `rado` tools until they restart; new sessions start the new one.
 
 `app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install, closes a running Rado and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`): run directly from a Claude desktop session, it would install into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. To update by hand, run the setup exe with the same flags.
 
