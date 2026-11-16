@@ -33,7 +33,7 @@ export function contrast(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// Starting hues for status text, from the light and dark palettes in styles.css.
+// Starting hues for a custom theme's status text. The built-in themes' --clear follows their accent instead.
 const STATUS_ON_LIGHT = { "--urgent": "#c22d2d", "--normal": "#a35f08", "--clear": "#1d7a44" };
 const STATUS_ON_DARK = { "--urgent": "#f26b6b", "--normal": "#d98a1c", "--clear": "#4cc07f" };
 

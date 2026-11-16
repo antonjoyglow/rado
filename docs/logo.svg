@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Rado: a punk shoebill">
+  <rect width="256" height="256" rx="56" fill="#1D9E75"/>
+  <g fill="#111111">
+    <path d="M58 92 L42 46 L72 64 L76 20 L98 56 L116 24 L122 60 L146 48 L138 90 Z"/>
+    <path d="M150 92 C140 62 110 50 88 56 C58 64 44 92 50 122 C54 146 66 160 72 178 L70 256 L128 256 C124 200 128 170 140 156 Z"/>
+    <path d="M144 84 C180 78 212 88 228 104 C238 114 236 130 226 134 C220 136 214 132 218 126 C198 148 168 160 138 162 C130 138 132 104 144 84 Z"/>
+  </g>
+  <circle fill="#1D9E75" cx="112" cy="102" r="14"/>
+</svg>
