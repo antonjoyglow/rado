@@ -69,7 +69,7 @@ export function parseScale(text: string): number | null {
 export const LIST_WIDTH_PERCENT: readonly [number, number] = [20, 100];
 export const LIST_HEIGHT_PERCENT: readonly [number, number] = [25, 100];
 
-/** A typed whole number inside `range`, such as a list width in px. */
+/** A typed whole number inside `range`, such as a list width in percent. */
 export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
   const trimmed = text.trim();
   // Number("") is 0, which would pass any range that starts at 0.

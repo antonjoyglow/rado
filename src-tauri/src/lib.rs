@@ -479,6 +479,12 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .build()?;
     let handle = app.clone();
     window.on_window_event(move |event| {
+        // Alt+F4 closes like ✕, keeping the window and bringing the counter back.
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            hide_list(handle.clone());
+            return;
+        }
         let WindowEvent::Focused(focused) = event else { return };
         // Windows may refuse focus to a newly shown window and report a blur at once;
         // only a blur after the list really had focus means the user clicked away.
@@ -1022,6 +1028,11 @@ pub fn run() {
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
             size_pill(app.handle(), pill_scale, false);
             place_pill(app.handle());
+            // Only the first show honours `focus: false`; without this, showing the counter again after Esc
+            // or ✕ makes it the active window, and the next keystrokes go nowhere.
+            if let Some(pill) = app.get_webview_window(PILL) {
+                let _ = pill.set_focusable(false);
+            }
             // The plugin saves only on a clean exit; save on every move so a drag survives a kill or a reboot.
             if let Some(pill) = app.get_webview_window(PILL) {
                 let handle = app.handle().clone();
