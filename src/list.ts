@@ -5,6 +5,7 @@ import {
 } from "./format";
 import { h } from "./dom";
 import { counterPanel } from "./counter";
+import { serialSaver } from "./save";
 import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
@@ -342,140 +343,148 @@ function renderSettings(
   };
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
-  const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
+  // General and Counter share `settings` and save it whole. A failed save rolls both tabs back to the last saved
+  // values (the field notes outlive the rebuild, so the error stays shown).
+  const queueSave = serialSaver(settings, api.saveSettings, (saved) => {
+    Object.assign(settings, saved);
+    panels.general.replaceChildren(...generalFields());
+    counter.redraw();
+  });
+  const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
-  const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
-  const chips = POLL_CHOICES.map((m) =>
-    h("button", { type: "button", class: "chip", data: { on: String(m === settings.pollMinutes) }, onclick: () => setMinutes(m) }, `${m} min`),
-  );
-  const setMinutes = (m: number) => {
-    settings.pollMinutes = m;
-    minutes.value = String(m);
-    chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
-    void save(n.minutes);
-  };
-  minutes.onchange = () => {
-    const m = parseMinutes(minutes.value);
-    if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
-    else setMinutes(m);
-  };
-
-  const textScale = h("input", { type: "number", min: String(TEXT_SCALE[0]), max: String(TEXT_SCALE[1]), value: String(settings.textScale), class: "scale", ariaLabel: "Text size in percent" });
-  const textChips = TEXT_CHOICES.map((p) =>
-    h("button", { type: "button", class: "chip", onclick: () => setTextScale(p) }, `${p}%`),
-  );
-  const textSmaller = h("button", { type: "button", title: "Smaller text", onclick: () => setTextScale(stepScale(settings.textScale, -1, TEXT_STEP, TEXT_SCALE)) }, "−");
-  const textBigger = h("button", { type: "button", title: "Bigger text", onclick: () => setTextScale(stepScale(settings.textScale, 1, TEXT_STEP, TEXT_SCALE)) }, "+");
-  const showTextScale = (percent: number) => {
-    textScale.value = String(percent);
-    textChips.forEach((c, i) => (c.dataset.on = String(TEXT_CHOICES[i] === percent)));
-    textSmaller.disabled = percent <= TEXT_SCALE[0];
-    textBigger.disabled = percent >= TEXT_SCALE[1];
-  };
-  const setTextScale = (percent: number) => {
-    settings.textScale = percent;
-    showTextScale(percent);
-    void save(n.text);
-  };
-  showTextScale(settings.textScale);
-  textScale.onchange = () => {
-    const percent = parseWhole(textScale.value, TEXT_SCALE);
-    if (percent === null) fail(n.text, `Use a whole number from ${TEXT_SCALE[0]} to ${TEXT_SCALE[1]}.`);
-    else setTextScale(percent);
-  };
-
-  const listWidth = h("input", { type: "number", min: String(LIST_WIDTH[0]), max: String(LIST_WIDTH[1]), value: String(settings.listWidth), class: "side", ariaLabel: "List width in px" });
-  const listHeight = h("input", { type: "number", min: String(LIST_HEIGHT[0]), max: String(LIST_HEIGHT[1]), value: String(settings.listHeight), class: "side", ariaLabel: "List height in px" });
-  const sizes = LIST_SIZES.map(([label, w, ht]) =>
-    h("button", { type: "button", class: "chip", title: `${w} × ${ht} px`, onclick: () => setListSize(w, ht) }, label),
-  );
-  const setListSize = (w: number, ht: number) => {
-    settings.listWidth = w;
-    settings.listHeight = ht;
-    listWidth.value = String(w);
-    listHeight.value = String(ht);
-    sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === w && LIST_SIZES[i][2] === ht)));
-    void save(n.size);
-  };
-  sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
-  listWidth.onchange = listHeight.onchange = () => {
-    const w = parseWhole(listWidth.value, LIST_WIDTH);
-    const ht = parseWhole(listHeight.value, LIST_HEIGHT);
-    if (w === null || ht === null) fail(n.size, `Use whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
-    else setListSize(w, ht);
-  };
-
-  const browsers = BROWSERS.map(([value, label]) =>
-    h("button", { type: "button", class: "chip", data: { on: String(value === settings.browser) }, onclick: () => setBrowser(value) }, label),
-  );
-  const setBrowser = (value: Browser) => {
-    settings.browser = value;
-    browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === value)));
-    void save(n.browser);
-  };
-
-  const themes = THEMES.map(([value, label]) =>
-    h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
-  );
-  const setTheme = (value: Theme) => {
-    settings.theme = value;
-    themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === value)));
-    customColours.hidden = value !== "custom";
-    void save(n.theme);
-  };
-  // A copy, so the snapshot keeps the saved colours. The saved snapshot repaints the list.
-  settings.customTheme = { ...settings.customTheme };
-  const colourRows = CUSTOM_COLOURS.map(([key, label]) => {
-    const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
-    const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
-    const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
-    const set = (value: string) => {
-      const before = settings.customTheme[key];
-      fill(value);
-      api.saveSettings(settings).then(() => {
-        const hard = unreadable(settings.customTheme);
-        if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
-        else ok(n.custom);
-      }, (e) => {
-        // Not saved: a later save of another field must not carry it, unless a newer pick already replaced it.
-        if (settings.customTheme[key] === value) fill(before);
-        fail(n.custom, e);
-      });
+  /** The General tab's fields, filled from `settings`. */
+  const generalFields = (): HTMLElement[] => {
+    const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
+    const chips = POLL_CHOICES.map((m) =>
+      h("button", { type: "button", class: "chip", data: { on: String(m === settings.pollMinutes) }, onclick: () => setMinutes(m) }, `${m} min`),
+    );
+    const setMinutes = (m: number) => {
+      settings.pollMinutes = m;
+      minutes.value = String(m);
+      chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
+      void save(n.minutes);
     };
-    picker.onchange = () => set(picker.value);
-    typed.onchange = () => {
-      const value = parseHex(typed.value);
-      if (value === null) fail(n.custom, "Use a hex colour such as #1f2125.");
-      else set(value);
+    minutes.onchange = () => {
+      const m = parseMinutes(minutes.value);
+      if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
+      else setMinutes(m);
     };
-    return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
-  });
-  const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
 
-  const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
-  const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
-  void api.autostart().then((on) => (autostart.checked = on));
+    const textScale = h("input", { type: "number", min: String(TEXT_SCALE[0]), max: String(TEXT_SCALE[1]), value: String(settings.textScale), class: "scale", ariaLabel: "Text size in percent" });
+    const textChips = TEXT_CHOICES.map((p) =>
+      h("button", { type: "button", class: "chip", onclick: () => setTextScale(p) }, `${p}%`),
+    );
+    const textSmaller = h("button", { type: "button", title: "Smaller text", onclick: () => setTextScale(stepScale(settings.textScale, -1, TEXT_STEP, TEXT_SCALE)) }, "−");
+    const textBigger = h("button", { type: "button", title: "Bigger text", onclick: () => setTextScale(stepScale(settings.textScale, 1, TEXT_STEP, TEXT_SCALE)) }, "+");
+    const showTextScale = (percent: number) => {
+      textScale.value = String(percent);
+      textChips.forEach((c, i) => (c.dataset.on = String(TEXT_CHOICES[i] === percent)));
+      textSmaller.disabled = percent <= TEXT_SCALE[0];
+      textBigger.disabled = percent >= TEXT_SCALE[1];
+    };
+    const setTextScale = (percent: number) => {
+      settings.textScale = percent;
+      showTextScale(percent);
+      void save(n.text);
+    };
+    showTextScale(settings.textScale);
+    textScale.onchange = () => {
+      const percent = parseWhole(textScale.value, TEXT_SCALE);
+      if (percent === null) fail(n.text, `Use a whole number from ${TEXT_SCALE[0]} to ${TEXT_SCALE[1]}.`);
+      else setTextScale(percent);
+    };
+
+    const listWidth = h("input", { type: "number", min: String(LIST_WIDTH[0]), max: String(LIST_WIDTH[1]), value: String(settings.listWidth), class: "side", ariaLabel: "List width in px" });
+    const listHeight = h("input", { type: "number", min: String(LIST_HEIGHT[0]), max: String(LIST_HEIGHT[1]), value: String(settings.listHeight), class: "side", ariaLabel: "List height in px" });
+    const sizes = LIST_SIZES.map(([label, w, ht]) =>
+      h("button", { type: "button", class: "chip", title: `${w} × ${ht} px`, onclick: () => setListSize(w, ht) }, label),
+    );
+    const setListSize = (w: number, ht: number) => {
+      settings.listWidth = w;
+      settings.listHeight = ht;
+      listWidth.value = String(w);
+      listHeight.value = String(ht);
+      sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === w && LIST_SIZES[i][2] === ht)));
+      void save(n.size);
+    };
+    sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
+    listWidth.onchange = listHeight.onchange = () => {
+      const w = parseWhole(listWidth.value, LIST_WIDTH);
+      const ht = parseWhole(listHeight.value, LIST_HEIGHT);
+      if (w === null || ht === null) fail(n.size, `Use whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
+      else setListSize(w, ht);
+    };
+
+    const browsers = BROWSERS.map(([value, label]) =>
+      h("button", { type: "button", class: "chip", data: { on: String(value === settings.browser) }, onclick: () => setBrowser(value) }, label),
+    );
+    const setBrowser = (value: Browser) => {
+      settings.browser = value;
+      browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === value)));
+      void save(n.browser);
+    };
+
+    const themes = THEMES.map(([value, label]) =>
+      h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
+    );
+    const setTheme = (value: Theme) => {
+      settings.theme = value;
+      themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === value)));
+      customColours.hidden = value !== "custom";
+      void save(n.theme);
+    };
+    // A copy, so the snapshot keeps the saved colours. The saved snapshot repaints the list.
+    settings.customTheme = { ...settings.customTheme };
+    const colourRows = CUSTOM_COLOURS.map(([key, label]) => {
+      const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
+      const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
+      const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
+      const set = (value: string) => {
+        fill(value);
+        queueSave(settings).then(() => {
+          const hard = unreadable(settings.customTheme);
+          if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
+          else ok(n.custom);
+        }, (e) => fail(n.custom, e));
+      };
+      picker.onchange = () => set(picker.value);
+      typed.onchange = () => {
+        const value = parseHex(typed.value);
+        if (value === null) fail(n.custom, "Use a hex colour such as #1f2125.");
+        else set(value);
+      };
+      return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
+    });
+    const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
+
+    const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
+    const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
+    void api.autostart().then((on) => (autostart.checked = on));
+
+    return [
+        // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
+        h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
+        h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
+        h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+        h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
+        customColours,
+        h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
+        h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
+        h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
+        h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
+    ];
+  };
+  const counter = counterPanel(settings, { note, caption, fail, save });
 
   const tabPanel = (key: SettingsTab, ...children: HTMLElement[]) => h("div", { class: "tabpanel", id: `settings-${key}`, role: "tabpanel" }, ...children);
   // Every panel lives for the whole visit, so switching tabs keeps a pasted but unsaved token.
   const panels: Record<SettingsTab, HTMLElement> = {
     workspaces: tabPanel("workspaces", workspaces.element),
-    counter: tabPanel("counter", counterPanel(settings, { note, caption, ok, fail })),
-    general: tabPanel("general",
-      // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
-      h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
-      h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
-      h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
-      h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
-      customColours,
-      h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
-      h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
-      h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
-      h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
-    ),
+    counter: tabPanel("counter", counter.element),
+    general: tabPanel("general", ...generalFields()),
   };
   const tabs = SETTINGS_TABS.map((t) => ({ key: t.key, tab: h("button", { class: "tab", id: `settings-tab-${t.key}` }, t.label) }));
   const showTab = (key: SettingsTab) => {
