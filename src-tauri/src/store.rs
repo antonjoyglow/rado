@@ -20,7 +20,7 @@ const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 pub struct Settings {
     pub poll_minutes: u32,
     pub notify: bool,
-    /// Size of the `{ reviews | mine }` counter, in percent of the 16 px original.
+    /// Size of the `reviews <bird> mine` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub pill_scale: u32,
     /// Text size of the review list, in percent.
@@ -39,7 +39,7 @@ pub struct Settings {
     /// Colours of the `Custom` theme; kept when another theme is chosen.
     #[serde(deserialize_with = "lenient_choice")]
     pub custom_theme: CustomTheme,
-    /// Colours and opacity of the `{ reviews | mine }` counter; its size is `pill_scale`.
+    /// Colours and opacity of the `reviews <bird> mine` counter; its size is `pill_scale`.
     #[serde(deserialize_with = "lenient_choice")]
     pub counter: CounterStyle,
     #[serde(deserialize_with = "workspace::lenient_workspaces")]
@@ -131,9 +131,9 @@ pub struct CounterStyle {
     pub reviews: Option<String>,
     #[serde(deserialize_with = "lenient_choice")]
     pub mine: Option<String>,
-    /// The `{`, `|` and `}`.
-    #[serde(deserialize_with = "lenient_choice")]
-    pub braces: String,
+    /// The bird between the numbers, and the `!`. Files from 0.9.0 call it `braces`, after the `{ | }` it replaced.
+    #[serde(alias = "braces", deserialize_with = "lenient_choice")]
+    pub logo: String,
     /// Opacity in percent, away from the cursor and near it.
     #[serde(deserialize_with = "lenient_number::<_, 55>")]
     pub rest_opacity: u32,
@@ -144,7 +144,7 @@ pub struct CounterStyle {
 /// The look before the counter could be customised.
 impl Default for CounterStyle {
     fn default() -> Self {
-        Self { reviews: None, mine: None, braces: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 }
+        Self { reviews: None, mine: None, logo: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 }
     }
 }
 
@@ -158,7 +158,7 @@ impl CounterStyle {
         Self {
             reviews: self.reviews.as_deref().and_then(hex_color),
             mine: self.mine.as_deref().and_then(hex_color),
-            braces: hex_color(&self.braces).unwrap_or_else(|| Self::default().braces),
+            logo: hex_color(&self.logo).unwrap_or_else(|| Self::default().logo),
             rest_opacity: self.rest_opacity.clamp(COUNTER_REST_RANGE.0, COUNTER_REST_RANGE.1),
             hover_opacity: self.hover_opacity.clamp(COUNTER_HOVER_RANGE.0, COUNTER_HOVER_RANGE.1),
         }
@@ -191,7 +191,7 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
     Ok(value.as_f64().map_or(DEFAULT, |v| v.round() as u32))
 }
 
-/// Smallest and largest counter size, in percent. Below 75% the pixel font stops being readable;
+/// Smallest and largest counter size, in percent. Below 75% the numbers stop being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
 /// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
@@ -799,20 +799,29 @@ pub(crate) mod tests {
         let old: Settings = serde_json::from_str(r#"{"pollMinutes":7,"pillScale":125}"#).unwrap();
         let old = old.clamped();
         assert_eq!((old.poll_minutes, old.pill_scale, old.counter), (7, 125, CounterStyle::default()));
-        assert_eq!(CounterStyle::default(), CounterStyle { reviews: None, mine: None, braces: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 });
+        assert_eq!(CounterStyle::default(), CounterStyle { reviews: None, mine: None, logo: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 });
     }
 
     #[test]
     fn clamped_counter_normalisesColoursAndClampsOpacity() {
-        let json = r##"{"pollMinutes":7,"counter":{"reviews":" FFAA00 ","mine":"#12345G","braces":"pink","restOpacity":5,"hoverOpacity":140.4}}"##;
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":" FFAA00 ","mine":"#12345G","logo":"pink","restOpacity":5,"hoverOpacity":140.4}}"##;
         let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
-        let expected = CounterStyle { reviews: Some("#ffaa00".into()), mine: None, braces: "#ffffff".into(), rest_opacity: 20, hover_opacity: 100 };
+        let expected = CounterStyle { reviews: Some("#ffaa00".into()), mine: None, logo: "#ffffff".into(), rest_opacity: 20, hover_opacity: 100 };
+        assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
+    }
+
+    #[test]
+    fn settings_090CounterWithBraces_loadsItAsTheLogoColour() {
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":"#f26b6b","mine":null,"braces":"#C792EA","restOpacity":80,"hoverOpacity":25}}"##;
+        let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
+        let expected = CounterStyle { reviews: Some("#f26b6b".into()), mine: None, logo: "#c792ea".into(), rest_opacity: 80, hover_opacity: 25 };
+        assert!(serde_json::to_value(&settings).unwrap()["counter"].get("braces").is_none());
         assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
     }
 
     #[test]
     fn settings_counterFieldsOfWrongShape_fallBackPerField() {
-        let json = r##"{"pollMinutes":7,"counter":{"reviews":7,"mine":"#00ff00","braces":null,"restOpacity":"high","hoverOpacity":[1]}}"##;
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":7,"mine":"#00ff00","logo":null,"restOpacity":"high","hoverOpacity":[1]}}"##;
         let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
         let expected = CounterStyle { mine: Some("#00ff00".into()), ..CounterStyle::default() };
         assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
@@ -826,7 +835,7 @@ pub(crate) mod tests {
     #[test]
     fn counter_serialisesHeatAsNullInCamelCase() {
         let value = serde_json::to_value(CounterStyle::default()).unwrap();
-        assert_eq!(value, serde_json::json!({"reviews":null,"mine":null,"braces":"#ffffff","restOpacity":55,"hoverOpacity":8}));
+        assert_eq!(value, serde_json::json!({"reviews":null,"mine":null,"logo":"#ffffff","restOpacity":55,"hoverOpacity":8}));
     }
 
     #[test]
