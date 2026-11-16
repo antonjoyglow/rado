@@ -4,7 +4,7 @@ import { heat, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from ".
 import { parseHex } from "./theme";
 
 /** The look before the counter could be customised; matches `CounterStyle::default` in `store.rs`. */
-export const COUNTER_DEFAULT: Readonly<CounterStyle> = { reviews: null, mine: null, braces: "#ffffff", restOpacity: 55, hoverOpacity: 8 };
+export const COUNTER_DEFAULT: Readonly<CounterStyle> = { reviews: null, mine: null, logo: "#ffffff", restOpacity: 55, hoverOpacity: 8 };
 export const DEFAULT_SCALE = 100;
 
 /** Opacity limits in percent, matching `COUNTER_*_RANGE` in `store.rs`; below 20% at rest the counter is too faint to find. */
@@ -26,7 +26,7 @@ export function numberColour(fixed: string | null, count: number): string {
 export function counterVars(style: CounterStyle, scalePercent: number): Record<string, string> {
   return {
     "--pill-scale": String(scalePercent / 100),
-    "--pill-braces": style.braces,
+    "--pill-logo": style.logo,
     "--pill-rest": String(style.restOpacity / 100),
     "--pill-hover": String(style.hoverOpacity / 100),
   };
@@ -35,28 +35,26 @@ export function counterVars(style: CounterStyle, scalePercent: number): Record<s
 export interface CounterParts {
   pill: HTMLElement;
   reviews: HTMLElement;
-  bar: HTMLElement;
   mine: HTMLElement;
 }
 
-/** `{ reviews | mine }`; the real counter is a button, the settings preview a plain element. */
+/** `reviews <bird> mine`; the real counter is a button, the settings preview a plain element. */
 export function counterElement(tag: "button" | "div"): CounterParts {
-  const reviews = h("span", { class: "count" });
-  const bar = h("span", { class: "br" }, "|");
-  const mine = h("span", { class: "count" });
-  const pill = h(tag, { class: "pill" }, h("span", { class: "br" }, "{"), reviews, bar, mine, h("span", { class: "br" }, "}"));
+  const reviews = h("span");
+  const mine = h("span");
+  const pill = h(tag, { class: "pill" }, reviews, h("span", { class: "logo" }), mine);
   if (pill instanceof HTMLButtonElement) pill.type = "button";
-  return { pill, reviews, bar, mine };
+  return { pill, reviews, mine };
 }
 
-/** Fills in the numbers and colours. `problem` shows a bare `!` in the braces' colour (no token, or the first load failed). */
+/** Fills in the numbers and colours. `problem` shows `! <bird>` in the logo colour (no token, or the first load failed). */
 export function paintCounter(parts: CounterParts, counts: { reviews: number; mine: number }, style: CounterStyle, scalePercent: number, problem = false): void {
   for (const [name, value] of Object.entries(counterVars(style, scalePercent))) parts.pill.style.setProperty(name, value);
   parts.reviews.textContent = problem ? "!" : String(counts.reviews);
   parts.reviews.style.color = problem ? "" : numberColour(style.reviews, counts.reviews);
   parts.mine.textContent = String(counts.mine);
   parts.mine.style.color = numberColour(style.mine, counts.mine);
-  parts.bar.hidden = parts.mine.hidden = problem;
+  parts.mine.hidden = problem;
 }
 
 interface Ui {
@@ -104,9 +102,9 @@ export function counterPanel(settings: Settings, ui: Ui): { element: HTMLElement
     redraw();
   };
 
-  const colourField = (key: "reviews" | "mine" | "braces", label: string) => {
+  const colourField = (key: "reviews" | "mine" | "logo", label: string) => {
     const n = ui.note();
-    const heatChip = key === "braces" ? null : h("button", { type: "button", class: "chip", title: "Blue at 0, through green and yellow, to red at 10 or more", onclick: () => commit(n, { [key]: null }) }, "Heat");
+    const heatChip = key === "logo" ? null : h("button", { type: "button", class: "chip", title: "Blue at 0, through green and yellow, to red at 10 or more", onclick: () => commit(n, { [key]: null }) }, "Heat");
     const swatches = SWATCHES.map((c) => {
       const swatch = h("button", { type: "button", class: "swatch", title: c, ariaLabel: `${label}: ${c}`, onclick: () => commit(n, { [key]: c }) });
       swatch.style.background = c;
@@ -187,7 +185,7 @@ export function counterPanel(settings: Settings, ui: Ui): { element: HTMLElement
     preview,
     colourField("reviews", "Reviews number"),
     colourField("mine", "Mine number"),
-    colourField("braces", "Braces and bar"),
+    colourField("logo", "Logo"),
     opacityField("restOpacity", "Opacity at rest", REST_RANGE, REST_CHOICES),
     opacityField("hoverOpacity", "Opacity near the cursor", HOVER_RANGE, HOVER_CHOICES),
     sizeField(),

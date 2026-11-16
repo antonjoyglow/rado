@@ -118,8 +118,8 @@ export interface CustomTheme {
 export interface CounterStyle {
   reviews: string | null;
   mine: string | null;
-  /** The `{`, `|` and `}`, as `#rrggbb`. */
-  braces: string;
+  /** The bird between the numbers, and the `!`, as `#rrggbb`. */
+  logo: string;
   /** Opacity in percent: 20–100 at rest, 0–100 near the cursor. */
   restOpacity: number;
   hoverOpacity: number;

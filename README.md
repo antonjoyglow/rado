@@ -10,7 +10,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 2. **Create a token** for each source you use:
    - **Azure DevOps PAT:** **Code (Read)** is the only scope it needs.
    - **GitHub token:** a classic token with `repo` (to read private repos) and `read:org` (to see review requests to your teams). A fine-grained token with *Pull requests: Read* and *Metadata: Read* on your orgs should also work, but some orgs must approve it first (not tested yet).
-3. **Fill in your workspace.** The counter shows `{!}` until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
+3. **Fill in your workspace.** The counter shows `!` beside Rado's bird until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
    - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token and click **Save**. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
@@ -27,9 +27,9 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ## Walkthrough
 
-<img src="docs/screenshots/counter.png" width="122" alt="The counter showing { 5 | 1 }">
+<img src="docs/screenshots/counter.png" width="70" alt="The counter showing 5, Rado's bird, then 1">
 
-**The counter.** Left: reviews waiting on you. Right: your own PRs that need work. Click it to open the list; drag it anywhere.
+**The counter.** Left of the bird: reviews waiting on you. Right: your own PRs that need work. Click it to open the list; drag it anywhere.
 
 <img src="docs/screenshots/review-list.png" width="640" alt="The review list">
 
@@ -53,7 +53,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/settings-counter.png" width="640" alt="Settings, Counter tab with a live preview">
 
-**Settings → Counter.** A live preview, a colour for each number (heat by default) and for the braces, opacity at rest and near the cursor, and size. **Reset to default** brings back the original look.
+**Settings → Counter.** A live preview, a colour for each number (heat by default) and for the logo, opacity at rest and near the cursor, and size. **Reset to default** brings back the default look.
 
 <img src="src-tauri/icons/32x32.png" width="32" alt="Rado's tray icon">
 
@@ -63,15 +63,15 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ### Counter
 
-- `{ reviews | mine }` in pixel braces, white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
+- `reviews`, Rado's bird, `mine`; the bird is white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
 - By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
-- `{!}`: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
+- `!` and the bird, with no mine number: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
 - Always on top. By default it sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
 - **Settings → Counter** changes its look; each change saves as you pick it.
-  - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Braces and bar*: the same without Heat.
+  - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Logo* (the bird and the `!`): the same without Heat. Settings saved by 0.9.0 keep their braces colour as the logo colour.
   - *Opacity at rest*: 20–100% (chips for 30, 55, 80 and 100%). *Opacity near the cursor*: 0–100% (chips for 0, 8, 25 and 50%).
-  - *Size*: 75% to 200%; − / + step by 25%, or type a whole percent. Sizes other than 100% and 200% are slightly soft. It grows around its right edge.
-  - **Reset to default**: heat numbers, white braces, 55% / 8% opacity, 100% size.
+  - *Size*: 75% to 200%; − / + step by 25%, or type a whole percent. It grows around its right edge.
+  - **Reset to default**: heat numbers, white logo, 55% / 8% opacity, 100% size.
 
 ### List
 
@@ -181,4 +181,4 @@ Features collect on a `release/x.y.z` branch and ship together; `main` always eq
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The Silkscreen font in `src/fonts/` is under the SIL Open Font License (`src/fonts/OFL.txt`).
+MIT, see [LICENSE](LICENSE). The Nunito font in `src/fonts/` is under the SIL Open Font License (`src/fonts/OFL.txt`).
