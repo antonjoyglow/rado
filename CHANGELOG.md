@@ -2,6 +2,22 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
+## [0.9.0] - 2026-11-16
+
+### Features
+
+- branding: a green shoebill logo, app icon and tray icon; green is the default theme accent (#22)
+- settings: a Counter tab to customize the floating `{ reviews | mine }` counter: colours, opacity at rest and near the cursor, and size, with a live preview and Reset (#23)
+
+### Fixes
+
+- settings: a failed save no longer leaves another tab's unsaved value to be written later (#24)
+- release: rerunning `npm run release` keeps an edited changelog section and lists the PRs it lacks (#20)
+
+### Documentation
+
+- README: quick setup and a screenshot walkthrough (#21)
+
 ## [0.8.0] - 2026-11-16
 
 ### Features
