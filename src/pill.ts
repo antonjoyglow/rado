@@ -1,30 +1,23 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, watchSnapshot, type Snapshot } from "./api";
-import { ago, heat, pillCounts } from "./format";
-import { h } from "./dom";
+import { ago, pillCounts } from "./format";
+import { counterElement, paintCounter } from "./counter";
 import { activeWorkspace } from "./workspaces";
 
 const DRAG_THRESHOLD_PX = 4;
 
 export function mountPill(root: HTMLElement): void {
-  const reviews = h("span", { class: "count" });
-  const bar = h("span", { class: "br" }, "|");
-  const mine = h("span", { class: "count" });
-  const pill = h("button", { class: "pill", type: "button" }, h("span", { class: "br" }, "{"), reviews, bar, mine, h("span", { class: "br" }, "}"));
+  const parts = counterElement("button");
+  const { pill } = parts;
   root.append(pill);
 
   let snapshot: Snapshot | null = null;
   const render = () => {
     if (!snapshot) return;
-    document.documentElement.style.setProperty("--pill-scale", String(snapshot.settings.pillScale / 100));
     const counts = pillCounts(snapshot.items);
     const problem = !(snapshot.hasPat || snapshot.hasGithubToken) || (snapshot.error && !snapshot.lastRefreshed);
-    reviews.textContent = problem ? "!" : String(counts.reviews);
-    reviews.style.color = problem ? "" : heat(counts.reviews);
-    mine.textContent = String(counts.mine);
-    mine.style.color = heat(counts.mine);
-    bar.hidden = mine.hidden = Boolean(problem);
+    paintCounter(parts, counts, snapshot.settings.counter, snapshot.settings.pillScale, Boolean(problem));
     pill.dataset.polling = String(snapshot.polling);
     const name = activeWorkspace(snapshot.settings)?.name ?? "";
     pill.title = `${name}: ` + (snapshot.warning ? `${snapshot.warning} · ` : "") + (snapshot.error

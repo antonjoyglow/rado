@@ -1,9 +1,10 @@
 import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, parseScale, SCALE_MAX, SCALE_MIN, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
+import { counterPanel } from "./counter";
 import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
@@ -343,7 +344,7 @@ function renderSettings(
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   const save = (n: HTMLElement) => api.saveSettings(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), scale: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -360,24 +361,6 @@ function renderSettings(
     const m = parseMinutes(minutes.value);
     if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
     else setMinutes(m);
-  };
-
-  const scale = h("input", { type: "number", min: String(SCALE_MIN), max: String(SCALE_MAX), value: String(settings.pillScale), class: "scale", ariaLabel: "Counter size in percent" });
-  const smaller = h("button", { type: "button", title: "Smaller", onclick: () => setScale(stepScale(settings.pillScale, -1)) }, "−");
-  const bigger = h("button", { type: "button", title: "Bigger", onclick: () => setScale(stepScale(settings.pillScale, 1)) }, "+");
-  const setScale = (percent: number) => {
-    settings.pillScale = percent;
-    scale.value = String(percent);
-    smaller.disabled = percent <= SCALE_MIN;
-    bigger.disabled = percent >= SCALE_MAX;
-    void save(n.scale);
-  };
-  smaller.disabled = settings.pillScale <= SCALE_MIN;
-  bigger.disabled = settings.pillScale >= SCALE_MAX;
-  scale.onchange = () => {
-    const percent = parseScale(scale.value);
-    if (percent === null) fail(n.scale, `Use a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
-    else setScale(percent);
   };
 
   const textScale = h("input", { type: "number", min: String(TEXT_SCALE[0]), max: String(TEXT_SCALE[1]), value: String(settings.textScale), class: "scale", ariaLabel: "Text size in percent" });
@@ -477,13 +460,13 @@ function renderSettings(
   void api.autostart().then((on) => (autostart.checked = on));
 
   const tabPanel = (key: SettingsTab, ...children: HTMLElement[]) => h("div", { class: "tabpanel", id: `settings-${key}`, role: "tabpanel" }, ...children);
-  // Both panels live for the whole visit, so switching tabs keeps a pasted but unsaved token.
+  // Every panel lives for the whole visit, so switching tabs keeps a pasted but unsaved token.
   const panels: Record<SettingsTab, HTMLElement> = {
     workspaces: tabPanel("workspaces", workspaces.element),
+    counter: tabPanel("counter", counterPanel(settings, { note, caption, ok, fail })),
     general: tabPanel("general",
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
-      h("div", { class: "field" }, caption(`Counter size (${SCALE_MIN}–${SCALE_MAX}%)`, n.scale), h("span", { class: "inline" }, smaller, scale, "%", bigger)),
       h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
       h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
       h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),

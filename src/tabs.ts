@@ -13,11 +13,12 @@ export const SECTIONS: readonly { key: SectionKey; label: string; title: string 
   { key: "hidden", label: "Hidden", title: "Not mine or hidden" },
 ];
 
-export type SettingsTab = "workspaces" | "general";
+export type SettingsTab = "workspaces" | "general" | "counter";
 
 export const SETTINGS_TABS: readonly { key: SettingsTab; label: string }[] = [
   { key: "workspaces", label: "Workspaces" },
   { key: "general", label: "General" },
+  { key: "counter", label: "Counter" },
 ];
 
 export const inSection = (item: ReviewItem, key: SectionKey) => (key === "hidden" ? item.hidden : !item.hidden && item.state === key);
