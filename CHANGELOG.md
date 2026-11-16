@@ -6,7 +6,7 @@ All notable changes to Rado. The format follows [Keep a Changelog](https://keepa
 
 ### Features
 
-- updates: the list links to a newer release's installer when GitHub has one (#PR)
+- updates: the list links to a newer release's installer when GitHub has one (#32)
 - list: the list opens against the screen edge, and the counter hides while it is open (#28)
 - counter: the logo sits between the two counts instead of braces (#27)
 
