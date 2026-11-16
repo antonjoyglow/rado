@@ -91,9 +91,9 @@ export interface Settings {
   pillScale: number;
   /** Text size of the review list in percent, 80–150. */
   textScale: number;
-  /** Size of the review list in px; shrunk to fit the screen when shown. */
-  listWidth: number;
-  listHeight: number;
+  /** Size of the review list in percent of its screen: width 20–100 (never under 360 px), height 25–100. */
+  listWidthPercent: number;
+  listHeightPercent: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
   /** Colours of the review list; the counter has its own, in `counter`. */
@@ -142,7 +142,7 @@ export interface Snapshot {
 export const api = {
   snapshot: () => invoke<Snapshot>("get_snapshot"),
   refresh: () => invoke<void>("refresh_now"),
-  toggleList: () => invoke<void>("toggle_list"),
+  openList: () => invoke<void>("open_list"),
   hideList: () => invoke<void>("hide_list"),
   openPr: (id: number) => invoke<void>("open_pr", { id }),
   openRow: (key: string) => invoke<void>("open_row", { key }),

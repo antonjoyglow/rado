@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -129,9 +129,9 @@ describe("ageColumn", () => {
 });
 
 describe("parseWhole", () => {
-  it("acceptsWholePixelsInRange", () => expect(parseWhole(" 640 ", LIST_WIDTH)).toBe(640));
+  it("acceptsWholeNumbersInRange", () => expect(parseWhole(" 33 ", LIST_WIDTH_PERCENT)).toBe(33));
   it("rejectsOutOfRangeFractionsAndText", () => {
-    for (const text of ["359", "1601", "640.5", "", "wide"]) expect(parseWhole(text, LIST_WIDTH), text).toBeNull();
+    for (const text of ["19", "101", "33.5", "", "wide"]) expect(parseWhole(text, LIST_WIDTH_PERCENT), text).toBeNull();
   });
   it("rejectsBlank_evenWhenZeroIsInRange", () => {
     for (const text of ["", "  "]) expect(parseWhole(text, [0, 100]), JSON.stringify(text)).toBeNull();
