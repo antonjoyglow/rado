@@ -4,13 +4,15 @@
   --muted: #6b7079;
   --line: #e4e6ea;
   --hover: #f2f4f7;
-  /* Text colours measured at 4.5:1 or more on --bg and --hover in each theme. */
-  --accent: #2561c8;
+  /* Text colours measured at 4.5:1 or more on --bg and --hover in each theme. The accent is the logo's green,
+     darkened or lightened to read as text; light, dark and system mark approved/OK with it too (--clear), so
+     there is one green. */
+  --accent: #117a5e;
   --on-accent: #ffffff;
   --urgent: #c22d2d;
   --normal: #a35f08;
   --low: #8a9099;
-  --clear: #1d7a44;
+  --clear: var(--accent);
   font: 13px/1.4 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--fg);
 }
@@ -25,11 +27,11 @@
     --muted: #9aa0aa;
     --line: #33363c;
     --hover: #2a2d32;
-    --accent: #6d9ef6;
+    --accent: #2db88a;
     --on-accent: #111317;
     --urgent: #f26b6b;
     --normal: #d98a1c;
-    --clear: #4cc07f;
+    --clear: var(--accent);
   }
 }
 
@@ -39,11 +41,11 @@
   --muted: #9aa0aa;
   --line: #33363c;
   --hover: #2a2d32;
-  --accent: #6d9ef6;
+  --accent: #2db88a;
   --on-accent: #111317;
   --urgent: #f26b6b;
   --normal: #d98a1c;
-  --clear: #4cc07f;
+  --clear: var(--accent);
 }
 
 :root[data-theme="highContrast"] {
