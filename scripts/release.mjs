@@ -105,35 +105,31 @@ function main(args) {
   }
   const version = first;
   if (!/^\d+\.\d+\.\d+$/.test(version ?? "")) {
-    console.error("Usage: npm run release -- <x.y.z> [--dry-run]   |   node scripts/release.mjs notes <x.y.z>");
+    console.error("Usage: npm run release -- <x.y.z> [--dry-run] [--force]   |   node scripts/release.mjs notes <x.y.z>");
     process.exit(1);
   }
-  const dryRun = args.includes("--dry-run");
-  const force = args.includes("--force");
   const since = git("describe", "--tags", "--abbrev=0", "--match", "v*");
   const subjects = git("log", "--no-merges", "--format=%s", `${since}..HEAD`).split("\n").filter(Boolean);
   const d = new Date();
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const section = buildSection(version, date, subjects);
   if (!sectionBody(section, version)) console.warn(`Warning: no feat or fix commits since ${since}; the section is empty.`);
-  if (dryRun) {
-    console.log(`Commits since ${since}: ${subjects.length}\n\n${section}`);
+  const changelog = readFileSync("CHANGELOG.md", "utf8");
+  const existing = args.includes("--force") ? null : sectionBody(changelog, version);
+  const missing = existing ? missingLines(existing, section) : [];
+  const report = existing
+    ? `CHANGELOG.md already has a ${version} section, kept as edited (--force regenerates it). ` +
+      (missing.length ? `Not in it yet:\n${missing.join("\n")}` : `It mentions every feat and fix PR since ${since}.`)
+    : `CHANGELOG.md gets a ${version} section from ${subjects.length} commits since ${since}. Edit it, then commit.`;
+  if (args.includes("--dry-run")) {
+    console.log(existing ? report : `${report}\n\n${section}`);
     return;
   }
   const names = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"];
-  const bumped = bumpVersions(Object.fromEntries(names.map((n) => [n, readFileSync(n, "utf8")])), version);
-  const changelog = readFileSync("CHANGELOG.md", "utf8");
-  const existing = sectionBody(changelog, version);
-  if (existing && !force) {
-    for (const [n, text] of Object.entries(bumped)) writeFileSync(n, text);
-    const missing = missingLines(existing, section);
-    console.log(`Version set to ${version}. CHANGELOG.md already has a ${version} section, kept as edited (--force regenerates it).`);
-    console.log(missing.length ? `Not in it yet:\n${missing.join("\n")}` : "It mentions every feat and fix PR since " + since + ".");
-    return;
-  }
-  bumped["CHANGELOG.md"] = upsertSection(changelog, version, section);
-  for (const [n, text] of Object.entries(bumped)) writeFileSync(n, text);
-  console.log(`Version set to ${version}; CHANGELOG.md has a ${version} section from ${subjects.length} commits since ${since}. Edit it, then commit.`);
+  const files = bumpVersions(Object.fromEntries(names.map((n) => [n, readFileSync(n, "utf8")])), version);
+  if (!existing) files["CHANGELOG.md"] = upsertSection(changelog, version, section);
+  for (const [n, text] of Object.entries(files)) writeFileSync(n, text);
+  console.log(`Version set to ${version}. ${report}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2));

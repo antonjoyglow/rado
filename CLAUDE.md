@@ -1,2 +1,2 @@
-- Releasing (release branches, changelog, tag, patch releases): README.md, "Releasing".
+- Releasing (release branches, changelog, tag, patch releases): README.md, "Releasing". The `release.yml` run takes about 13 minutes, past the foreground shell timeout: watch it in the background.
 - Building, installing and updating Rado, and why an install from a Claude desktop session lands in the wrong AppData: README.md, "Commands".
