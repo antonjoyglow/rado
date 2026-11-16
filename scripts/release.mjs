@@ -62,10 +62,11 @@ export function sectionBody(changelog, version) {
 
 /** Bullets of a generated section whose PR numbers (or, without one, whose text) an edited body does not mention yet. */
 export function missingLines(body, section) {
+  const mentioned = new Set(body.match(/#\d+/g));
   return section.split("\n").filter((line) => {
     if (!line.startsWith("- ")) return false;
     const prs = line.match(/#\d+/g);
-    return prs ? !prs.every((pr) => new RegExp(`${pr}(?!\\d)`).test(body)) : !body.includes(line.slice(2));
+    return prs ? !prs.every((pr) => mentioned.has(pr)) : !body.includes(line.slice(2));
   });
 }
 
@@ -113,9 +114,9 @@ function main(args) {
   const d = new Date();
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const section = buildSection(version, date, subjects);
-  if (!sectionBody(section, version)) console.warn(`Warning: no feat or fix commits since ${since}; the section is empty.`);
   const changelog = readFileSync("CHANGELOG.md", "utf8");
   const existing = args.includes("--force") ? null : sectionBody(changelog, version);
+  if (!existing && !sectionBody(section, version)) console.warn(`Warning: no feat or fix commits since ${since}; the section is empty.`);
   const missing = existing ? missingLines(existing, section) : [];
   const report = existing
     ? `CHANGELOG.md already has a ${version} section, kept as edited (--force regenerates it). ` +
