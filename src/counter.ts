@@ -93,17 +93,24 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
     paint();
   };
 
-  /** Applies and saves a change. A failed save undoes it, unless a newer change already replaced it, so a later save elsewhere can't carry it. */
+  /** What the last successful save wrote. */
+  let saved = { counter: settings.counter, scale: settings.pillScale };
+  /**
+   * Applies and saves a change. When the newest change fails to save, everything goes back to `saved`,
+   * so a later save elsewhere can't carry an unsaved value, even when overlapping saves both failed.
+   */
   const commit = (n: HTMLElement, change: Partial<CounterStyle>, scale = settings.pillScale) => {
-    const before = { counter: settings.counter, scale: settings.pillScale };
-    const after = { ...settings.counter, ...change };
-    settings.counter = after;
+    const sent = { counter: { ...settings.counter, ...change }, scale };
+    settings.counter = sent.counter;
     settings.pillScale = scale;
     redraw();
-    api.saveSettings(settings).then(() => ui.ok(n), (e) => {
-      if (settings.counter === after) {
-        settings.counter = before.counter;
-        settings.pillScale = before.scale;
+    api.saveSettings(settings).then(() => {
+      saved = sent;
+      ui.ok(n);
+    }, (e) => {
+      if (settings.counter === sent.counter) {
+        settings.counter = saved.counter;
+        settings.pillScale = saved.scale;
         redraw();
       }
       ui.fail(n, e);
