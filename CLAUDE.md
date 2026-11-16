@@ -1,0 +1,2 @@
+- Releasing (release branches, changelog, tag, patch releases): README.md, "Releasing".
+- Building, installing and updating Rado, and why an install from a Claude desktop session lands in the wrong AppData: README.md, "Commands".

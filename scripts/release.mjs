@@ -1,5 +1,7 @@
 // Release helper. Run from the repo root on a release/x.y branch:
 //   npm run release -- 0.8.0            bump the version in every manifest and write the 0.8.0 changelog section
+//                                       (an existing 0.8.0 section is kept; it prints the PRs it lacks)
+//   npm run release -- 0.8.0 --force    regenerate an existing section, dropping hand edits
 //   npm run release -- 0.8.0 --dry-run  print the section, change nothing
 //   node scripts/release.mjs notes 0.8.0  print that section's body (release.yml uses it); exit 1 if missing
 import { execFileSync } from "node:child_process";
@@ -58,6 +60,15 @@ export function sectionBody(changelog, version) {
   return body || null;
 }
 
+/** Bullets of a generated section whose PR numbers (or, without one, whose text) an edited body does not mention yet. */
+export function missingLines(body, section) {
+  return section.split("\n").filter((line) => {
+    if (!line.startsWith("- ")) return false;
+    const prs = line.match(/#\d+/g);
+    return prs ? !prs.every((pr) => new RegExp(`${pr}(?!\\d)`).test(body)) : !body.includes(line.slice(2));
+  });
+}
+
 /** Sets the rado version in each manifest's text. Throws if a manifest has no version where expected. */
 export function bumpVersions(files, version) {
   const swap = (name, text, re, to) => {
@@ -98,6 +109,7 @@ function main(args) {
     process.exit(1);
   }
   const dryRun = args.includes("--dry-run");
+  const force = args.includes("--force");
   const since = git("describe", "--tags", "--abbrev=0", "--match", "v*");
   const subjects = git("log", "--no-merges", "--format=%s", `${since}..HEAD`).split("\n").filter(Boolean);
   const d = new Date();
@@ -110,7 +122,16 @@ function main(args) {
   }
   const names = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"];
   const bumped = bumpVersions(Object.fromEntries(names.map((n) => [n, readFileSync(n, "utf8")])), version);
-  bumped["CHANGELOG.md"] = upsertSection(readFileSync("CHANGELOG.md", "utf8"), version, section);
+  const changelog = readFileSync("CHANGELOG.md", "utf8");
+  const existing = sectionBody(changelog, version);
+  if (existing && !force) {
+    for (const [n, text] of Object.entries(bumped)) writeFileSync(n, text);
+    const missing = missingLines(existing, section);
+    console.log(`Version set to ${version}. CHANGELOG.md already has a ${version} section, kept as edited (--force regenerates it).`);
+    console.log(missing.length ? `Not in it yet:\n${missing.join("\n")}` : "It mentions every feat and fix PR since " + since + ".");
+    return;
+  }
+  bumped["CHANGELOG.md"] = upsertSection(changelog, version, section);
   for (const [n, text] of Object.entries(bumped)) writeFileSync(n, text);
   console.log(`Version set to ${version}; CHANGELOG.md has a ${version} section from ${subjects.length} commits since ${since}. Edit it, then commit.`);
 }

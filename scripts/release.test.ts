@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs script without type declarations
-import { buildSection, bumpVersions, parseTitle, sectionBody, upsertSection } from "./release.mjs";
+import { buildSection, bumpVersions, missingLines, parseTitle, sectionBody, upsertSection } from "./release.mjs";
 
 describe("parseTitle", () => {
   it("featWithScope_dropsTheReleaseSuffixAndKeepsThePrNumber", () => {
@@ -86,6 +86,23 @@ describe("sectionBody", () => {
 
   it("versionDots_areLiteral", () => {
     expect(sectionBody("## [0x8x0] - d\n\n- wrong\n", "0.8.0")).toBeNull();
+  });
+});
+
+describe("missingLines", () => {
+  const generated = "## [0.8.0] - 2026-11-16\n\n### Features\n\n- workspaces: a (#11)\n- b (#13)\n\n### Fixes\n\n- installer: c (#15)\n- installer: d (#16)\n- update: e (#18)\n- no number\n";
+  const edited = "### Features\n\n- workspaces: reworded a (#11)\n- b (#13)\n\n### Fixes\n\n- installer: merged c and d (#15, #16)\n";
+
+  it("listsOnlyPrsTheEditedBodyLacks", () => {
+    expect(missingLines(edited, generated)).toEqual(["- update: e (#18)", "- no number"]);
+  });
+
+  it("prNumberIsNotMatchedByAPrefix", () => {
+    expect(missingLines("- x (#180)", "- y (#18)\n")).toEqual(["- y (#18)"]);
+  });
+
+  it("completeBody_listsNothing", () => {
+    expect(missingLines(edited + "- e (#18)\n- no number\n", generated)).toEqual([]);
   });
 });
 
