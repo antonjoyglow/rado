@@ -71,7 +71,9 @@ export const LIST_HEIGHT: readonly [number, number] = [400, 1600];
 
 /** A typed whole number inside `range`, such as a list width in px. */
 export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
-  const value = Number(text.trim());
+  const trimmed = text.trim();
+  // Number("") is 0, which would pass any range that starts at 0.
+  const value = trimmed === "" ? NaN : Number(trimmed);
   return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
@@ -118,6 +120,8 @@ export function datesTooltip(members: Member[], format: (iso: string) => string)
 }
 
 export function parseMinutes(text: string): number | null {
-  const value = Number(text.trim());
+  const trimmed = text.trim();
+  // Number("") is 0, which would pass any range that starts at 0.
+  const value = trimmed === "" ? NaN : Number(trimmed);
   return Number.isInteger(value) && value >= 1 && value <= 120 ? value : null;
 }
