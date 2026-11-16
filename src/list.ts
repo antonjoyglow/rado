@@ -1,7 +1,7 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier, type UpdateState } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP, updateText,
 } from "./format";
 import { h } from "./dom";
 import { counterPanel } from "./counter";
@@ -354,12 +354,34 @@ function renderSettings(
   });
   const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note(), update: note(), autoUpdate: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
+
+  // Built once and refreshed from each snapshot, so download progress never rebuilds the General tab.
+  const updateLine = h("span");
+  const checkNow = h("button", { type: "button" }, "Check now");
+  checkNow.onclick = () => {
+    checkNow.disabled = true;
+    updateLine.textContent = "Checking GitHub for a newer Rado…";
+    void api.checkUpdate().finally(() => (checkNow.disabled = false));
+  };
+  const installNow = h("button", { type: "button", hidden: true }, "Install and restart");
+  installNow.onclick = () => {
+    installNow.disabled = true;
+    // Errors arrive with the snapshot, in UpdateState.error.
+    void api.installUpdate().finally(() => (installNow.disabled = false));
+  };
+  const showUpdate = (u: UpdateState) => {
+    updateLine.textContent = updateText(u, new Date());
+    installNow.hidden = !u.available || u.installing !== null;
+    if (u.error) show(n.update, "error", u.error);
+    else if (n.update.dataset.kind === "error") n.update.textContent = "";
+  };
+  showUpdate(snapshot.update);
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
   /** The General tab's fields, filled from `settings`. */
@@ -468,6 +490,7 @@ function renderSettings(
     });
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
 
+    const autoUpdate = h("input", { type: "checkbox", ariaLabel: "Install updates automatically", checked: settings.autoUpdate, onchange: () => { settings.autoUpdate = autoUpdate.checked; void save(n.autoUpdate); } });
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
 
     return [
@@ -481,6 +504,8 @@ function renderSettings(
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
+      h("div", { class: "field" }, caption("Updates", n.update), h("span", { class: "inline" }, updateLine, checkNow, installNow)),
+      h("label", { class: "check" }, autoUpdate, "Install updates automatically while the list is closed", n.autoUpdate),
       h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
     ];
   };
@@ -505,7 +530,10 @@ function renderSettings(
   showTab(startTab);
   panel.replaceChildren(strip.list, ...SETTINGS_TABS.map((t) => panels[t.key]));
   return {
-    update: workspaces.update,
+    update: (s) => {
+      workspaces.update(s);
+      showUpdate(s.update);
+    },
     select: (key) => {
       showTab(key);
       onSelect(key);

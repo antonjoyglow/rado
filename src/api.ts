@@ -87,6 +87,8 @@ export interface Saved {
 export interface Settings {
   pollMinutes: number;
   notify: boolean;
+  /** Install a newer release by itself while the list is closed. */
+  autoUpdate: boolean;
   /** Counter size in percent, 75–200; set in the Counter tab. */
   pillScale: number;
   /** Text size of the review list in percent, 80–150. */
@@ -137,6 +139,17 @@ export interface Snapshot {
   settings: Settings;
   /** By workspace id. */
   saved: Record<string, Saved>;
+  update: UpdateState;
+}
+
+export interface UpdateState {
+  /** The running version. */
+  current: string;
+  available: string | null;
+  checkedAt: string | null;
+  /** Download progress in percent while an update installs; Rado then quits and the installer restarts it. */
+  installing: number | null;
+  error: string | null;
 }
 
 export const api = {
@@ -159,6 +172,8 @@ export const api = {
   deleteWorkspace: (id: string) => invoke<void>("delete_workspace", { id }),
   autostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
+  checkUpdate: () => invoke<void>("check_update"),
+  installUpdate: () => invoke<void>("install_update"),
   quit: () => invoke<void>("quit"),
 };
 

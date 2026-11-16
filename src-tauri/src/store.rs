@@ -20,6 +20,8 @@ const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 pub struct Settings {
     pub poll_minutes: u32,
     pub notify: bool,
+    /// Install a newer release by itself while the list is closed; off, Settings offers it instead.
+    pub auto_update: bool,
     /// Size of the `reviews <bird> mine` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub pill_scale: u32,
@@ -223,6 +225,7 @@ impl Default for Settings {
         Self {
             poll_minutes: 3,
             notify: true,
+            auto_update: true,
             pill_scale: 100,
             text_scale: 100,
             list_width_percent: 33,
@@ -805,7 +808,7 @@ pub(crate) mod tests {
     fn settings_withoutCounter_loadsTheOriginalLook() {
         let old: Settings = serde_json::from_str(r#"{"pollMinutes":7,"pillScale":125}"#).unwrap();
         let old = old.clamped();
-        assert_eq!((old.poll_minutes, old.pill_scale, old.counter), (7, 125, CounterStyle::default()));
+        assert_eq!((old.poll_minutes, old.pill_scale, old.counter, old.auto_update), (7, 125, CounterStyle::default(), true));
         assert_eq!(CounterStyle::default(), CounterStyle { reviews: None, mine: None, logo: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 });
     }
 

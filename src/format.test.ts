@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP, updateText } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -160,4 +160,16 @@ describe("parseMinutes", () => {
     "%s -> %s",
     (text, value) => expect(parseMinutes(text)).toBe(value),
   );
+});
+
+describe("updateText", () => {
+  const now = new Date("2026-11-16T12:00:00Z");
+  const base = { current: "0.9.1", available: null, checkedAt: "2026-11-16T10:00:00Z", installing: null, error: null };
+  it.each([
+    [{ ...base, checkedAt: null }, "Rado 0.9.1 · not checked yet"],
+    [base, "Rado 0.9.1 · up to date · checked 2 h ago"],
+    [{ ...base, available: "0.9.2" }, "Rado 0.9.1 · 0.9.2 available · checked 2 h ago"],
+    [{ ...base, error: "Couldn't check for updates: offline" }, "Rado 0.9.1 · checked 2 h ago"],
+    [{ ...base, available: "0.9.2", installing: 40 }, "Downloading Rado 0.9.2: 40%. Rado restarts once it is installed."],
+  ])("%j -> %s", (state, text) => expect(updateText(state, now)).toBe(text));
 });
