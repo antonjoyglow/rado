@@ -93,7 +93,6 @@ body[data-view="pill"] #app { height: 100%; display: grid; place-items: center; 
   gap: 0.26em;
   color: var(--pill-logo, #ffffff);
   font: 800 calc(16px * var(--pill-scale, 1)) / 1 "Nunito", sans-serif;
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   filter: drop-shadow(calc(1px * var(--pill-scale, 1)) calc(1px * var(--pill-scale, 1)) 0 rgba(0, 0, 0, 0.75));
   opacity: var(--pill-rest, 0.55);
