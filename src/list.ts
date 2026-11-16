@@ -1,7 +1,7 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier, type UpdateState } from "./api";
+import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP, updateText,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
 import { counterPanel } from "./counter";
@@ -85,7 +85,12 @@ const LIST_HEIGHTS: [string, number][] = [["Half", 50], ["Full", 100]];
 export function mountList(root: HTMLElement): void {
   // Until the first snapshot brings the saved theme.
   document.documentElement.dataset.theme = "system";
-  const status = h("div", { class: "status" });
+  // The text is redrawn every second for the "ago" times; the Download line only on a snapshot, so a click or
+  // keyboard focus on its button survives.
+  const statusText = h("div");
+  const newerText = h("span");
+  const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void api.openNewerRelease() }, "Download"));
+  const status = h("div", { class: "status" }, statusText, newerLine);
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
@@ -154,17 +159,17 @@ export function mountList(root: HTMLElement): void {
 
   const renderStatus = () => {
     if (!snapshot) return;
-    status.replaceChildren();
+    statusText.replaceChildren();
     status.dataset.kind = snapshot.polling ? "busy" : snapshot.error ? "error" : "ok";
     if (snapshot.polling) {
       const seconds = pollingSince ? Math.round((Date.now() - pollingSince) / 1000) : 0;
-      status.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
+      statusText.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
     } else if (snapshot.error) {
-      status.append(snapshot.error);
+      statusText.append(snapshot.error);
     } else {
-      status.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
+      statusText.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
     }
-    if (snapshot.warning) status.append(h("div", { class: "hint" }, snapshot.warning));
+    if (snapshot.warning) statusText.append(h("div", { class: "hint" }, snapshot.warning));
   };
 
   const renderBody = () => {
@@ -206,6 +211,8 @@ export function mountList(root: HTMLElement): void {
     document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
     workspace.render(s);
     settingsView?.update(s);
+    newerLine.hidden = !s.newerRelease;
+    newerText.textContent = s.newerRelease ? `Rado ${s.newerRelease.version} is available · ` : "";
     renderStatus();
     renderBody();
     if (rescaled) revealTab();
@@ -354,34 +361,12 @@ function renderSettings(
   });
   const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note(), update: note(), autoUpdate: note() };
+  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
-
-  // Built once and refreshed from each snapshot, so download progress never rebuilds the General tab.
-  const updateLine = h("span");
-  const checkNow = h("button", { type: "button" }, "Check now");
-  checkNow.onclick = () => {
-    checkNow.disabled = true;
-    updateLine.textContent = "Checking GitHub for a newer Rado…";
-    void api.checkUpdate().finally(() => (checkNow.disabled = false));
-  };
-  const installNow = h("button", { type: "button", hidden: true }, "Install and restart");
-  installNow.onclick = () => {
-    installNow.disabled = true;
-    // Errors arrive with the snapshot, in UpdateState.error.
-    void api.installUpdate().finally(() => (installNow.disabled = false));
-  };
-  const showUpdate = (u: UpdateState) => {
-    updateLine.textContent = updateText(u, new Date());
-    installNow.hidden = !u.available || u.installing !== null;
-    if (u.error) show(n.update, "error", u.error);
-    else if (n.update.dataset.kind === "error") n.update.textContent = "";
-  };
-  showUpdate(snapshot.update);
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
   /** The General tab's fields, filled from `settings`. */
@@ -490,7 +475,6 @@ function renderSettings(
     });
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
 
-    const autoUpdate = h("input", { type: "checkbox", ariaLabel: "Install updates automatically", checked: settings.autoUpdate, onchange: () => { settings.autoUpdate = autoUpdate.checked; void save(n.autoUpdate); } });
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
 
     return [
@@ -504,8 +488,6 @@ function renderSettings(
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
-      h("div", { class: "field" }, caption("Updates", n.update), h("span", { class: "inline" }, updateLine, checkNow, installNow)),
-      h("label", { class: "check" }, autoUpdate, "Install updates automatically while the list is closed", n.autoUpdate),
       h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
     ];
   };
@@ -530,10 +512,7 @@ function renderSettings(
   showTab(startTab);
   panel.replaceChildren(strip.list, ...SETTINGS_TABS.map((t) => panels[t.key]));
   return {
-    update: (s) => {
-      workspaces.update(s);
-      showUpdate(s.update);
-    },
+    update: workspaces.update,
     select: (key) => {
       showTab(key);
       onSelect(key);

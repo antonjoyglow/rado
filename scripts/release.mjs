@@ -4,10 +4,8 @@
 //   npm run release -- 0.8.0 --force    regenerate an existing section, dropping hand edits
 //   npm run release -- 0.8.0 --dry-run  print the section, change nothing
 //   node scripts/release.mjs notes 0.8.0  print that section's body (release.yml uses it); exit 1 if missing
-//   node scripts/release.mjs latest 0.8.0 <setup.exe> <owner/repo>  print the updater feed, latest.json (release.yml)
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const TITLE = /^(feat|fix)(?:\(([^)]+)\))?!?:\s*(.+)$/;
@@ -93,21 +91,6 @@ export function bumpVersions(files, version) {
   };
 }
 
-/** The feed the updater reads: https://github.com/<repo>/releases/latest/download/latest.json. */
-export function latestJson({ version, notes, pubDate, repo, installer, signature }) {
-  return {
-    version,
-    notes,
-    pub_date: pubDate,
-    platforms: {
-      "windows-x86_64": {
-        url: `https://github.com/${repo}/releases/download/v${version}/${encodeURIComponent(installer)}`,
-        signature: signature.trim(),
-      },
-    },
-  };
-}
-
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
 function main(args) {
@@ -119,28 +102,6 @@ function main(args) {
       process.exit(1);
     }
     process.stdout.write(body + "\n");
-    return;
-  }
-  if (first === "latest") {
-    const [, version, installerPath, repo] = args;
-    const notes = sectionBody(readFileSync("CHANGELOG.md", "utf8"), version ?? "");
-    if (!notes || !installerPath || !repo) {
-      console.error("Usage: node scripts/release.mjs latest <x.y.z> <path to *-setup.exe> <owner/repo>; CHANGELOG.md needs that version's section.");
-      process.exit(1);
-    }
-    // A feed newer than the installer it points at would make every installed Rado reinstall it forever.
-    const built = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
-    if (built !== version) {
-      console.error(`The tag says ${version} but tauri.conf.json builds ${built}; tag the release commit.`);
-      process.exit(1);
-    }
-    const feed = latestJson({
-      version, notes, repo,
-      pubDate: new Date().toISOString(),
-      installer: basename(installerPath),
-      signature: readFileSync(`${installerPath}.sig`, "utf8"),
-    });
-    process.stdout.write(JSON.stringify(feed, null, 2) + "\n");
     return;
   }
   const version = first;

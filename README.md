@@ -77,6 +77,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 - It opens against the screen edge on the counter's side (left or right), level with the counter and kept on screen, on the counter's screen. The counter is hidden while the list is open and comes back when it closes: ✕, **Esc**, or a click anywhere else.
 - *List width* (20–100% of the screen, chips for 25%, 33%, Half and Full; never under 360 px) and *List height* (25–100%, chips for Half and Full) are in **Settings → General**. The default is 33% wide and half the screen high. Pixel sizes saved by 0.9.0 are dropped for these defaults.
+- **New version:** Rado asks GitHub for its latest release at start and every 6 hours. When it is newer, the status line under the title reads *Rado x.y.z is available · Download*, and **Download** opens the release's installer in your default browser. Run it to update; Rado itself downloads and installs nothing. Offline or rate-limited checks stay silent.
 - Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. Arrow keys, Home and End move between tabs.
 - The list reopens on the tab you last chose. Before you choose one, it opens the first of *Review*, *Re-review* and *Mine* that had rows at start. Each tab keeps its scroll position.
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
@@ -147,11 +148,9 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows, updates and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
-
-**Updates:** Rado checks GitHub Releases a minute after it starts and every 6 hours after that (release builds only; `app:dev` never checks or installs). With *Install updates automatically while the list is closed* on (the default), it downloads a newer release once the list is closed, quits, runs the installer with a small progress window and starts again. With it off, *Updates* shows the newer version and **Install and restart**. **Check now** asks straight away. Updates start with 0.9.1: 0.9.0 and earlier have no updater, so install 0.9.1 by hand once.
 
 ## Commands
 
@@ -180,12 +179,8 @@ Features collect on a `release/x.y.z` branch and ship together; `main` always eq
 2. Feature PRs target it (`gh pr create --base release/0.8.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog. For a single-commit PR, GitHub uses the commit's subject instead of the PR title, so give the commit the same conventional title.
 3. To release, on the release branch run `npm run release -- 0.8.0` (`--dry-run` prints the section first). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`, and writes a dated `## [0.8.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
 4. Edit the section, commit, and open the release PR from `release/0.8.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
-5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0`. `.github/workflows/release.yml` builds and signs the installer and publishes it with the changelog section as the release notes; it fails if the section is missing. The release also carries `<installer>.sig` and `latest.json`, the feed installed copies read from `releases/latest/download/latest.json`.
+5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing.
 6. Cut the next release branch from main after tagging (`release/0.9.0`). A patch release also starts from main (`release/0.8.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again.
-
-### The update signing key
-
-Installed copies only accept an update signed with the private key whose public half is `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. The key was made with `npx tauri signer generate -w %USERPROFILE%\.tauri\rado.key`. Its contents and password are the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (Settings → Secrets and variables → Actions), which only `release.yml` reads. Keep a copy of both outside GitHub: secrets can't be read back, and without the key no installed Rado can update itself again; after a new key, everyone reinstalls by hand.
 
 ## License
 

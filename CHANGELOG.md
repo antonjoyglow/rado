@@ -6,13 +6,9 @@ All notable changes to Rado. The format follows [Keep a Changelog](https://keepa
 
 ### Features
 
-- updates: Rado installs new releases from GitHub by itself, while the list is closed (#29)
+- updates: the list links to a newer release's installer when GitHub has one (#32)
 - list: the list opens against the screen edge, and the counter hides while it is open (#28)
 - counter: the logo sits between the two counts instead of braces (#27)
-
-### Upgrading
-
-- Install 0.9.1 by hand once. 0.9.0 and earlier have no updater, so automatic updates start with 0.9.2.
 
 ## [0.9.0] - 2026-11-16
 

@@ -6,8 +6,8 @@ mod group;
 #[allow(dead_code)]
 mod queue;
 mod score;
+mod releases;
 mod store;
-mod updates;
 mod workspace;
 
 use std::collections::{HashMap, HashSet};
@@ -78,7 +78,7 @@ struct Inner {
     polling: bool,
     credentials_generation: u64,
     list_had_focus: bool,
-    update: updates::UpdateState,
+    newer_release: Option<releases::NewerRelease>,
 }
 
 #[derive(Clone, Serialize)]
@@ -95,7 +95,8 @@ struct Snapshot {
     settings: Settings,
     /// By workspace id.
     saved: HashMap<String, Saved>,
-    update: updates::UpdateState,
+    /// A GitHub release newer than this Rado, for the list's Download link.
+    newer_release: Option<releases::NewerRelease>,
 }
 
 impl Inner {
@@ -124,7 +125,7 @@ impl Inner {
             has_github_token: saved.github_token,
             settings: self.settings.clone(),
             saved: self.saved.clone(),
-            update: self.update.clone(),
+            newer_release: self.newer_release.clone(),
         }
     }
 
@@ -1014,7 +1015,6 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config = app.path().app_config_dir()?;
             let data = app.path().app_data_dir()?;
@@ -1027,8 +1027,7 @@ pub fn run() {
                 .map(|w| (w.id.clone(), Saved { pat: store.pat(&w.id).is_some(), github_token: store.github_token(&w.id).is_some() }))
                 .collect();
             let ws = load_state(&store, &loaded.settings.active_workspace);
-            let update = updates::UpdateState { current: app.package_info().version.to_string(), ..Default::default() };
-            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, update, ..Default::default() };
+            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, ..Default::default() };
             let pill_scale = inner.settings.pill_scale;
             app.manage(Shared { store, wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
@@ -1051,7 +1050,7 @@ pub fn run() {
             build_tray(app.handle())?;
             tauri::async_runtime::spawn(poll_loop(app.handle().clone()));
             tauri::async_runtime::spawn(hover_loop(app.handle().clone()));
-            tauri::async_runtime::spawn(updates::update_loop(app.handle().clone()));
+            tauri::async_runtime::spawn(releases::release_loop(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1073,8 +1072,7 @@ pub fn run() {
             delete_workspace,
             get_autostart,
             set_autostart,
-            updates::check_update,
-            updates::install_update,
+            releases::open_newer_release,
             quit
         ])
         .run(tauri::generate_context!())
