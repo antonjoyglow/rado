@@ -355,6 +355,11 @@ function renderSettings(
   const n = { minutes: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
+  // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
+  const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
+  void api.autostart().then((on) => (autostart.checked = on));
+  const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
+
   /** The General tab's fields, filled from `settings`. */
   const generalFields = (): HTMLElement[] => {
     const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -461,20 +466,18 @@ function renderSettings(
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
 
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
-    const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
-    void api.autostart().then((on) => (autostart.checked = on));
 
     return [
-        // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
-        h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
-        h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
-        h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
-        h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
-        customColours,
-        h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
-        h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
-        h("label", { class: "check" }, autostart, "Start with Windows", n.autostart),
-        h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
+      // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
+      h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
+      h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
+      h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+      h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
+      customColours,
+      h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
+      h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
+      startWithWindows,
+      h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
     ];
   };
   const counter = counterPanel(settings, { note, caption, fail, save });

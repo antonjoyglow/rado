@@ -69,8 +69,6 @@ interface Ui {
 
 /** The Counter settings tab: a live preview, then colours, opacity and size, each saved as it is picked. */
 export function counterPanel(settings: Settings, ui: Ui): { element: HTMLElement; redraw: () => void } {
-  // A copy, so the snapshot keeps the saved look until the save lands.
-  settings.counter = { ...settings.counter };
   const shows: (() => void)[] = [];
 
   const rest = counterElement("div");
