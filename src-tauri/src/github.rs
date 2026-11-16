@@ -1,5 +1,5 @@
 //! GitHub (github.com) pull requests: one GraphQL call per poll returns every PR waiting on my review,
-//! the ones I reviewed, and my own, with what Rado shows for each.
+//! the ones I reviewed, my own, and the open PRs of the workspace's watched repos, with what Rado shows for each.
 
 use std::collections::HashMap;
 
@@ -11,7 +11,8 @@ use crate::score::{self, CommentStats, PrFacts, Provider, ReviewItem, ReviewStat
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
-/// Three searches: requested covers requests to me and to my teams; reviewed catches new pushes after my review.
+/// Requested covers requests to me and to my teams; reviewed catches new pushes after my review; watched runs only
+/// when the workspace watches repos.
 const QUERY: &str = r#"
 fragment pr on PullRequest {
   databaseId number title url isDraft createdAt updatedAt headRefName baseRefName headRefOid
@@ -23,12 +24,21 @@ fragment pr on PullRequest {
   reviewThreads(first: 100) { nodes { isResolved comments { totalCount } } }
   comments { totalCount }
 }
-query {
+query($watched: String!, $watching: Boolean!) {
   viewer { login }
   requested: search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100) { issueCount nodes { ...pr } }
   reviewed: search(query: "is:pr is:open archived:false reviewed-by:@me", type: ISSUE, first: 100) { issueCount nodes { ...pr } }
   mine: search(query: "is:pr is:open archived:false author:@me", type: ISSUE, first: 100) { issueCount nodes { ...pr } }
+  watched: search(query: $watched, type: ISSUE, first: 100) @include(if: $watching) { issueCount nodes { ...pr } }
 }"#;
+
+/// Open PRs in `repos` that are neither drafts nor mine; `None` without repos.
+fn watched_query(repos: &[String]) -> Option<String> {
+    (!repos.is_empty()).then(|| {
+        let repos: Vec<String> = repos.iter().map(|r| format!("repo:{r}")).collect();
+        format!("is:pr is:open archived:false draft:false -author:@me {}", repos.join(" "))
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct Response {
@@ -49,6 +59,13 @@ struct Data {
     requested: Option<Search>,
     reviewed: Option<Search>,
     mine: Option<Search>,
+    /// Absent when no repos are watched; `Some(None)` when the search failed.
+    #[serde(default, deserialize_with = "present")]
+    watched: Option<Option<Search>>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Option<Search>>, D::Error> {
+    Option::<Search>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,15 +159,24 @@ struct Count {
     total_count: u32,
 }
 
-/// One poll's GitHub PRs, each once, with whether it came from the review-requested search.
+/// Which searches found a PR.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Found {
+    requested: bool,
+    watched: bool,
+}
+
+/// One poll's GitHub PRs, each once, with the searches that found it.
 pub struct Fetched {
     viewer: String,
-    prs: Vec<(PullRequest, bool)>,
+    prs: Vec<(PullRequest, Found)>,
     /// GitHub's errors for a response that still had data; some PRs may be missing.
     pub warning: Option<String>,
 }
 
-pub async fn fetch(token: &str) -> Result<Fetched, String> {
+pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, String> {
+    let watched = watched_query(watched_repos);
+    let variables = serde_json::json!({ "watched": watched.as_deref().unwrap_or_default(), "watching": watched.is_some() });
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -158,7 +184,7 @@ pub async fn fetch(token: &str) -> Result<Fetched, String> {
         .post(ENDPOINT)
         .bearer_auth(token)
         .header("User-Agent", "rado")
-        .json(&serde_json::json!({ "query": QUERY }))
+        .json(&serde_json::json!({ "query": QUERY, "variables": variables }))
         .send()
         .await
         .map_err(|e| format!("network: {e}"))?;
@@ -185,12 +211,24 @@ fn parse(body: &[u8]) -> Result<Fetched, String> {
     let failed = || if messages.is_empty() { "a search came back empty".to_string() } else { messages.clone() };
     let Some(data) = response.data else { return Err(failed()) };
     let (Some(requested), Some(reviewed), Some(mine)) = (data.requested, data.reviewed, data.mine) else { return Err(failed()) };
-    let mut prs: Vec<(PullRequest, bool)> = Vec::new();
-    let truncated = [&requested, &reviewed, &mine].iter().any(|s| s.issue_count > 100);
-    for (search, from_requested) in [(requested, true), (reviewed, false), (mine, false)] {
-        for pr in search.prs() {
-            if !prs.iter().any(|(p, _)| p.database_id == pr.database_id) {
-                prs.push((pr, from_requested));
+    let watched = match data.watched {
+        None => None,
+        Some(None) => return Err(failed()),
+        Some(Some(search)) => Some(search),
+    };
+    let truncated = [Some(&requested), Some(&reviewed), Some(&mine), watched.as_ref()].iter().flatten().any(|s| s.issue_count > 100);
+    let mut prs: Vec<(PullRequest, Found)> = Vec::new();
+    let searches = [
+        (Some(requested), Found { requested: true, watched: false }),
+        (Some(reviewed), Found::default()),
+        (Some(mine), Found::default()),
+        (watched, Found { requested: false, watched: true }),
+    ];
+    for (search, found) in searches {
+        for pr in search.into_iter().flat_map(Search::prs) {
+            match prs.iter_mut().find(|(p, _)| p.database_id == pr.database_id) {
+                Some((_, seen)) => seen.watched |= found.watched,
+                None => prs.push((pr, found)),
             }
         }
     }
@@ -209,8 +247,8 @@ pub fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap
     let mut items = Vec::new();
     let mut urls = HashMap::new();
     let mut threads = HashMap::new();
-    for (pr, requested) in &fetched.prs {
-        let Some(item) = classify(pr, *requested, &fetched.viewer, now) else { continue };
+    for (pr, found) in &fetched.prs {
+        let Some(item) = classify(pr, *found, &fetched.viewer, now) else { continue };
         urls.insert(pr.database_id, pr.url.clone());
         threads.insert(pr.database_id, pr_threads(pr));
         items.push(item);
@@ -218,7 +256,7 @@ pub fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap
     (items, urls, threads)
 }
 
-fn classify(pr: &PullRequest, requested: bool, viewer: &str, now: DateTime<Utc>) -> Option<ReviewItem> {
+fn classify(pr: &PullRequest, found: Found, viewer: &str, now: DateTime<Utc>) -> Option<ReviewItem> {
     let is = |login: &Option<Login>| login.as_ref().is_some_and(|l| l.login.eq_ignore_ascii_case(viewer));
     let votes = || pr.latest_opinionated_reviews.nodes.iter().filter(|r| matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED"));
     // A repo that dismisses stale approvals on push turns my vote into DISMISSED, which counts as a push since it.
@@ -235,13 +273,14 @@ fn classify(pr: &PullRequest, requested: bool, viewer: &str, now: DateTime<Utc>)
         ReviewState::Mine
     } else if pushed_since_vote {
         ReviewState::ReReview
-    } else if requested {
+    } else if found.requested {
+        ReviewState::NeedsReview
+    } else if let Some(vote) = my_last {
+        if vote.state == "APPROVED" { ReviewState::Approved } else { ReviewState::WaitingOnAuthor }
+    } else if found.watched {
         ReviewState::NeedsReview
     } else {
-        match my_last?.state.as_str() {
-            "APPROVED" => ReviewState::Approved,
-            _ => ReviewState::WaitingOnAuthor,
-        }
+        return None;
     };
     let facts = PrFacts {
         id: pr.database_id,
@@ -275,7 +314,7 @@ fn pr_threads(pr: &PullRequest) -> PrThreads {
 
 #[cfg(test)]
 #[allow(non_snake_case)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const ME: &str = "me";
@@ -314,6 +353,16 @@ mod tests {
         })
     }
 
+    fn with_watched(body: &[u8], watched: serde_json::Value) -> Vec<u8> {
+        let mut json: serde_json::Value = serde_json::from_slice(body).unwrap();
+        json["data"]["watched"] = watched;
+        serde_json::to_vec(&json).unwrap()
+    }
+
+    fn watched(nodes: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "issueCount": nodes.len(), "nodes": nodes })
+    }
+
     fn body(requested: Vec<serde_json::Value>, reviewed: Vec<serde_json::Value>, mine: Vec<serde_json::Value>) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({ "data": {
             "viewer": { "login": "Me" },
@@ -322,6 +371,11 @@ mod tests {
             "mine": { "issueCount": mine.len(), "nodes": mine }
         }}))
         .unwrap()
+    }
+
+    /// A poll whose PRs all request my review directly.
+    pub fn requested(ids: &[i64]) -> Fetched {
+        parse(&body(ids.iter().map(|&id| node(id, "a", &[ME], &[])).collect(), vec![], vec![])).unwrap()
     }
 
     fn ranked(body: &[u8]) -> Vec<ReviewItem> {
@@ -426,7 +480,59 @@ mod tests {
         let pr = node(1, "a", &[ME], &[]);
         let fetched = parse(&body(vec![pr.clone()], vec![pr], vec![])).unwrap();
         assert_eq!(fetched.prs.len(), 1);
-        assert!(fetched.prs[0].1);
+        assert!(fetched.prs[0].1.requested);
+    }
+
+    #[test]
+    fn watchedQuery_listsEachRepoAndLeavesOutDraftsAndMine() {
+        assert_eq!(watched_query(&[]), None);
+        let query = watched_query(&["coding-tree-io/hoopwise.ai".into(), "o/r".into()]).unwrap();
+        assert_eq!(query, "is:pr is:open archived:false draft:false -author:@me repo:coding-tree-io/hoopwise.ai repo:o/r");
+    }
+
+    #[test]
+    fn watchedUnrequested_needsReviewViaGroup() {
+        let item = &ranked(&with_watched(&body(vec![], vec![], vec![]), watched(vec![node(1, "a", &[], &[])])))[0];
+        assert_eq!((item.state, item.via_group, item.actionable), (ReviewState::NeedsReview, true, true));
+    }
+
+    #[test]
+    fn watchedRequestedDirectly_isADirectRequest() {
+        let pr = node(1, "a", &[ME], &[]);
+        let item = &ranked(&with_watched(&body(vec![pr.clone()], vec![], vec![]), watched(vec![pr])))[0];
+        assert_eq!((item.state, item.via_group), (ReviewState::NeedsReview, false));
+    }
+
+    #[test]
+    fn watchedApprovedAtHead_isApproved_andPushAfterwards_isReReview() {
+        let approved = node(1, "a", &[], &[("me", "APPROVED", "head")]);
+        let item = &ranked(&with_watched(&body(vec![], vec![approved.clone()], vec![]), watched(vec![approved])))[0];
+        assert_eq!(item.state, ReviewState::Approved);
+        let pushed = node(1, "a", &[], &[("me", "APPROVED", "old")]);
+        assert_eq!(ranked(&with_watched(&body(vec![], vec![], vec![]), watched(vec![pushed])))[0].state, ReviewState::ReReview);
+    }
+
+    #[test]
+    fn watchedOnlyCommented_stillNeedsReview() {
+        let pr = node(1, "a", &[], &[("me", "COMMENTED", "head")]);
+        let item = &ranked(&with_watched(&body(vec![], vec![pr.clone()], vec![]), watched(vec![pr])))[0];
+        assert_eq!(item.state, ReviewState::NeedsReview);
+    }
+
+    #[test]
+    fn watchedMyOwnPr_staysMine() {
+        let pr = node(1, "me", &[], &[]);
+        assert_eq!(ranked(&with_watched(&body(vec![], vec![], vec![pr.clone()]), watched(vec![pr])))[0].state, ReviewState::Mine);
+    }
+
+    #[test]
+    fn watchedSearch_nullFails_over100Warns() {
+        let failed = with_watched(&body(vec![], vec![], vec![]), serde_json::Value::Null);
+        assert!(parse(&failed).is_err());
+        let mut over = watched(vec![node(1, "a", &[], &[])]);
+        over["issueCount"] = 140.into();
+        let warning = parse(&with_watched(&body(vec![], vec![], vec![]), over)).unwrap().warning;
+        assert!(warning.is_some_and(|w| w.contains("over 100")));
     }
 
     #[test]

@@ -34,7 +34,7 @@ export interface ReviewItem extends PrRef {
   members: Member[];
   /** Age of the row's most recently opened PR. */
   newestAgeHours: number;
-  /** The Jira issue key in the branch name, if any. */
+  /** The tracker's issue key in the branch name, if any; none without a tracker. */
   ticket: string | null;
   author: string;
   target: string;
@@ -58,23 +58,60 @@ export interface ReviewItem extends PrRef {
   actionable: boolean;
 }
 
+/**
+ * Where ticket keys in branch names link to: a Jira host, or a Linear workspace slug (`acme` in linear.app/acme).
+ * `keys` are the team or project keys (`HOO`); when set, only branch keys with one of them count.
+ */
+export type Tracker =
+  | { kind: "none" }
+  | { kind: "jira"; site: string; keys: string[] }
+  | { kind: "linear"; workspace: string; keys: string[] };
+
+/** A named set of sources; only the active one is polled. A source is on once its secret is saved. */
+export interface Workspace {
+  /** Stable across renames; names the workspace's keyring entries and data folder. */
+  id: string;
+  name: string;
+  azureDevOps: { organization: string; teams: string[] };
+  /** `repos` (`owner/name`): every open PR there, other than drafts and mine, counts as waiting on my review. */
+  github: { repos: string[] };
+  tracker: Tracker;
+}
+
+/** Which secrets a workspace has saved. */
+export interface Saved {
+  pat: boolean;
+  githubToken: boolean;
+}
+
 export interface Settings {
-  organization: string;
   pollMinutes: number;
   notify: boolean;
-  teams: string[];
   /** Counter size in percent, 75–200. */
   pillScale: number;
+  /** Text size of the review list in percent, 80–150. */
+  textScale: number;
   /** Size of the review list in px; shrunk to fit the screen when shown. */
   listWidth: number;
   listHeight: number;
   /** Where links open: the system's default browser, Edge or Chrome. */
   browser: Browser;
-  /** Host of the Jira site ticket chips link to, such as `yourcompany.atlassian.net`; empty hides the chips. */
-  jiraSite: string;
+  /** Colours of the review list; the counter keeps its own look. */
+  theme: Theme;
+  customTheme: CustomTheme;
+  workspaces: Workspace[];
+  activeWorkspace: string;
 }
 
 export type Browser = "system" | "edge" | "chrome";
+/** "system" follows Windows' light or dark app mode. */
+export type Theme = "system" | "dark" | "light" | "highContrast" | "custom";
+/** The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest. */
+export interface CustomTheme {
+  background: string;
+  text: string;
+  accent: string;
+}
 
 export interface Snapshot {
   items: ReviewItem[];
@@ -83,7 +120,11 @@ export interface Snapshot {
   error: string | null;
   hasPat: boolean;
   hasGithubToken: boolean;
+  /** What went wrong loading the settings, shown for the whole run. */
+  warning: string | null;
   settings: Settings;
+  /** By workspace id. */
+  saved: Record<string, Saved>;
 }
 
 export const api = {
@@ -96,9 +137,14 @@ export const api = {
   openTicket: (key: string) => invoke<void>("open_ticket", { key }),
   copyRow: (key: string) => invoke<void>("copy_row", { key }),
   setHidden: (key: string, hidden: boolean) => invoke<void>("set_hidden", { key, hidden }),
-  savePat: (pat: string) => invoke<void>("save_pat", { pat }),
-  saveGithubToken: (token: string) => invoke<void>("save_github_token", { token }),
+  savePat: (workspace: string, pat: string) => invoke<void>("save_pat", { workspace, pat }),
+  saveGithubToken: (workspace: string, token: string) => invoke<void>("save_github_token", { workspace, token }),
+  /** The general settings; the workspaces in it are ignored. */
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+  addWorkspace: (name: string) => invoke<string>("add_workspace", { name }),
+  saveWorkspace: (workspace: Workspace) => invoke<void>("save_workspace", { workspace }),
+  switchWorkspace: (id: string) => invoke<void>("switch_workspace", { id }),
+  deleteWorkspace: (id: string) => invoke<void>("delete_workspace", { id }),
   autostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   quit: () => invoke<void>("quit"),

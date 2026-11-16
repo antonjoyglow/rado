@@ -2,6 +2,26 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
+## [0.8.0] - 2026-11-16
+
+### Features
+
+- workspaces: switchable workspaces, each with its own sources and tracker; switch with the header chip or Ctrl+← / Ctrl+→, and only the active workspace is polled, counted and notified (#11)
+- workspaces: Linear tracker and ticket chips on GitHub rows (#13)
+- workspaces: watched GitHub repos count every open PR as a review (#17)
+- settings: theme presets (System, Dark, Light, High contrast) and a custom theme (#10)
+- settings: text size for the list window (#12)
+
+### Fixes
+
+- workspaces: match ticket keys by the tracker's team keys, so `hoo-342-343-…` links HOO-342 and `sprint-3` gets no chip (#14)
+- installer: an update replaces a running `rado-mcp.exe` instead of failing (#15, #16)
+- update: `update.cmd` installs into your real Rado even when started from a Claude desktop session (#18)
+
+### Upgrading
+
+- On first start, your settings become one workspace. The old file is kept as `settings.pre-workspaces.json`, and the Azure DevOps PAT and GitHub token move to per-workspace Credential Manager entries (`ado-pat:<id>`, `github-token:<id>` under `review-bracket`). Rado 0.7.0 and earlier can no longer read them.
+
 ## [0.7.0] - 2026-11-14
 
 ### Features

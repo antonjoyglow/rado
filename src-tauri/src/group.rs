@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::score::{CommentStats, Provider, ReviewItem, ReviewState};
+use crate::workspace::Tracker;
 
 /// One PR inside a row; `state` is `None` for a PR on the same branch that I am not asked to review.
 #[derive(Debug, Clone, Serialize)]
@@ -42,24 +43,36 @@ pub struct ReviewRow {
     pub members: Vec<Member>,
     /// Age of the row's most recently opened PR; "Your PRs" sorts on it, newest first.
     pub newest_age_hours: i64,
-    /// The Jira issue key in the branch name, such as `ABC-12` in `feature/ABC-12-login`.
+    /// The tracker's issue key in the branch name, such as `ABC-12` in `feature/ABC-12-login`; none without a tracker.
     pub ticket: Option<String>,
 }
 
-/// The first `KEY-123` in a branch: upper-case letters and digits starting with a letter, a dash and digits,
-/// standing alone between non-alphanumeric characters.
-pub fn ticket_key(branch: &str) -> Option<String> {
+/// Standards whose names look like keys: `fix/UTF-8`, `ISO-8601`, `SHA-256`.
+const NOT_KEYS: [&str; 3] = ["UTF", "ISO", "SHA"];
+
+/// The first `KEY-123` in a branch, upper-cased. With team `keys`, only those count, in any case, at the start
+/// or after `/`, `-` or `_`; `hoo-342-343-title` gives the first number, `HOO-342`, and Jira's `MY_PROJ-12`
+/// counts whole. Without them: letters and
+/// digits starting with a letter, a dash and digits, standing alone between non-alphanumeric characters. An
+/// upper-case key counts anywhere. With `any_case`, a lower-case one counts too in Linear's default shape,
+/// `anton/eng-123-title`: letters only, right after a `/`, and followed by more name. `release-2026` and
+/// `renovate/node-20` stay plain branches; `chore/node-18-upgrade` reads as a key, which team keys rule out.
+pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<String> {
+    if !keys.is_empty() {
+        return team_key(branch, keys);
+    }
     let bytes = branch.as_bytes();
     let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
     (0..bytes.len()).find_map(|start| {
-        if !bytes[start].is_ascii_uppercase() || (start > 0 && alnum(start - 1)) {
+        if !bytes[start].is_ascii_alphabetic() || (start > 0 && alnum(start - 1)) {
             return None;
         }
         let mut i = start;
-        while bytes.get(i).is_some_and(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+        while alnum(i) {
             i += 1;
         }
-        if bytes.get(i) != Some(&b'-') {
+        let prefix = &branch[start..i];
+        if bytes.get(i) != Some(&b'-') || NOT_KEYS.iter().any(|k| k.eq_ignore_ascii_case(prefix)) {
             return None;
         }
         let digits = i + 1;
@@ -67,12 +80,46 @@ pub fn ticket_key(branch: &str) -> Option<String> {
         while bytes.get(end).is_some_and(u8::is_ascii_digit) {
             end += 1;
         }
-        (end > digits && !alnum(end)).then(|| branch[start..end].to_string())
+        // `CVE-2024-3094`: a second dash and digits make an id, not a key.
+        if end == digits || alnum(end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
+            return None;
+        }
+        let upper = !prefix.bytes().any(|b| b.is_ascii_lowercase());
+        let linear_shape = start > 0
+            && bytes[start - 1] == b'/'
+            && prefix.bytes().all(|b| b.is_ascii_alphabetic())
+            && matches!(bytes.get(end), Some(b'-' | b'_'));
+        (upper || (any_case && linear_shape)).then(|| branch[start..end].to_ascii_uppercase())
+    })
+}
+
+fn team_key(branch: &str, keys: &[String]) -> Option<String> {
+    let bytes = branch.as_bytes();
+    let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
+    (0..bytes.len()).find_map(|start| {
+        if start > 0 && !matches!(bytes[start - 1], b'/' | b'-' | b'_') {
+            return None;
+        }
+        let mut i = start;
+        while alnum(i) || bytes.get(i) == Some(&b'_') {
+            i += 1;
+        }
+        let prefix = &branch[start..i];
+        if i == start || bytes.get(i) != Some(&b'-') || !keys.iter().any(|k| k.eq_ignore_ascii_case(prefix)) {
+            return None;
+        }
+        let digits = i + 1;
+        let mut end = digits;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        (end > digits && !alnum(end)).then(|| branch[start..end].to_ascii_uppercase())
     })
 }
 
 /// Groups my ranked PRs by source branch, adds the related PRs on those branches, and orders rows by score.
-pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, String>) -> Vec<ReviewRow> {
+/// Rows carry ticket keys only when the workspace has a tracker.
+pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, String>, tracker: &Tracker) -> Vec<ReviewRow> {
     let mut groups: Vec<(Provider, &str, Vec<&ReviewItem>)> = Vec::new();
     for item in items {
         match groups.iter_mut().find(|(provider, branch, _)| *provider == item.provider && *branch == item.branch) {
@@ -143,8 +190,11 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                 .collect::<Vec<_>>();
             let key = if members.len() > 1 { format!("branch:{provider:?}:{branch}") } else { format!("pr:{}", lead.id) };
             let newest_age_hours = mine.iter().map(|m| m.age_hours).min().unwrap_or_default();
-            // Jira keys come from Azure DevOps branches; on GitHub `fix/UTF-8` would link to a ticket that does not exist.
-            let ticket = if provider == Provider::Ado { ticket_key(branch) } else { None };
+            let ticket = match tracker {
+                Tracker::None => None,
+                Tracker::Jira { keys, .. } => ticket_key(branch, false, keys),
+                Tracker::Linear { keys, .. } => ticket_key(branch, true, keys),
+            };
             ReviewRow { key, summary, members, newest_age_hours, ticket }
         })
         .collect();
@@ -214,7 +264,7 @@ mod tests {
         let mut b = item(5, "Core", "feature/x", 50);
         b.updated_at = Some(at(-3));
         let c = item(3, "WebApp", "feature/x", 40);
-        let rows = group(&[a, b, c], &[], &urls(&[1, 3, 5]));
+        let rows = group(&[a, b, c], &[], &urls(&[1, 3, 5]), &Tracker::None);
         assert_eq!((rows[0].summary.created_at, rows[0].summary.updated_at), (at(-5), Some(at(-1))));
         assert_eq!(rows[0].members.iter().map(|m| m.updated_at).collect::<Vec<_>>(), [Some(at(-1)), Some(at(-3)), None]);
     }
@@ -224,13 +274,13 @@ mod tests {
         let mut old = item(120, "Api", "feature/x", 60);
         old.updated_at = Some(at(-96));
         let fresh = item(1, "Core", "feature/x", 50);
-        let rows = group(&[old, fresh], &[], &urls(&[1, 120]));
+        let rows = group(&[old, fresh], &[], &urls(&[1, 120]), &Tracker::None);
         assert_eq!((rows[0].summary.created_at, rows[0].summary.updated_at), (at(-120), Some(at(-1))));
     }
 
     #[test]
     fn group_noThreadsLoaded_hasNoUpdate() {
-        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]));
+        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]), &Tracker::None);
         assert_eq!(rows[0].summary.updated_at, None);
     }
 
@@ -241,7 +291,7 @@ mod tests {
     #[test]
     fn group_sameBranchAcrossRepos_isOneRowWithAllMembers() {
         let items = [item(1, "Api", "feature/x", 60), item(2, "Core", "feature/x", 70), item(3, "WebApp", "feature/y", 50)];
-        let rows = group(&items, &[], &urls(&[1, 2, 3]));
+        let rows = group(&items, &[], &urls(&[1, 2, 3]), &Tracker::None);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].key, "branch:Ado:feature/x");
         assert_eq!(rows[0].summary.id, 2, "the highest-scored PR leads the row");
@@ -255,10 +305,10 @@ mod tests {
     fn group_siblingIntoReleaseBranch_namesThatTargetOnTheRow() {
         let mut sibling = item(2, "Core", "feature/x", 50);
         (sibling.target, sibling.release_target) = ("qa".into(), true);
-        let rows = group(&[item(1, "Api", "feature/x", 60), sibling], &[], &urls(&[1, 2]));
+        let rows = group(&[item(1, "Api", "feature/x", 60), sibling], &[], &urls(&[1, 2]), &Tracker::None);
         assert_eq!(rows[0].summary.id, 1, "the lead merges into dev");
         assert_eq!((rows[0].summary.target.as_str(), rows[0].summary.release_target), ("qa", true));
-        let plain = group(&[item(1, "Api", "feature/x", 60), item(2, "Core", "feature/x", 50)], &[], &urls(&[1, 2]));
+        let plain = group(&[item(1, "Api", "feature/x", 60), item(2, "Core", "feature/x", 50)], &[], &urls(&[1, 2]), &Tracker::None);
         assert_eq!((plain[0].summary.target.as_str(), plain[0].summary.release_target), ("dev", false));
     }
 
@@ -268,7 +318,7 @@ mod tests {
             Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) },
             Related { id: 8, repo: "WebApp".into(), title: "other".into(), branch: "feature/z".into(), url: "https://x/8".into(), created_at: at(-8) },
         ];
-        let rows = group(&[item(1, "Api", "feature/x", 60)], &related, &urls(&[1]));
+        let rows = group(&[item(1, "Api", "feature/x", 60)], &related, &urls(&[1]), &Tracker::None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].members.len(), 2);
         assert!(rows[0].members[1].state.is_none());
@@ -278,7 +328,7 @@ mod tests {
     fn group_partlyHidden_isVisibleAndLedByAVisiblePr() {
         let mut hidden = item(2, "Core", "feature/x", 90);
         hidden.hidden = true;
-        let rows = group(&[hidden, item(1, "Api", "feature/x", 60)], &[], &urls(&[1, 2]));
+        let rows = group(&[hidden, item(1, "Api", "feature/x", 60)], &[], &urls(&[1, 2]), &Tracker::None);
         assert!(!rows[0].summary.hidden);
         assert_eq!(rows[0].summary.id, 1);
     }
@@ -290,20 +340,20 @@ mod tests {
         let mut b = item(2, "Core", "feature/x", 50);
         b.comments = Some(CommentStats { total: 2, open_threads: 2 });
         let c = item(3, "WebApp", "feature/x", 40);
-        let rows = group(&[a, b, c], &[], &urls(&[1, 2, 3]));
+        let rows = group(&[a, b, c], &[], &urls(&[1, 2, 3]), &Tracker::None);
         assert_eq!(rows[0].summary.comments, Some(CommentStats { total: 5, open_threads: 3 }));
     }
 
     #[test]
     fn openUrls_aggregate_tagsEveryLinkWithTheEncodedBranch() {
         let items = [item(1, "Api", "feature/x y", 60), item(2, "Core", "feature/x y", 50)];
-        let rows = group(&items, &[], &urls(&[1, 2]));
+        let rows = group(&items, &[], &urls(&[1, 2]), &Tracker::None);
         assert_eq!(open_urls(&rows[0]), ["https://x/1#rado=feature%2Fx%20y&group", "https://x/2#rado=feature%2Fx%20y&group"]);
     }
 
     #[test]
     fn openUrls_singlePr_isTaggedWithoutGroup() {
-        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]));
+        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]), &Tracker::None);
         assert_eq!(open_urls(&rows[0]), ["https://x/1#rado=feature%2Fx"]);
     }
 
@@ -312,7 +362,7 @@ mod tests {
         let mut stale = item(2, "Core", "feature/x", 90);
         stale.state = ReviewState::Stale;
         stale.actionable = false;
-        let rows = group(&[stale, item(1, "Api", "feature/x", 60)], &[], &urls(&[1, 2]));
+        let rows = group(&[stale, item(1, "Api", "feature/x", 60)], &[], &urls(&[1, 2]), &Tracker::None);
         assert_eq!((rows[0].summary.id, rows[0].summary.state, rows[0].summary.actionable), (1, ReviewState::NeedsReview, true));
     }
 
@@ -321,54 +371,175 @@ mod tests {
         let mut github = item(500, "rado", "feature/x", 70);
         (github.provider, github.number) = (Provider::GitHub, 4);
         let related = [Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) }];
-        let rows = group(&[github, item(1, "Api", "feature/x", 60)], &related, &urls(&[1, 500]));
+        let rows = group(&[github, item(1, "Api", "feature/x", 60)], &related, &urls(&[1, 500]), &Tracker::None);
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].key.as_str(), rows[0].members.len(), rows[0].members[0].number), ("pr:500", 1, 4));
         assert_eq!((rows[1].key.as_str(), rows[1].members.len()), ("branch:Ado:feature/x", 2), "Azure DevOps related PRs join only the Azure DevOps row");
     }
 
-    #[test]
-    fn group_githubBranchWithKeyLikeText_hasNoTicket() {
-        let mut github = item(500, "rado", "fix/UTF-8", 70);
-        github.provider = Provider::GitHub;
-        assert_eq!(group(&[github], &[], &urls(&[500]))[0].ticket, None);
+    fn on(provider: Provider, branch: &str) -> ReviewItem {
+        ReviewItem { provider, ..item(1, "Api", branch, 60) }
+    }
+
+    fn jira() -> Tracker {
+        Tracker::Jira { site: "acme.atlassian.net".into(), keys: Vec::new() }
+    }
+
+    fn linear() -> Tracker {
+        Tracker::Linear { workspace: "acme".into(), keys: Vec::new() }
     }
 
     #[test]
-    fn group_branchWithIssueKey_carriesTheTicket() {
-        let rows = group(&[item(1, "Api", "feature/ABC-12-login", 60)], &[], &urls(&[1]));
-        assert_eq!(rows[0].ticket.as_deref(), Some("ABC-12"));
+    fn group_branchWithIssueKey_carriesTheTicketOnBothProviders() {
+        for provider in [Provider::Ado, Provider::GitHub] {
+            let rows = group(&[on(provider, "feature/ABC-12-login")], &[], &urls(&[1]), &jira());
+            assert_eq!(rows[0].ticket.as_deref(), Some("ABC-12"), "{provider:?}");
+        }
+        let rows = group(&[on(Provider::GitHub, "anton/eng-123-add-login")], &[], &urls(&[1]), &linear());
+        assert_eq!(rows[0].ticket.as_deref(), Some("ENG-123"));
     }
 
     #[test]
-    fn ticketKey_findsTheKeyInCommonBranchShapes() {
+    fn group_noTracker_hasNoTicketOnEitherProvider() {
+        for provider in [Provider::Ado, Provider::GitHub] {
+            assert_eq!(group(&[on(provider, "feature/ABC-12-login")], &[], &urls(&[1]), &Tracker::None)[0].ticket, None, "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn group_githubBranchWithStandardName_hasNoTicket() {
+        for tracker in [jira(), linear()] {
+            for branch in ["fix/UTF-8", "fix/utf-8-decoding", "feature/ISO-8601-dates", "chore/SHA-256"] {
+                assert_eq!(group(&[on(Provider::GitHub, branch)], &[], &urls(&[1]), &tracker)[0].ticket, None, "{branch} with {tracker:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ticketKey_upperCase_findsTheKeyInCommonBranchShapes() {
         for (branch, key) in [
             ("ABC-12", Some("ABC-12")),
             ("feature/ABC-12", Some("ABC-12")),
             ("epic/ABC-4640", Some("ABC-4640")),
             ("bugfix/ABC-7_null-check", Some("ABC-7")),
             ("users/me/X2Y-99-fix", Some("X2Y-99")),
-            ("feature/abc-12", None),
+            ("feature/login-ABC-12", Some("ABC-12")),
+            ("fix/UTF-8", None),
+            ("feature/ISO-8601", None),
+            ("SHA-256-pin", None),
+            ("security/CVE-2024-3094", None),
+            ("feature/CVE-42-patch", Some("CVE-42")),
+            ("feature/abc-12-login", None),
             ("feature/NOTE-", None),
             ("release-2026", None),
             ("feature/MYABC-12x", None),
             ("featureABC-12", None),
             ("main", None),
         ] {
-            assert_eq!(ticket_key(branch).as_deref(), key, "{branch}");
+            assert_eq!(ticket_key(branch, false, &[]).as_deref(), key, "{branch}");
         }
     }
 
     #[test]
+    fn ticketKey_anyCase_takesLinearBranchesAndUpperCasesTheKey() {
+        for (branch, key) in [
+            ("anton/eng-123-add-login", Some("ENG-123")),
+            ("anton/Eng-12_title", Some("ENG-12")),
+            ("feature/ABC-12", Some("ABC-12")),
+            ("anton/eng-123", None),
+            ("eng-7-fix", None),
+            ("phase-2-rollout", None),
+            ("release/v2-1-hotfix", None),
+            ("release-2026", None),
+            ("renovate/node-20", None),
+            ("dependabot/npm_and_yarn/vite-5.4.2", None),
+            ("upgrade-node-20-lts", None),
+            ("fix/utf-8-decoding", None),
+            ("docs/iso-8601-dates", None),
+            ("ci/sha-256-pin", None),
+            ("anton/add-eng-12-x", None),
+        ] {
+            assert_eq!(ticket_key(branch, true, &[]).as_deref(), key, "{branch}");
+        }
+    }
+
+    /// Real branch names from a GitHub repo whose Linear team key is `HOO`: (branch, with keys `HOO`, with no keys).
+    const HOO_BRANCHES: [(&str, Option<&str>, Option<&str>); 22] = [
+        ("claude/hoo-342-343-355-player-card-panels", Some("HOO-342"), None),
+        ("antoncharalampidis/hoo-243-246-contracts-table", Some("HOO-243"), None),
+        ("codex/hoo-190-211-219-222-corrections", Some("HOO-190"), None),
+        ("codex/hoo-130-132-133-evidence", Some("HOO-130"), None),
+        ("hoo-312-overall-tournament-ranks", Some("HOO-312"), None),
+        ("hoo-315-shot-assist-quality", Some("HOO-315"), None),
+        ("antonchar/dependabot-120-d7f992", None, Some("DEPENDABOT-120")),
+        ("codex/luna-6-high-default", None, Some("LUNA-6")),
+        ("claude/sprint-3-player-deepdive", None, Some("SPRINT-3")),
+        ("codex/sprint-2-tactical-direction", None, Some("SPRINT-2")),
+        ("arch/wave-7-tickerq-migration", None, Some("WAVE-7")),
+        ("arch/wave-3-user-slices", None, Some("WAVE-3")),
+        ("codex/sprint-1-linear-stories", None, Some("SPRINT-1")),
+        ("jtsompos/hoo-404-fit-pooling", Some("HOO-404"), Some("HOO-404")),
+        ("codex/hoo-427-player-characteristics-v1", Some("HOO-427"), Some("HOO-427")),
+        ("antonchar/hoo-436-completion-and-progress-f6da32", Some("HOO-436"), Some("HOO-436")),
+        ("admin/hoo-344-season-development-chart-separate-domestic-vs-european", Some("HOO-344"), Some("HOO-344")),
+        ("research/hoo-387-synergy-eda", Some("HOO-387"), Some("HOO-387")),
+        ("dependabot/npm_and_yarn/hoopwise-ui/pnpm-d06417c1ec", None, None),
+        ("claude/pnpm-deps-2026-10-30", None, None),
+        ("antonchar/primeng-22-1-4", None, None),
+        ("antonchar/timescale-4gb-settings", None, None),
+    ];
+
+    #[test]
+    fn ticketKey_linearRepoBranches_teamKeysMatchOnlyHooAndNoKeysKeepTheOldHeuristic() {
+        let keys = ["HOO".to_string()];
+        for (branch, with_keys, without) in HOO_BRANCHES {
+            assert_eq!(ticket_key(branch, true, &keys).as_deref(), with_keys, "{branch} with HOO");
+            assert_eq!(ticket_key(branch, true, &[]).as_deref(), without, "{branch} without keys");
+        }
+    }
+
+    #[test]
+    fn ticketKey_teamKeys_matchAnyCaseAtABoundaryOnly() {
+        let keys = ["HOO".to_string(), "ABC".to_string(), "MY_PROJ".to_string()];
+        for (branch, key) in [
+            ("feature/ABC-12-login", Some("ABC-12")),
+            ("feature/MY_PROJ-12", Some("MY_PROJ-12")),
+            ("feature/proj-12", None),
+            ("bugfix/HOO-7_null-check", Some("HOO-7")),
+            ("feature/über-hoo-5", Some("HOO-5")),
+            ("feature/ühoo-5", None),
+            ("feature/login-abc-12", Some("ABC-12")),
+            ("feature/x_Hoo-7", Some("HOO-7")),
+            ("chore/node-18-upgrade", None),
+            ("feature/xhoo-12", None),
+            ("feature/hoo.12", None),
+            ("feature/hoo-", None),
+            ("feature/hoo-12x", None),
+            ("feature/hoo-v2", None),
+            ("feature/ENG-12", None),
+        ] {
+            assert_eq!(ticket_key(branch, false, &keys).as_deref(), key, "{branch}");
+        }
+    }
+
+    #[test]
+    fn group_trackerWithTeamKeys_usesThem() {
+        let tracker = Tracker::Linear { workspace: "acme".into(), keys: vec!["HOO".into()] };
+        let ticket = |branch: &str| group(&[on(Provider::GitHub, branch)], &[], &urls(&[1]), &tracker)[0].ticket.clone();
+        assert_eq!(ticket("hoo-312-overall-tournament-ranks").as_deref(), Some("HOO-312"));
+        assert_eq!(ticket("claude/sprint-3-player-deepdive"), None);
+    }
+
+    #[test]
     fn shareText_singlePr_isTheBareLink() {
-        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]));
+        let rows = group(&[item(1, "Api", "feature/x", 60)], &[], &urls(&[1]), &Tracker::None);
         assert_eq!(share_text(&rows[0].members), "https://x/1");
     }
 
     #[test]
     fn shareText_aggregate_isRepoPrefixedLines() {
         let items = [item(1, "Api", "feature/x", 60), item(2, "Core", "feature/x", 50)];
-        let rows = group(&items, &[], &urls(&[1, 2]));
+        let rows = group(&items, &[], &urls(&[1, 2]), &Tracker::None);
         assert_eq!(share_text(&rows[0].members), "Api: https://x/1\nCore: https://x/2");
     }
 }
