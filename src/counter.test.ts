@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { COUNTER_DEFAULT, counterVars, HOVER_RANGE, numberColour, parseOpacity, REST_RANGE } from "./counter";
-import { heat } from "./format";
+import { COUNTER_DEFAULT, counterVars, HOVER_RANGE, numberColour, REST_RANGE } from "./counter";
+import { heat, parseWhole } from "./format";
 
 describe("numberColour", () => {
   it("uses heat for the count when no colour is picked", () => {
@@ -14,26 +14,23 @@ describe("numberColour", () => {
   });
 });
 
-describe("parseOpacity", () => {
+describe("typed opacity", () => {
   it.each([
     ["55", REST_RANGE, 55],
-    [" 80% ", REST_RANGE, 80],
-    ["20", REST_RANGE, 20],
+    [" 20 ", REST_RANGE, 20],
     ["100", REST_RANGE, 100],
     ["0", HOVER_RANGE, 0],
-    ["8%", HOVER_RANGE, 8],
-  ] as const)("%j in %j -> %i", (text, range, value) => expect(parseOpacity(text, range)).toBe(value));
+    ["8", HOVER_RANGE, 8],
+  ] as const)("%j in %j -> %i", (text, range, value) => expect(parseWhole(text, range)).toBe(value));
 
   it.each([
     ["19", REST_RANGE],
-    ["0", REST_RANGE],
     ["101", HOVER_RANGE],
     ["-1", HOVER_RANGE],
     ["55.5", REST_RANGE],
-    ["", REST_RANGE],
-    ["%", HOVER_RANGE],
+    ["", HOVER_RANGE],
     ["half", REST_RANGE],
-  ] as const)("rejects %j in %j", (text, range) => expect(parseOpacity(text, range)).toBeNull());
+  ] as const)("rejects %j in %j", (text, range) => expect(parseWhole(text, range)).toBeNull());
 });
 
 describe("counterVars", () => {

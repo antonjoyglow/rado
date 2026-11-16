@@ -1,4 +1,4 @@
-import type { CounterStyle, Settings } from "./api";
+import { api, type CounterStyle, type Settings } from "./api";
 import { h } from "./dom";
 import { heat, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
 import { parseHex } from "./theme";
@@ -20,11 +20,6 @@ const SAMPLE = { reviews: 5, mine: 1 };
 /** A number's colour: the picked one, or heat for its count. */
 export function numberColour(fixed: string | null, count: number): string {
   return fixed ?? heat(count);
-}
-
-/** A typed opacity: a whole percent inside `range`, with or without a trailing `%`. */
-export function parseOpacity(text: string, range: readonly [number, number]): number | null {
-  return parseWhole(text.trim().replace(/%$/, ""), range);
 }
 
 /** The CSS variables `.pill` reads. */
@@ -67,16 +62,15 @@ export function paintCounter(parts: CounterParts, counts: { reviews: number; min
 interface Ui {
   note: () => HTMLElement;
   caption: (text: string, note: HTMLElement) => HTMLElement;
+  ok: (note: HTMLElement) => void;
   fail: (note: HTMLElement, e: unknown) => void;
-  /** Saves `settings`; the real counter repaints from the saved snapshot. */
-  save: (note: HTMLElement) => Promise<void>;
 }
 
 /** The Counter settings tab: a live preview, then colours, opacity and size, each saved as it is picked. */
 export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
-  // A copy, so the snapshot keeps the saved look until the save lands.
+  // A copy, so the snapshot keeps the saved look until the save lands. Every change replaces the object.
   settings.counter = { ...settings.counter };
-  const refresh: (() => void)[] = [];
+  const shows: (() => void)[] = [];
 
   const rest = counterElement("div");
   const near = counterElement("div");
@@ -93,18 +87,45 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
     h("div", { class: "sample" }, rest.pill, restLabel),
     h("div", { class: "sample" }, near.pill, nearLabel),
   );
+  /** Every control and the preview back to the values in `settings`. */
+  const redraw = () => {
+    shows.forEach((show) => show());
+    paint();
+  };
+
+  /** Applies and saves a change. A failed save undoes it, unless a newer change already replaced it, so a later save elsewhere can't carry it. */
+  const commit = (n: HTMLElement, change: Partial<CounterStyle>, scale = settings.pillScale) => {
+    const before = { counter: settings.counter, scale: settings.pillScale };
+    const after = { ...settings.counter, ...change };
+    settings.counter = after;
+    settings.pillScale = scale;
+    redraw();
+    api.saveSettings(settings).then(() => ui.ok(n), (e) => {
+      if (settings.counter === after) {
+        settings.counter = before.counter;
+        settings.pillScale = before.scale;
+        redraw();
+      }
+      ui.fail(n, e);
+    });
+  };
+  /** A typed value that doesn't parse: say why, and show the saved value again. */
+  const reject = (n: HTMLElement, why: string) => {
+    ui.fail(n, why);
+    redraw();
+  };
 
   const colourField = (key: "reviews" | "mine" | "braces", label: string) => {
     const n = ui.note();
-    const heatChip = key === "braces" ? null : h("button", { type: "button", class: "chip", title: "Blue at 0, through green and yellow, to red at 10 or more", onclick: () => commit(null) }, "Heat");
+    const heatChip = key === "braces" ? null : h("button", { type: "button", class: "chip", title: "Blue at 0, through green and yellow, to red at 10 or more", onclick: () => commit(n, { [key]: null }) }, "Heat");
     const swatches = SWATCHES.map((c) => {
-      const swatch = h("button", { type: "button", class: "swatch", title: c, ariaLabel: `${label}: ${c}`, onclick: () => commit(c) });
+      const swatch = h("button", { type: "button", class: "swatch", title: c, ariaLabel: `${label}: ${c}`, onclick: () => commit(n, { [key]: c }) });
       swatch.style.background = c;
       return swatch;
     });
     const picker = h("input", { type: "color", ariaLabel: `${label} colour` });
     const typed = h("input", { type: "text", class: "hex", spellcheck: false, ariaLabel: `${label} colour, as hex` });
-    const show = () => {
+    shows.push(() => {
       const value = settings.counter[key];
       if (heatChip) heatChip.dataset.on = String(value === null);
       swatches.forEach((s, i) => (s.dataset.on = String(SWATCHES[i] === value)));
@@ -112,99 +133,66 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
       picker.value = value ?? "#808080";
       typed.value = value ?? "";
       typed.placeholder = value === null ? "Heat" : "";
-    };
-    const commit = (value: string | null) => {
-      (settings.counter[key] as string | null) = value;
-      show();
-      paint();
-      void ui.save(n);
-    };
+    });
     picker.oninput = () => paint({ ...settings.counter, [key]: picker.value });
-    picker.onchange = () => commit(picker.value);
+    picker.onchange = () => commit(n, { [key]: picker.value });
     typed.oninput = () => {
       const value = parseHex(typed.value);
       if (value) paint({ ...settings.counter, [key]: value });
     };
     typed.onchange = () => {
       const value = parseHex(typed.value);
-      if (value === null) ui.fail(n, "Use a hex colour such as #ffd60a.");
-      else commit(value);
+      if (value === null) reject(n, "Use a hex colour such as #ffd60a.");
+      else commit(n, { [key]: value });
     };
-    show();
-    refresh.push(show);
     return h("div", { class: "field" }, ui.caption(label, n), h("span", { class: "inline" }, heatChip, ...swatches, picker, typed));
   };
 
   const opacityField = (key: "restOpacity" | "hoverOpacity", label: string, range: readonly [number, number], choices: number[]) => {
     const n = ui.note();
     const input = h("input", { type: "number", min: String(range[0]), max: String(range[1]), class: "scale", ariaLabel: `${label} in percent` });
-    const chips = choices.map((p) => h("button", { type: "button", class: "chip", onclick: () => commit(p) }, `${p}%`));
-    const show = () => {
+    const chips = choices.map((p) => h("button", { type: "button", class: "chip", onclick: () => commit(n, { [key]: p }) }, `${p}%`));
+    shows.push(() => {
       input.value = String(settings.counter[key]);
       chips.forEach((c, i) => (c.dataset.on = String(choices[i] === settings.counter[key])));
-    };
-    const commit = (percent: number) => {
-      settings.counter[key] = percent;
-      show();
-      paint();
-      void ui.save(n);
-    };
+    });
     input.oninput = () => {
-      const percent = parseOpacity(input.value, range);
+      const percent = parseWhole(input.value, range);
       if (percent !== null) paint({ ...settings.counter, [key]: percent });
     };
     input.onchange = () => {
-      const percent = parseOpacity(input.value, range);
-      if (percent === null) ui.fail(n, `Use a whole number from ${range[0]} to ${range[1]}.`);
-      else commit(percent);
+      const percent = parseWhole(input.value, range);
+      if (percent === null) reject(n, `Use a whole number from ${range[0]} to ${range[1]}.`);
+      else commit(n, { [key]: percent });
     };
-    show();
-    refresh.push(show);
     return h("div", { class: "field" }, ui.caption(`${label} (${range[0]}–${range[1]}%)`, n), h("span", { class: "inline" }, ...chips, input, "%"));
   };
 
   const sizeField = () => {
     const n = ui.note();
     const input = h("input", { type: "number", min: String(SCALE_MIN), max: String(SCALE_MAX), class: "scale", ariaLabel: "Counter size in percent" });
-    const smaller = h("button", { type: "button", title: "Smaller", onclick: () => commit(stepScale(settings.pillScale, -1)) }, "−");
-    const bigger = h("button", { type: "button", title: "Bigger", onclick: () => commit(stepScale(settings.pillScale, 1)) }, "+");
-    const show = () => {
+    const smaller = h("button", { type: "button", title: "Smaller", onclick: () => commit(n, {}, stepScale(settings.pillScale, -1)) }, "−");
+    const bigger = h("button", { type: "button", title: "Bigger", onclick: () => commit(n, {}, stepScale(settings.pillScale, 1)) }, "+");
+    shows.push(() => {
       input.value = String(settings.pillScale);
       smaller.disabled = settings.pillScale <= SCALE_MIN;
       bigger.disabled = settings.pillScale >= SCALE_MAX;
-    };
-    const commit = (percent: number) => {
-      settings.pillScale = percent;
-      show();
-      paint();
-      void ui.save(n);
-    };
+    });
     input.oninput = () => {
       const percent = parseScale(input.value);
       if (percent !== null) paint(settings.counter, percent);
     };
     input.onchange = () => {
       const percent = parseScale(input.value);
-      if (percent === null) ui.fail(n, `Use a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
-      else commit(percent);
+      if (percent === null) reject(n, `Use a whole number from ${SCALE_MIN} to ${SCALE_MAX}.`);
+      else commit(n, {}, percent);
     };
-    show();
-    refresh.push(show);
     // Not <label>: a label forwards clicks on its caption to its first button.
     return h("div", { class: "field" }, ui.caption(`Size (${SCALE_MIN}–${SCALE_MAX}%)`, n), h("span", { class: "inline" }, smaller, input, "%", bigger));
   };
 
   const resetNote = ui.note();
-  const reset = h("button", {
-    type: "button",
-    onclick: () => {
-      settings.counter = { ...COUNTER_DEFAULT };
-      settings.pillScale = DEFAULT_SCALE;
-      refresh.forEach((show) => show());
-      paint();
-      void ui.save(resetNote);
-    },
-  }, "Reset to default");
+  const reset = h("button", { type: "button", onclick: () => commit(resetNote, COUNTER_DEFAULT, DEFAULT_SCALE) }, "Reset to default");
 
   const panel = h("div", { class: "counter-settings" },
     preview,
@@ -216,6 +204,6 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
     sizeField(),
     h("div", { class: "end" }, resetNote, reset),
   );
-  paint();
+  redraw();
   return panel;
 }

@@ -463,7 +463,7 @@ function renderSettings(
   // Every panel lives for the whole visit, so switching tabs keeps a pasted but unsaved token.
   const panels: Record<SettingsTab, HTMLElement> = {
     workspaces: tabPanel("workspaces", workspaces.element),
-    counter: tabPanel("counter", counterPanel(settings, { note, caption, fail, save })),
+    counter: tabPanel("counter", counterPanel(settings, { note, caption, ok, fail })),
     general: tabPanel("general",
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
