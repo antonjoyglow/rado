@@ -68,7 +68,7 @@ async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
         }
     });
     if !started {
-        return Err("An update is already installing.".into());
+        return Ok(());
     }
     let (mut received, mut shown) = (0u64, 0u8);
     let result = update
@@ -118,8 +118,17 @@ pub async fn check_update(app: AppHandle) {
     check(&app).await;
 }
 
+/// Reports through `UpdateState.error`, like the loop, so Settings shows one place for every update error.
 #[tauri::command]
-pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    let found = check(&app).await.ok_or("There is no newer version to install.")?;
-    install(&app, found).await
+pub async fn install_update(app: AppHandle) {
+    match check(&app).await {
+        Some(found) => {
+            let _ = install(&app, found).await;
+        }
+        None => crate::update(&app, |s| {
+            if s.update.error.is_none() {
+                s.update.error = Some("There is no newer version to install.".into());
+            }
+        }),
+    }
 }

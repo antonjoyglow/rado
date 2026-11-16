@@ -372,7 +372,8 @@ function renderSettings(
   const installNow = h("button", { type: "button", hidden: true }, "Install and restart");
   installNow.onclick = () => {
     installNow.disabled = true;
-    api.installUpdate().catch((e) => fail(n.update, e)).finally(() => (installNow.disabled = false));
+    // Errors arrive with the snapshot, in UpdateState.error.
+    void api.installUpdate().finally(() => (installNow.disabled = false));
   };
   const showUpdate = (u: UpdateState) => {
     updateLine.textContent = updateText(u, new Date());
