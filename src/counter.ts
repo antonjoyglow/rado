@@ -1,4 +1,4 @@
-import { api, type CounterStyle, type Settings } from "./api";
+import type { CounterStyle, Settings } from "./api";
 import { h } from "./dom";
 import { heat, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
 import { parseHex } from "./theme";
@@ -62,14 +62,13 @@ export function paintCounter(parts: CounterParts, counts: { reviews: number; min
 interface Ui {
   note: () => HTMLElement;
   caption: (text: string, note: HTMLElement) => HTMLElement;
-  ok: (note: HTMLElement) => void;
   fail: (note: HTMLElement, e: unknown) => void;
+  /** Saves `settings` and reports on `note`; a failed save rolls `settings` back and calls `redraw`. */
+  save: (note: HTMLElement) => Promise<void>;
 }
 
 /** The Counter settings tab: a live preview, then colours, opacity and size, each saved as it is picked. */
-export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
-  // A copy, so the snapshot keeps the saved look until the save lands. Every change replaces the object.
-  settings.counter = { ...settings.counter };
+export function counterPanel(settings: Settings, ui: Ui): { element: HTMLElement; redraw: () => void } {
   const shows: (() => void)[] = [];
 
   const rest = counterElement("div");
@@ -93,25 +92,11 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
     paint();
   };
 
-  /** What the last successful save wrote. */
-  let saved = { counter: settings.counter, scale: settings.pillScale };
-  /** Applies and saves a change; when the newest change fails to save, the tab goes back to `saved`. */
   const commit = (n: HTMLElement, change: Partial<CounterStyle>, scale = settings.pillScale) => {
-    const sent = { counter: { ...settings.counter, ...change }, scale };
-    settings.counter = sent.counter;
+    settings.counter = { ...settings.counter, ...change };
     settings.pillScale = scale;
     redraw();
-    api.saveSettings(settings).then(() => {
-      saved = sent;
-      ui.ok(n);
-    }, (e) => {
-      if (settings.counter === sent.counter) {
-        settings.counter = saved.counter;
-        settings.pillScale = saved.scale;
-        redraw();
-      }
-      ui.fail(n, e);
-    });
+    void ui.save(n);
   };
   /** A typed value that doesn't parse: say why, and show the saved value again. */
   const reject = (n: HTMLElement, why: string) => {
@@ -209,5 +194,5 @@ export function counterPanel(settings: Settings, ui: Ui): HTMLElement {
     h("div", { class: "end" }, resetNote, reset),
   );
   redraw();
-  return panel;
+  return { element: panel, redraw };
 }
