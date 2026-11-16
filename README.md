@@ -23,7 +23,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ## Walkthrough
 
-<img src="docs/screenshots/counter.png" width="86" alt="The counter showing { 5 | 1 }">
+<img src="docs/screenshots/counter.png" width="122" alt="The counter showing { 5 | 1 }">
 
 **The counter.** Left: reviews waiting on you. Right: your own PRs that need work. Click it to open the list; drag it anywhere.
 
