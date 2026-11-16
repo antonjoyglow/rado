@@ -23,6 +23,8 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
    claude mcp add --scope user rado -- "%LOCALAPPDATA%\Rado\rado-mcp.exe"
    ```
 
+   That is for cmd; in PowerShell, write the path as `"$env:LOCALAPPDATA\Rado\rado-mcp.exe"`.
+
 ## Walkthrough
 
 <img src="docs/screenshots/counter.png" width="122" alt="The counter showing { 5 | 1 }">
@@ -31,7 +33,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/review-list.png" width="640" alt="The review list">
 
-**The list.** One tab per section; the top-ranked review is marked *Review next*. Each row has a ticket chip (`ENG-42`) and one chip per PR; a dashed chip is a PR on the same branch that you aren't asked to review. Click a row to open every PR in it, or a chip to open one.
+**The list.** One tab per section; the top-ranked review is marked *Review next*. A row whose branch names a ticket gets a ticket chip (`ENG-42`), and each PR gets its own chip; a dashed chip is a PR on the same branch that you aren't asked to review (Azure DevOps only). Click a row to open every PR in it, or a chip to open one.
 
 <img src="docs/screenshots/workspace-picker.png" width="640" alt="The workspace picker open under the header chip">
 
@@ -65,7 +67,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 - By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
 - `{!}`: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
 - Always on top. By default it sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
-- **Settings → Counter** changes its look, with a live preview at rest and near the cursor. Each change saves as you pick it.
+- **Settings → Counter** changes its look; each change saves as you pick it.
   - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Braces and bar*: the same without Heat.
   - *Opacity at rest*: 20–100% (chips for 30, 55, 80 and 100%). *Opacity near the cursor*: 0–100% (chips for 0, 8, 25 and 50%).
   - *Size*: 75% to 200%; − / + step by 25%, or type a whole percent. Sizes other than 100% and 200% are slightly soft. It grows around its right edge.
@@ -78,7 +80,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
 - **Review next:** the top-ranked review gets the label, an accent bar and a dot on its tab. Rows you opened since Rado started move behind the others; once you've opened them all, it marks the one you opened longest ago.
 - **Rows:** PRs with the same source branch in different repos form one row (*N PRs · branch*), titled and placed by their highest-ranked PR, with summed approvals and comments. GitHub and Azure DevOps PRs never share a row. PR chips read `repo !n` (Azure DevOps) or `repo #n` (GitHub).
-- **Row details:** `✓ n` approved, `✗ n` rejected or waiting for author, comments with open threads (system threads such as votes and pushes don't count), *required*, *draft*, and `→ main` when it merges into `master`, `main`, `qa` or `release`. On the right: *opened* and *active* (the latest push, vote, comment, reviewer or status change; activity in the first five minutes counts as opening). An aggregate uses its earliest PR's opening and its latest activity. Hover for each PR's exact times.
+- **Row details:** `✓ n` approved, `✗ n` rejected or waiting for author, `n comments (m open)` (system threads such as votes and pushes don't count), *required*, *draft*, and `→ <target>` when it merges into `master`, `main`, `qa` or `release`. On the right: *opened* and *active* (the latest push, vote, comment, reviewer or status change; activity in the first five minutes counts as opening). An aggregate uses its earliest PR's opening and its latest activity. Hover for each PR's exact times.
 - **Copy** copies the PR link; for an aggregate, one `repo: link` line per PR.
 - **Not mine** (on a review) or **Hide** (on your own PR) drops the row from the count and notifications until it closes. On GitHub that's until it leaves Rado's GitHub results, for example once a teammate covers a team request. Hidden PRs are forgotten only after a poll in which every source answered in full. **Show** on the *Hidden* tab brings one back. Hiding is local; Azure DevOps or GitHub still lists you as a reviewer.
 - **Quiet:** a review with no activity for 21 days leaves the count, notifications and the MCP queue, and moves to *Quiet*. Any activity brings it back, with a notification. Your own PRs never go quiet; a PR whose threads failed to load stays where it was.
@@ -86,7 +88,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ### Ranking
 
-One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master`, `main`, `qa` or `release`: +15. Age: +1 per 4 hours, up to 30. Team-only assignment: −10. Draft: −40. 85 or more is urgent.
+One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master`, `main`, `qa` or `release`: +15. Age: +1 per 4 hours, up to 30. Team-only assignment: −10. Draft: −40. 85 or more is urgent (red dot), 40 or more normal (orange); the rest are grey.
 
 ### Workspaces
 
@@ -99,7 +101,7 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 ### Trackers
 
 - A ticket key in a branch name (`ABC-12`, as in `feature/ABC-12-login`) becomes a chip that opens the issue in the workspace's Jira site or Linear workspace. Rado only builds the link; no tracker token is needed. With no tracker set, there are no chips. Pasting a Jira or Linear link into the field works too.
-- Without team keys, upper-case keys count anywhere in the branch. With Linear, lower-case keys also count in Linear's branch shape (`anton/eng-123-add-login`). `release-2026`, `renovate/node-20`, `UTF-8`, `ISO-8601`, `SHA-256` and `CVE-2024-…` never make chips, but `chore/node-18-upgrade` and `sprint-3-onboarding` do (NODE-18, SPRINT-3).
+- Without team keys, upper-case keys count anywhere in the branch. With Linear, lower-case keys also count in Linear's branch shape (`anton/eng-123-add-login`). `release-2026`, `renovate/node-20`, `UTF-8`, `ISO-8601`, `SHA-256` and `CVE-2024-…` never make chips, but with Linear `chore/node-18-upgrade` and `claude/sprint-3-onboarding` do (NODE-18, SPRINT-3).
 - With **team keys** set, only those keys count, in any case, at the start of the branch or after `/`, `-` or `_`. `hoo-312-ranks` gives HOO-312 and `claude/hoo-342-343-panels` gives HOO-342; `sprint-3` gives nothing.
 
 ### Sources
@@ -107,7 +109,7 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 - Azure DevOps and GitHub (github.com) are polled at the same time. A source is on once its token is saved. If one fails, its PRs from the last good poll stay listed and the status line names it.
 - A source's first good poll (new token, or after failing since start) records its reviews without notifying. A poll that was running when you switched workspaces, saved a token or changed the organization or teams is discarded.
 - **Azure DevOps:** every active PR in the organization comes from one paged call. Rado keeps those where you, or one of **My teams**, is a reviewer. Teams match by name (`TeamAlpha` matches `[contoso]\TeamAlpha`). On a team-only PR, the team's vote decides the section. Your own open PRs go under *Mine*; PRs you declined are skipped. One extra call per listed PR fetches its threads and last activity; if it fails, the row shows no comments or activity.
-- **GitHub:** one GraphQL call per poll searches every repo the token can see: reviews requested from you or your teams (team-only shows as *team*), open PRs you reviewed, and your own open PRs.
+- **GitHub:** one GraphQL call per poll searches every repo the token can see: reviews requested from you or your teams, open PRs you reviewed, and your own open PRs.
   - A push after your approval or change request moves it to *Re-review*. Your vote is your last approval or change request; a later comment doesn't replace it, and a dismissed vote counts as changed.
   - Your latest review approved: *Approved*; requested changes: *Author*. A PR you only commented on, and aren't requested on, isn't listed.
   - **Watched repos** count every open PR there as a review, except drafts and your own (bots' PRs included). They score like a team request and then follow your vote. Pasting a repo link works too. Changing the list re-polls without a notification per PR.
@@ -145,7 +147,7 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list size, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
-**Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
+**Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
 
 ## Commands
 
@@ -164,7 +166,7 @@ The installer and uninstaller also stop every `rado-mcp.exe` running from the in
 
 `app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install, closes a running Rado and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`): run directly from a Claude desktop session, it would install into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. To update by hand, run the setup exe with the same flags.
 
-The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. On this machine, Rust would otherwise pick a Visual Studio install that has no C++ libraries.
+The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. Without it, Rust can pick a Visual Studio install that has no C++ libraries.
 
 ## Releasing
 
