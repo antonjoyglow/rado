@@ -26,9 +26,22 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: cargo test --manifest-path src-tauri/Cargo.toml
-      - run: npx tauri build
-      - name: Publish the installer
+      # Updater artifacts (the installer's .sig) only here, so local builds need no signing key.
+      - name: Build and sign the installer
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'
+      - name: Write the updater feed
+        shell: bash
+        run: |
+          setup=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe)
+          node scripts/release.mjs latest "${GITHUB_REF_NAME#v}" "$setup" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/latest.json"
+      - name: Publish the installer and the feed
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" src-tauri/target/release/bundle/nsis/*-setup.exe --title "Rado ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"
+        run: |
+          setup=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe)
+          gh release create "$GITHUB_REF_NAME" "$setup" "$setup.sig" "$RUNNER_TEMP/latest.json" --title "Rado ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md"
