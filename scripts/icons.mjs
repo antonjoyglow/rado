@@ -1,4 +1,4 @@
-// Regenerates src-tauri/icons from docs/logo.svg, keeping only what the Windows build uses.
+// Regenerates src-tauri/icons from docs/logo.svg, dropping the mobile icons and the PNG tauri.conf.json doesn't list.
 // Run from the repo root: node scripts/icons.mjs
 import { execSync } from "node:child_process";
 import { rmSync } from "node:fs";

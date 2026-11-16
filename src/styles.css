@@ -5,8 +5,7 @@
   --line: #e4e6ea;
   --hover: #f2f4f7;
   /* Text colours measured at 4.5:1 or more on --bg and --hover in each theme. The accent is the logo's green,
-     darkened or lightened to read as text; light, dark and system mark approved/OK with it too (--clear), so
-     there is one green. */
+     shaded to read as text. */
   --accent: #117a5e;
   --on-accent: #ffffff;
   --urgent: #c22d2d;
