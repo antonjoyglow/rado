@@ -128,6 +128,12 @@ function main(args) {
       console.error("Usage: node scripts/release.mjs latest <x.y.z> <path to *-setup.exe> <owner/repo>; CHANGELOG.md needs that version's section.");
       process.exit(1);
     }
+    // A feed newer than the installer it points at would make every installed Rado reinstall it forever.
+    const built = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+    if (built !== version) {
+      console.error(`The tag says ${version} but tauri.conf.json builds ${built}; tag the release commit.`);
+      process.exit(1);
+    }
     const feed = latestJson({
       version, notes, repo,
       pubDate: new Date().toISOString(),

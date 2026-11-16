@@ -36,9 +36,13 @@ fn auto_update(app: &AppHandle) -> bool {
 
 /// Asks the release feed and records the answer; a newer version comes back to be installed.
 async fn check(app: &AppHandle) -> Option<Update> {
-    let result = match app.updater() {
-        Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
+    let result = if cfg!(debug_assertions) {
+        Err("a dev build doesn't check".to_string())
+    } else {
+        match app.updater() {
+            Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
     };
     crate::update(app, |s| {
         s.update.checked_at = Some(Utc::now());
@@ -55,10 +59,17 @@ async fn check(app: &AppHandle) -> Option<Update> {
 
 /// Downloads and starts the installer. On Windows the process exits once the installer runs, so a return is a failure.
 async fn install(app: &AppHandle, update: Update) -> Result<(), String> {
-    if cfg!(debug_assertions) {
-        return Err("A dev build doesn't install updates.".into());
+    // Taken under the state lock, so the loop and the Install button can't both start one.
+    let mut started = false;
+    crate::update(app, |s| {
+        if s.update.installing.is_none() {
+            s.update.installing = Some(0);
+            started = true;
+        }
+    });
+    if !started {
+        return Err("An update is already installing.".into());
     }
-    crate::update(app, |s| s.update.installing = Some(0));
     let (mut received, mut shown) = (0u64, 0u8);
     let result = update
         .download_and_install(

@@ -378,6 +378,7 @@ function renderSettings(
     updateLine.textContent = updateText(u, new Date());
     installNow.hidden = !u.available || u.installing !== null;
     if (u.error) show(n.update, "error", u.error);
+    else if (n.update.dataset.kind === "error") n.update.textContent = "";
   };
   showUpdate(snapshot.update);
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
