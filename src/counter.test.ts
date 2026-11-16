@@ -37,14 +37,14 @@ describe("counterVars", () => {
   it("gives the original look for the defaults at 100%", () => {
     expect(counterVars(COUNTER_DEFAULT, 100)).toEqual({
       "--pill-scale": "1",
-      "--pill-braces": "#ffffff",
+      "--pill-logo": "#ffffff",
       "--pill-rest": "0.55",
       "--pill-hover": "0.08",
     });
   });
 
   it("turns percents into fractions", () => {
-    const vars = counterVars({ ...COUNTER_DEFAULT, braces: "#c792ea", restOpacity: 100, hoverOpacity: 0 }, 150);
-    expect(vars).toEqual({ "--pill-scale": "1.5", "--pill-braces": "#c792ea", "--pill-rest": "1", "--pill-hover": "0" });
+    const vars = counterVars({ ...COUNTER_DEFAULT, logo: "#c792ea", restOpacity: 100, hoverOpacity: 0 }, 150);
+    expect(vars).toEqual({ "--pill-scale": "1.5", "--pill-logo": "#c792ea", "--pill-rest": "1", "--pill-hover": "0" });
   });
 });

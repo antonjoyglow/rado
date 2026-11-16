@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs script without type declarations
-import { buildSection, bumpVersions, missingLines, parseTitle, sectionBody, upsertSection } from "./release.mjs";
+import { buildSection, bumpVersions, latestJson, missingLines, parseTitle, sectionBody, upsertSection } from "./release.mjs";
 
 describe("parseTitle", () => {
   it("featWithScope_dropsTheReleaseSuffixAndKeepsThePrNumber", () => {
@@ -132,5 +132,25 @@ describe("bumpVersions", () => {
 
   it("missingVersion_throws", () => {
     expect(() => bumpVersions({ ...files, "src-tauri/Cargo.lock": 'name = "other"\n' }, "0.8.0")).toThrow(/Cargo\.lock/);
+  });
+});
+
+describe("latestJson", () => {
+  it("pointsAtTheTaggedReleaseAssetWithTheSignatureInline", () => {
+    const feed = latestJson({
+      version: "0.9.1", notes: "### Features\n\n- counter: logo", pubDate: "2026-11-16T12:00:00.000Z",
+      repo: "antonjoyglow/rado", installer: "Rado_0.9.1_x64-setup.exe", signature: "dW50cnVzdGVk\r\n",
+    });
+    expect(feed).toEqual({
+      version: "0.9.1",
+      notes: "### Features\n\n- counter: logo",
+      pub_date: "2026-11-16T12:00:00.000Z",
+      platforms: {
+        "windows-x86_64": {
+          url: "https://github.com/antonjoyglow/rado/releases/download/v0.9.1/Rado_0.9.1_x64-setup.exe",
+          signature: "dW50cnVzdGVk",
+        },
+      },
+    });
   });
 });

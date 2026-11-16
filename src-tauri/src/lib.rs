@@ -7,11 +7,12 @@ mod group;
 mod queue;
 mod score;
 mod store;
+mod updates;
 mod workspace;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -76,8 +77,8 @@ struct Inner {
     load_warning: Option<String>,
     polling: bool,
     credentials_generation: u64,
-    list_hidden_at: Option<Instant>,
     list_had_focus: bool,
+    update: updates::UpdateState,
 }
 
 #[derive(Clone, Serialize)]
@@ -94,6 +95,7 @@ struct Snapshot {
     settings: Settings,
     /// By workspace id.
     saved: HashMap<String, Saved>,
+    update: updates::UpdateState,
 }
 
 impl Inner {
@@ -122,6 +124,7 @@ impl Inner {
             has_github_token: saved.github_token,
             settings: self.settings.clone(),
             saved: self.saved.clone(),
+            update: self.update.clone(),
         }
     }
 
@@ -480,6 +483,12 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .build()?;
     let handle = app.clone();
     window.on_window_event(move |event| {
+        // Alt+F4 closes like ✕, keeping the window and bringing the counter back.
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            hide_list(handle.clone());
+            return;
+        }
         let WindowEvent::Focused(focused) = event else { return };
         // Windows may refuse focus to a newly shown window and report a blur at once;
         // only a blur after the list really had focus means the user clicked away.
@@ -489,50 +498,70 @@ fn list_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
             if *focused {
                 inner.list_had_focus = true;
                 false
-            } else if inner.list_had_focus {
-                inner.list_hidden_at = Some(Instant::now());
-                true
             } else {
-                false
+                inner.list_had_focus
             }
         };
         // Hiding can raise another focus event synchronously, so the lock must be released first.
-        if clicked_away && let Some(w) = handle.get_webview_window(LIST) {
-            let _ = w.hide();
+        if clicked_away {
+            hide_list(handle.clone());
         }
     });
     Ok(window)
 }
 
-/// Sizes the list from settings, shrunk to fit the counter's screen, and puts it beside the counter.
+/// A screen rectangle in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+/// Narrowest list, in logical pixels; below it the rows stop fitting their buttons.
+const LIST_MIN_WIDTH: f64 = 360.0;
+
+/// The list on `area` (the work area of the counter's screen): `percent` of its width and height, against
+/// the screen edge on the counter's side, its middle level with the counter's, and kept on screen.
+fn list_rect(area: Rect, counter: Rect, percent: (u32, u32), min_width: i32) -> Rect {
+    let w = (area.w * percent.0 as i32 / 100).max(min_width).min(area.w);
+    let h = area.h * percent.1 as i32 / 100;
+    let (mid_x, mid_y) = (counter.x + counter.w / 2, counter.y + counter.h / 2);
+    let x = if mid_x > area.x + area.w / 2 { area.x + area.w - w } else { area.x };
+    let y = (mid_y - h / 2).clamp(area.y, area.y + area.h - h);
+    Rect { x, y, w, h }
+}
+
 fn place_list(app: &AppHandle, list: &tauri::WebviewWindow) {
-    let (width, height) = {
+    let percent = {
         let shared = app.state::<Shared>();
         let inner = shared.inner.lock().expect("state lock");
-        (inner.settings.list_width, inner.settings.list_height)
+        (inner.settings.list_width_percent, inner.settings.list_height_percent)
     };
     let Some(pill) = app.get_webview_window(PILL) else { return };
     let (Ok(pos), Ok(size), Ok(Some(monitor))) = (pill.outer_position(), pill.outer_size(), pill.current_monitor()) else { return };
-    let scale = monitor.scale_factor();
     let area = monitor.work_area();
-    let (left, top) = (area.position.x, area.position.y);
-    let (right, bottom) = (left + area.size.width as i32, top + area.size.height as i32);
-    let w = ((f64::from(width) * scale) as i32).min(area.size.width as i32);
-    let h = ((f64::from(height) * scale) as i32).min(area.size.height as i32);
-    let x = if pos.x + size.width as i32 / 2 > (left + right) / 2 { pos.x - w - 8 } else { pos.x + size.width as i32 + 8 };
-    let at = PhysicalPosition::new(x.clamp(left, (right - w).max(left)), pos.y.clamp(top, (bottom - h).max(top)));
+    let area = Rect { x: area.position.x, y: area.position.y, w: area.size.width as i32, h: area.size.height as i32 };
+    let counter = Rect { x: pos.x, y: pos.y, w: size.width as i32, h: size.height as i32 };
+    let r = list_rect(area, counter, percent, (LIST_MIN_WIDTH * monitor.scale_factor()) as i32);
+    let at = PhysicalPosition::new(r.x, r.y);
     // Moving onto a monitor with another DPI rescales the window, so it moves first, is sized there, and is placed again.
     let _ = list.set_position(at);
-    let _ = list.set_size(PhysicalSize::new(w as u32, h as u32));
+    let _ = list.set_size(PhysicalSize::new(r.w as u32, r.h as u32));
     let _ = list.set_position(at);
 }
 
+/// Opens the list and takes the counter off the screen until `hide_list`.
 fn show_list(app: &AppHandle) -> tauri::Result<()> {
     let list = list_window(app)?;
     place_list(app, &list);
     app.state::<Shared>().inner.lock().expect("state lock").list_had_focus = false;
     list.show()?;
     let _ = list.set_focus();
+    if let Some(pill) = app.get_webview_window(PILL) {
+        let _ = pill.hide();
+    }
     Ok(())
 }
 
@@ -548,30 +577,18 @@ fn refresh_now(state: tauri::State<'_, Shared>) {
 
 // Async: building a window inside a synchronous command can deadlock on Windows.
 #[tauri::command]
-async fn toggle_list(app: AppHandle) -> Result<(), String> {
-    let visible = app.get_webview_window(LIST).is_some_and(|w| w.is_visible().unwrap_or(false));
-    // Clicking the pill blurs the list first, which hides it; that click means "close", not "reopen".
-    let just_hidden = app
-        .state::<Shared>()
-        .inner
-        .lock()
-        .expect("state lock")
-        .list_hidden_at
-        .is_some_and(|t| t.elapsed() < Duration::from_millis(400));
-    if visible {
-        hide_list(app);
-        Ok(())
-    } else if just_hidden {
-        Ok(())
-    } else {
-        show_list(&app).map_err(|e| e.to_string())
-    }
+async fn open_list(app: AppHandle) -> Result<(), String> {
+    show_list(&app).map_err(|e| e.to_string())
 }
 
+/// Every way the list closes (✕, Escape, a click elsewhere) ends here, so the counter always comes back.
 #[tauri::command]
 fn hide_list(app: AppHandle) {
     if let Some(w) = app.get_webview_window(LIST) {
         let _ = w.hide();
+    }
+    if let Some(pill) = app.get_webview_window(PILL) {
+        let _ = pill.show();
     }
 }
 
@@ -727,7 +744,7 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
         }
         let old = &s.settings;
         resize = old.pill_scale != settings.pill_scale;
-        resize_list = (old.list_width, old.list_height) != (settings.list_width, settings.list_height);
+        resize_list = (old.list_width_percent, old.list_height_percent) != (settings.list_width_percent, settings.list_height_percent);
         refetch = old.poll_minutes != settings.poll_minutes;
         pill_scale = settings.pill_scale;
         s.settings = settings;
@@ -997,6 +1014,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config = app.path().app_config_dir()?;
             let data = app.path().app_data_dir()?;
@@ -1009,12 +1027,18 @@ pub fn run() {
                 .map(|w| (w.id.clone(), Saved { pat: store.pat(&w.id).is_some(), github_token: store.github_token(&w.id).is_some() }))
                 .collect();
             let ws = load_state(&store, &loaded.settings.active_workspace);
-            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, ..Default::default() };
+            let update = updates::UpdateState { current: app.package_info().version.to_string(), ..Default::default() };
+            let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, update, ..Default::default() };
             let pill_scale = inner.settings.pill_scale;
             app.manage(Shared { store, wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
             size_pill(app.handle(), pill_scale, false);
             place_pill(app.handle());
+            // Only the first show honours `focus: false`; without this, showing the counter again after Esc
+            // or ✕ makes it the active window, and the next keystrokes go nowhere.
+            if let Some(pill) = app.get_webview_window(PILL) {
+                let _ = pill.set_focusable(false);
+            }
             // The plugin saves only on a clean exit; save on every move so a drag survives a kill or a reboot.
             if let Some(pill) = app.get_webview_window(PILL) {
                 let handle = app.handle().clone();
@@ -1027,12 +1051,13 @@ pub fn run() {
             build_tray(app.handle())?;
             tauri::async_runtime::spawn(poll_loop(app.handle().clone()));
             tauri::async_runtime::spawn(hover_loop(app.handle().clone()));
+            tauri::async_runtime::spawn(updates::update_loop(app.handle().clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             refresh_now,
-            toggle_list,
+            open_list,
             hide_list,
             open_pr,
             open_row,
@@ -1048,6 +1073,8 @@ pub fn run() {
             delete_workspace,
             get_autostart,
             set_autostart,
+            updates::check_update,
+            updates::install_update,
             quit
         ])
         .run(tauri::generate_context!())
@@ -1059,6 +1086,47 @@ pub fn run() {
 mod tests {
     use super::*;
     use score::{PrFacts, Provider, ReviewState};
+
+    /// A 1920 × 1040 work area (a 40 px taskbar below) and a 112 × 36 counter at `(x, y)`.
+    const AREA: Rect = Rect { x: 0, y: 0, w: 1920, h: 1040 };
+    fn counter_at(x: i32, y: i32) -> Rect {
+        Rect { x, y, w: 112, h: 36 }
+    }
+
+    #[test]
+    fn listRect_counterBottomRight_isTheRightEdgesBottomHalf() {
+        let r = list_rect(AREA, counter_at(1796, 992), (33, 50), 360);
+        assert_eq!(r, Rect { x: 1920 - 633, y: 520, w: 633, h: 520 });
+    }
+
+    #[test]
+    fn listRect_counterLeftAndMidway_isTheLeftEdgeCentredOnIt() {
+        let r = list_rect(AREA, counter_at(40, 400), (33, 50), 360);
+        assert_eq!(r, Rect { x: 0, y: 418 - 260, w: 633, h: 520 });
+    }
+
+    #[test]
+    fn listRect_counterAtTheTop_staysOnScreen() {
+        assert_eq!(list_rect(AREA, counter_at(1700, 0), (33, 50), 360).y, 0);
+    }
+
+    #[test]
+    fn listRect_fullSize_coversTheWholeWorkArea() {
+        assert_eq!(list_rect(AREA, counter_at(1796, 992), (100, 100), 360), AREA);
+    }
+
+    #[test]
+    fn listRect_narrowPercent_keepsTheMinimumWidthAgainstTheEdge() {
+        let r = list_rect(AREA, counter_at(1796, 992), (20, 50), 720);
+        assert_eq!((r.x, r.w), (1920 - 720, 720));
+    }
+
+    #[test]
+    fn listRect_secondScreenLeftOfThePrimary_usesItsOwnEdges() {
+        let area = Rect { x: -1280, y: 0, w: 1280, h: 984 };
+        let r = list_rect(area, counter_at(-1200, 900), (50, 100), 360);
+        assert_eq!(r, Rect { x: -1280, y: 0, w: 640, h: 984 });
+    }
 
     fn pr(id: i64, state: ReviewState) -> ReviewItem {
         let facts = PrFacts {

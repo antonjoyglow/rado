@@ -70,14 +70,16 @@ body[data-view="pill"] { background: transparent; }
 body[data-view="pill"] #app { height: 100%; display: grid; place-items: center; }
 
 @font-face {
-  font-family: "Silkscreen";
-  src: url("./fonts/Silkscreen-Regular.ttf") format("truetype");
+  font-family: "Nunito";
+  src: url("./fonts/Nunito-ExtraBold-latin.woff2") format("woff2");
+  font-weight: 800;
   font-display: block;
 }
 
-/* Bare { reviews | mine } in pixel type with Glance's overlay rules: 0.55 at rest, fading to 0.08 near
-   the cursor (hover_loop) with an ease-out close to Glance's 0.14-per-50 ms lerp. The --pill-* variables
-   are the Counter settings, set by paintCounter in counter.ts; the fallbacks are their defaults. */
+/* Bare `reviews <bird> mine` with Glance's overlay rules: 0.55 at rest, fading to 0.08 near the cursor
+   (hover_loop) with an ease-out close to Glance's 0.14-per-50 ms lerp. The --pill-* variables are the
+   Counter settings, set by paintCounter in counter.ts; the fallbacks are their defaults. The shadow is a
+   filter, not a text-shadow, so the masked bird gets it too. */
 .pill {
   display: flex;
   align-items: center;
@@ -88,19 +90,26 @@ body[data-view="pill"] #app { height: 100%; display: grid; place-items: center; 
   padding: 0;
   border: 0;
   background: none;
-  color: var(--pill-braces, #ffffff);
-  font: 400 calc(16px * var(--pill-scale, 1)) / 1 "Silkscreen", monospace;
-  letter-spacing: calc(-1px * var(--pill-scale, 1));
+  gap: 0.26em;
+  color: var(--pill-logo, #ffffff);
+  font: 800 calc(16px * var(--pill-scale, 1)) / 1 "Nunito", sans-serif;
   white-space: nowrap;
-  text-shadow: calc(1px * var(--pill-scale, 1)) calc(1px * var(--pill-scale, 1)) 0 rgba(0, 0, 0, 0.75);
+  filter: drop-shadow(calc(1px * var(--pill-scale, 1)) calc(1px * var(--pill-scale, 1)) 0 rgba(0, 0, 0, 0.75));
   opacity: var(--pill-rest, 0.55);
   transition: opacity 0.9s cubic-bezier(0.15, 0.6, 0.3, 1);
   user-select: none;
 }
 .pill[data-hover="true"] { opacity: var(--pill-hover, 0.08); }
-.pill .count { padding: 0 2px; }
+/* 1.35 times the type size, centred on the digits; the width keeps the SVG's 200 × 240 shape. */
+.pill .logo {
+  flex: none;
+  width: calc(1.35em * 200 / 240);
+  height: 1.35em;
+  background: currentColor;
+  mask: url("./counter-logo.svg") center / contain no-repeat;
+}
 .pill [hidden] { display: none; }
-.pill[data-polling="true"] .br { animation: pulse 1s ease-in-out infinite; }
+.pill[data-polling="true"] .logo { animation: pulse 1s ease-in-out infinite; }
 
 @keyframes pulse { 50% { opacity: 0.35; } }
 
@@ -111,6 +120,15 @@ body[data-view="list"] #app { display: flex; flex-direction: column; height: 100
 
 header { display: flex; align-items: center; gap: 4px; padding: 10px 10px 6px 14px; }
 header h1 { flex: 1; margin: 0; font-size: calc(15px * var(--text-scale, 1)); }
+/* The counter's bird at the same 1.35 times the title's size, in the theme's text colour. */
+header .bird {
+  flex: none;
+  width: calc(20px * var(--text-scale, 1) * 200 / 240);
+  height: calc(20px * var(--text-scale, 1));
+  margin-right: 4px;
+  background: var(--fg);
+  mask: url("./counter-logo.svg") center / contain no-repeat;
+}
 .icon { width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; }
 .icon:hover { background: var(--hover); }
 

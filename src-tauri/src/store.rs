@@ -20,17 +20,20 @@ const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 pub struct Settings {
     pub poll_minutes: u32,
     pub notify: bool,
-    /// Size of the `{ reviews | mine }` counter, in percent of the 16 px original.
+    /// Install a newer release by itself while the list is closed; off, Settings offers it instead.
+    pub auto_update: bool,
+    /// Size of the `reviews <bird> mine` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub pill_scale: u32,
     /// Text size of the review list, in percent.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub text_scale: u32,
-    /// Size of the review list, in logical pixels; shrunk to fit the screen when shown.
-    #[serde(deserialize_with = "lenient_number::<_, 640>")]
-    pub list_width: u32,
-    #[serde(deserialize_with = "lenient_number::<_, 860>")]
-    pub list_height: u32,
+    /// Size of the review list, in percent of the work area of the counter's screen. Files from 0.9.0 and
+    /// earlier hold `listWidth` / `listHeight` in pixels instead; those are ignored.
+    #[serde(deserialize_with = "lenient_number::<_, 33>")]
+    pub list_width_percent: u32,
+    #[serde(deserialize_with = "lenient_number::<_, 50>")]
+    pub list_height_percent: u32,
     #[serde(deserialize_with = "lenient_choice")]
     pub browser: Browser,
     /// Colours of the review list; the counter has its own, in `counter`.
@@ -39,7 +42,7 @@ pub struct Settings {
     /// Colours of the `Custom` theme; kept when another theme is chosen.
     #[serde(deserialize_with = "lenient_choice")]
     pub custom_theme: CustomTheme,
-    /// Colours and opacity of the `{ reviews | mine }` counter; its size is `pill_scale`.
+    /// Colours and opacity of the `reviews <bird> mine` counter; its size is `pill_scale`.
     #[serde(deserialize_with = "lenient_choice")]
     pub counter: CounterStyle,
     #[serde(deserialize_with = "workspace::lenient_workspaces")]
@@ -131,9 +134,9 @@ pub struct CounterStyle {
     pub reviews: Option<String>,
     #[serde(deserialize_with = "lenient_choice")]
     pub mine: Option<String>,
-    /// The `{`, `|` and `}`.
-    #[serde(deserialize_with = "lenient_choice")]
-    pub braces: String,
+    /// The bird between the numbers, and the `!`. Files from 0.9.0 call it `braces`, after the `{ | }` it replaced.
+    #[serde(alias = "braces", deserialize_with = "lenient_choice")]
+    pub logo: String,
     /// Opacity in percent, away from the cursor and near it.
     #[serde(deserialize_with = "lenient_number::<_, 55>")]
     pub rest_opacity: u32,
@@ -144,7 +147,7 @@ pub struct CounterStyle {
 /// The look before the counter could be customised.
 impl Default for CounterStyle {
     fn default() -> Self {
-        Self { reviews: None, mine: None, braces: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 }
+        Self { reviews: None, mine: None, logo: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 }
     }
 }
 
@@ -158,7 +161,7 @@ impl CounterStyle {
         Self {
             reviews: self.reviews.as_deref().and_then(hex_color),
             mine: self.mine.as_deref().and_then(hex_color),
-            braces: hex_color(&self.braces).unwrap_or_else(|| Self::default().braces),
+            logo: hex_color(&self.logo).unwrap_or_else(|| Self::default().logo),
             rest_opacity: self.rest_opacity.clamp(COUNTER_REST_RANGE.0, COUNTER_REST_RANGE.1),
             hover_opacity: self.hover_opacity.clamp(COUNTER_HOVER_RANGE.0, COUNTER_HOVER_RANGE.1),
         }
@@ -191,14 +194,14 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
     Ok(value.as_f64().map_or(DEFAULT, |v| v.round() as u32))
 }
 
-/// Smallest and largest counter size, in percent. Below 75% the pixel font stops being readable;
+/// Smallest and largest counter size, in percent. Below 75% the numbers stop being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
 /// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
 pub const TEXT_SCALE_RANGE: (u32, u32) = (80, 150);
-/// Smallest and largest review list, in logical pixels. Below these the rows stop fitting their buttons.
-pub const LIST_WIDTH_RANGE: (u32, u32) = (360, 1600);
-pub const LIST_HEIGHT_RANGE: (u32, u32) = (400, 1600);
+/// Smallest and largest review list, in percent of its screen, matching `LIST_*_PERCENT` in `format.ts`.
+pub const LIST_WIDTH_PERCENT_RANGE: (u32, u32) = (20, 100);
+pub const LIST_HEIGHT_PERCENT_RANGE: (u32, u32) = (25, 100);
 
 impl Settings {
     /// Pulls values typed or edited by hand back into their allowed ranges.
@@ -207,8 +210,8 @@ impl Settings {
             poll_minutes: self.poll_minutes.clamp(1, 120),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
             text_scale: self.text_scale.clamp(TEXT_SCALE_RANGE.0, TEXT_SCALE_RANGE.1),
-            list_width: self.list_width.clamp(LIST_WIDTH_RANGE.0, LIST_WIDTH_RANGE.1),
-            list_height: self.list_height.clamp(LIST_HEIGHT_RANGE.0, LIST_HEIGHT_RANGE.1),
+            list_width_percent: self.list_width_percent.clamp(LIST_WIDTH_PERCENT_RANGE.0, LIST_WIDTH_PERCENT_RANGE.1),
+            list_height_percent: self.list_height_percent.clamp(LIST_HEIGHT_PERCENT_RANGE.0, LIST_HEIGHT_PERCENT_RANGE.1),
             custom_theme: self.custom_theme.clamped(),
             counter: self.counter.clamped(),
             workspaces: self.workspaces.into_iter().map(Workspace::clamped).collect(),
@@ -222,10 +225,11 @@ impl Default for Settings {
         Self {
             poll_minutes: 3,
             notify: true,
+            auto_update: true,
             pill_scale: 100,
             text_scale: 100,
-            list_width: 640,
-            list_height: 860,
+            list_width_percent: 33,
+            list_height_percent: 50,
             browser: Browser::System,
             theme: Theme::System,
             custom_theme: CustomTheme::default(),
@@ -785,34 +789,49 @@ pub(crate) mod tests {
 
     #[test]
     fn settings_listSize_defaultsWhenMissingOrJunkAndIsClamped() {
-        let old: Settings = serde_json::from_str(r#"{"pollMinutes":7}"#).unwrap();
-        assert_eq!((old.list_width, old.list_height), (640, 860));
-        for (raw_w, raw_h, expected) in [("\"wide\"", "null", (640, 860)), ("10", "99999", (360, 1600)), ("700.4", "900", (700, 900))] {
-            let json = format!(r#"{{"pollMinutes":7,"listWidth":{raw_w},"listHeight":{raw_h}}}"#);
+        for (raw_w, raw_h, expected) in [("\"wide\"", "null", (33, 50)), ("10", "140", (20, 100)), ("40.4", "75", (40, 75))] {
+            let json = format!(r#"{{"pollMinutes":7,"listWidthPercent":{raw_w},"listHeightPercent":{raw_h}}}"#);
             let settings = serde_json::from_str::<Settings>(&json).unwrap().clamped();
-            assert_eq!((settings.poll_minutes, (settings.list_width, settings.list_height)), (7, expected), "{raw_w} x {raw_h}");
+            assert_eq!((settings.poll_minutes, (settings.list_width_percent, settings.list_height_percent)), (7, expected), "{raw_w} x {raw_h}");
         }
+    }
+
+    #[test]
+    fn settings_090PixelListSize_isIgnoredForTheDefaults() {
+        let old = serde_json::from_str::<Settings>(r#"{"pollMinutes":7,"listWidth":820,"listHeight":1040}"#).unwrap().clamped();
+        assert_eq!((old.poll_minutes, old.list_width_percent, old.list_height_percent), (7, 33, 50));
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved.get("listWidth").is_none() && saved.get("listHeight").is_none());
     }
 
     #[test]
     fn settings_withoutCounter_loadsTheOriginalLook() {
         let old: Settings = serde_json::from_str(r#"{"pollMinutes":7,"pillScale":125}"#).unwrap();
         let old = old.clamped();
-        assert_eq!((old.poll_minutes, old.pill_scale, old.counter), (7, 125, CounterStyle::default()));
-        assert_eq!(CounterStyle::default(), CounterStyle { reviews: None, mine: None, braces: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 });
+        assert_eq!((old.poll_minutes, old.pill_scale, old.counter, old.auto_update), (7, 125, CounterStyle::default(), true));
+        assert_eq!(CounterStyle::default(), CounterStyle { reviews: None, mine: None, logo: "#ffffff".into(), rest_opacity: 55, hover_opacity: 8 });
     }
 
     #[test]
     fn clamped_counter_normalisesColoursAndClampsOpacity() {
-        let json = r##"{"pollMinutes":7,"counter":{"reviews":" FFAA00 ","mine":"#12345G","braces":"pink","restOpacity":5,"hoverOpacity":140.4}}"##;
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":" FFAA00 ","mine":"#12345G","logo":"pink","restOpacity":5,"hoverOpacity":140.4}}"##;
         let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
-        let expected = CounterStyle { reviews: Some("#ffaa00".into()), mine: None, braces: "#ffffff".into(), rest_opacity: 20, hover_opacity: 100 };
+        let expected = CounterStyle { reviews: Some("#ffaa00".into()), mine: None, logo: "#ffffff".into(), rest_opacity: 20, hover_opacity: 100 };
+        assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
+    }
+
+    #[test]
+    fn settings_090CounterWithBraces_loadsItAsTheLogoColour() {
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":"#f26b6b","mine":null,"braces":"#C792EA","restOpacity":80,"hoverOpacity":25}}"##;
+        let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
+        let expected = CounterStyle { reviews: Some("#f26b6b".into()), mine: None, logo: "#c792ea".into(), rest_opacity: 80, hover_opacity: 25 };
+        assert!(serde_json::to_value(&settings).unwrap()["counter"].get("braces").is_none());
         assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
     }
 
     #[test]
     fn settings_counterFieldsOfWrongShape_fallBackPerField() {
-        let json = r##"{"pollMinutes":7,"counter":{"reviews":7,"mine":"#00ff00","braces":null,"restOpacity":"high","hoverOpacity":[1]}}"##;
+        let json = r##"{"pollMinutes":7,"counter":{"reviews":7,"mine":"#00ff00","logo":null,"restOpacity":"high","hoverOpacity":[1]}}"##;
         let settings = serde_json::from_str::<Settings>(json).unwrap().clamped();
         let expected = CounterStyle { mine: Some("#00ff00".into()), ..CounterStyle::default() };
         assert_eq!((settings.poll_minutes, settings.counter), (7, expected));
@@ -826,7 +845,7 @@ pub(crate) mod tests {
     #[test]
     fn counter_serialisesHeatAsNullInCamelCase() {
         let value = serde_json::to_value(CounterStyle::default()).unwrap();
-        assert_eq!(value, serde_json::json!({"reviews":null,"mine":null,"braces":"#ffffff","restOpacity":55,"hoverOpacity":8}));
+        assert_eq!(value, serde_json::json!({"reviews":null,"mine":null,"logo":"#ffffff","restOpacity":55,"hoverOpacity":8}));
     }
 
     #[test]

@@ -10,7 +10,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 2. **Create a token** for each source you use:
    - **Azure DevOps PAT:** **Code (Read)** is the only scope it needs.
    - **GitHub token:** a classic token with `repo` (to read private repos) and `read:org` (to see review requests to your teams). A fine-grained token with *Pull requests: Read* and *Metadata: Read* on your orgs should also work, but some orgs must approve it first (not tested yet).
-3. **Fill in your workspace.** The counter shows `{!}` until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
+3. **Fill in your workspace.** The counter shows `!` beside Rado's bird until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
    - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token and click **Save**. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
@@ -27,9 +27,9 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ## Walkthrough
 
-<img src="docs/screenshots/counter.png" width="122" alt="The counter showing { 5 | 1 }">
+<img src="docs/screenshots/counter.png" width="70" alt="The counter showing 5, Rado's bird, then 1">
 
-**The counter.** Left: reviews waiting on you. Right: your own PRs that need work. Click it to open the list; drag it anywhere.
+**The counter.** Left of the bird: reviews waiting on you. Right: your own PRs that need work. Click it to open the list; drag it anywhere.
 
 <img src="docs/screenshots/review-list.png" width="640" alt="The review list">
 
@@ -49,11 +49,11 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 <img src="docs/screenshots/settings-general.png" width="640" alt="Settings, General tab in the light theme">
 
-**Settings → General.** Check every (polling interval), text size, list size, theme (shown: *Light*), browser, notifications and start with Windows.
+**Settings → General.** Check every (polling interval), text size, list width and height, theme (shown: *Light*), browser, notifications and start with Windows.
 
 <img src="docs/screenshots/settings-counter.png" width="640" alt="Settings, Counter tab with a live preview">
 
-**Settings → Counter.** A live preview, a colour for each number (heat by default) and for the braces, opacity at rest and near the cursor, and size. **Reset to default** brings back the original look.
+**Settings → Counter.** A live preview, a colour for each number (heat by default) and for the logo, opacity at rest and near the cursor, and size. **Reset to default** brings back the default look.
 
 <img src="src-tauri/icons/32x32.png" width="32" alt="Rado's tray icon">
 
@@ -63,18 +63,20 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 ### Counter
 
-- `{ reviews | mine }` in pixel braces, white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
+- `reviews`, Rado's bird, `mine`; the bird is white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
 - By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
-- `{!}`: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
+- `!` and the bird, with no mine number: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
 - Always on top. By default it sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
 - **Settings → Counter** changes its look; each change saves as you pick it.
-  - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Braces and bar*: the same without Heat.
+  - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Logo* (the bird and the `!`): the same without Heat. Settings saved by 0.9.0 keep their braces colour as the logo colour.
   - *Opacity at rest*: 20–100% (chips for 30, 55, 80 and 100%). *Opacity near the cursor*: 0–100% (chips for 0, 8, 25 and 50%).
-  - *Size*: 75% to 200%; − / + step by 25%, or type a whole percent. Sizes other than 100% and 200% are slightly soft. It grows around its right edge.
-  - **Reset to default**: heat numbers, white braces, 55% / 8% opacity, 100% size.
+  - *Size*: 75% to 200%; − / + step by 25%, or type a whole percent. It grows around its right edge.
+  - **Reset to default**: heat numbers, white logo, 55% / 8% opacity, 100% size.
 
 ### List
 
+- It opens against the screen edge on the counter's side (left or right), level with the counter and kept on screen, on the counter's screen. The counter is hidden while the list is open and comes back when it closes: ✕, **Esc**, or a click anywhere else.
+- *List width* (20–100% of the screen, chips for 25%, 33%, Half and Full; never under 360 px) and *List height* (25–100%, chips for Half and Full) are in **Settings → General**. The default is 33% wide and half the screen high. Pixel sizes saved by 0.9.0 are dropped for these defaults.
 - Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. Arrow keys, Home and End move between tabs.
 - The list reopens on the tab you last chose. Before you choose one, it opens the first of *Review*, *Re-review* and *Mine* that had rows at start. Each tab keeps its scroll position.
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
@@ -145,9 +147,11 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list size, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows, updates and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
+
+**Updates:** Rado checks GitHub Releases a minute after it starts and every 6 hours after that (release builds only; `app:dev` never checks or installs). With *Install updates automatically while the list is closed* on (the default), it downloads a newer release once the list is closed, quits, runs the installer with a small progress window and starts again. With it off, *Updates* shows the newer version and **Install and restart**. **Check now** asks straight away. Updates start with 0.9.1: 0.9.0 and earlier have no updater, so install 0.9.1 by hand once.
 
 ## Commands
 
@@ -176,9 +180,13 @@ Features collect on a `release/x.y.z` branch and ship together; `main` always eq
 2. Feature PRs target it (`gh pr create --base release/0.8.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog. For a single-commit PR, GitHub uses the commit's subject instead of the PR title, so give the commit the same conventional title.
 3. To release, on the release branch run `npm run release -- 0.8.0` (`--dry-run` prints the section first). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`, and writes a dated `## [0.8.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
 4. Edit the section, commit, and open the release PR from `release/0.8.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
-5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing.
+5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.8.0 origin/main && git push origin v0.8.0`. `.github/workflows/release.yml` builds and signs the installer and publishes it with the changelog section as the release notes; it fails if the section is missing. The release also carries `<installer>.sig` and `latest.json`, the feed installed copies read from `releases/latest/download/latest.json`.
 6. Cut the next release branch from main after tagging (`release/0.9.0`). A patch release also starts from main (`release/0.8.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again.
+
+### The update signing key
+
+Installed copies only accept an update signed with the private key whose public half is `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. The key was made with `npx tauri signer generate -w %USERPROFILE%\.tauri\rado.key`. Its contents and password are the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (Settings → Secrets and variables → Actions), which only `release.yml` reads. Keep a copy of both outside GitHub: secrets can't be read back, and without the key no installed Rado can update itself again; after a new key, everyone reinstalls by hand.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The Silkscreen font in `src/fonts/` is under the SIL Open Font License (`src/fonts/OFL.txt`).
+MIT, see [LICENSE](LICENSE). The Nunito font in `src/fonts/` is under the SIL Open Font License (`src/fonts/OFL.txt`).

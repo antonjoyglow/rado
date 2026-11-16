@@ -1,7 +1,7 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier, type UpdateState } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT, LIST_WIDTH, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP, updateText,
 } from "./format";
 import { h } from "./dom";
 import { counterPanel } from "./counter";
@@ -79,7 +79,8 @@ const POLL_CHOICES = [1, 3, 5, 10];
 const BROWSERS: [Browser, string][] = [["system", "System default"], ["edge", "Edge"], ["chrome", "Chrome"]];
 const THEMES: [Theme, string][] = [["system", "System"], ["dark", "Dark"], ["light", "Light"], ["highContrast", "High contrast"], ["custom", "Custom"]];
 const CUSTOM_COLOURS: [keyof CustomTheme, string][] = [["background", "Background"], ["text", "Text"], ["accent", "Accent"]];
-const LIST_SIZES: [string, number, number][] = [["Compact", 440, 600], ["Roomy", 640, 860], ["Large", 820, 1040]];
+const LIST_WIDTHS: [string, number][] = [["25%", 25], ["33%", 33], ["Half", 50], ["Full", 100]];
+const LIST_HEIGHTS: [string, number][] = [["Half", 50], ["Full", 100]];
 
 export function mountList(root: HTMLElement): void {
   // Until the first snapshot brings the saved theme.
@@ -88,6 +89,7 @@ export function mountList(root: HTMLElement): void {
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
+  const bird = h("span", { class: "bird", ariaHidden: "true" });
   const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
@@ -111,7 +113,7 @@ export function mountList(root: HTMLElement): void {
   });
 
   root.append(
-    h("header", {}, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
+    h("header", {}, bird, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
     status,
     strip.list,
     settingsPanel,
@@ -352,12 +354,34 @@ function renderSettings(
   });
   const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), text: note(), size: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note(), update: note(), autoUpdate: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
+
+  // Built once and refreshed from each snapshot, so download progress never rebuilds the General tab.
+  const updateLine = h("span");
+  const checkNow = h("button", { type: "button" }, "Check now");
+  checkNow.onclick = () => {
+    checkNow.disabled = true;
+    updateLine.textContent = "Checking GitHub for a newer Rado…";
+    void api.checkUpdate().finally(() => (checkNow.disabled = false));
+  };
+  const installNow = h("button", { type: "button", hidden: true }, "Install and restart");
+  installNow.onclick = () => {
+    installNow.disabled = true;
+    // Errors arrive with the snapshot, in UpdateState.error.
+    void api.installUpdate().finally(() => (installNow.disabled = false));
+  };
+  const showUpdate = (u: UpdateState) => {
+    updateLine.textContent = updateText(u, new Date());
+    installNow.hidden = !u.available || u.installing !== null;
+    if (u.error) show(n.update, "error", u.error);
+    else if (n.update.dataset.kind === "error") n.update.textContent = "";
+  };
+  showUpdate(snapshot.update);
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
   /** The General tab's fields, filled from `settings`. */
@@ -402,25 +426,26 @@ function renderSettings(
       else setTextScale(percent);
     };
 
-    const listWidth = h("input", { type: "number", min: String(LIST_WIDTH[0]), max: String(LIST_WIDTH[1]), value: String(settings.listWidth), class: "side", ariaLabel: "List width in px" });
-    const listHeight = h("input", { type: "number", min: String(LIST_HEIGHT[0]), max: String(LIST_HEIGHT[1]), value: String(settings.listHeight), class: "side", ariaLabel: "List height in px" });
-    const sizes = LIST_SIZES.map(([label, w, ht]) =>
-      h("button", { type: "button", class: "chip", title: `${w} × ${ht} px`, onclick: () => setListSize(w, ht) }, label),
-    );
-    const setListSize = (w: number, ht: number) => {
-      settings.listWidth = w;
-      settings.listHeight = ht;
-      listWidth.value = String(w);
-      listHeight.value = String(ht);
-      sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === w && LIST_SIZES[i][2] === ht)));
-      void save(n.size);
-    };
-    sizes.forEach((c, i) => (c.dataset.on = String(LIST_SIZES[i][1] === settings.listWidth && LIST_SIZES[i][2] === settings.listHeight)));
-    listWidth.onchange = listHeight.onchange = () => {
-      const w = parseWhole(listWidth.value, LIST_WIDTH);
-      const ht = parseWhole(listHeight.value, LIST_HEIGHT);
-      if (w === null || ht === null) fail(n.size, `Use whole pixels: width ${LIST_WIDTH[0]}–${LIST_WIDTH[1]}, height ${LIST_HEIGHT[0]}–${LIST_HEIGHT[1]}.`);
-      else setListSize(w, ht);
+    /** A list side as a percent of the screen: chips, or a typed whole number. */
+    const listSide = (key: "listWidthPercent" | "listHeightPercent", label: string, range: readonly [number, number], choices: [string, number][], msg: HTMLElement) => {
+      const input = h("input", { type: "number", min: String(range[0]), max: String(range[1]), value: String(settings[key]), class: "scale", ariaLabel: `${label} in percent of the screen` });
+      const chips = choices.map(([text, p]) => h("button", { type: "button", class: "chip", title: `${p}% of the screen`, onclick: () => set(p) }, text));
+      const showValue = (p: number) => {
+        input.value = String(p);
+        chips.forEach((c, i) => (c.dataset.on = String(choices[i][1] === p)));
+      };
+      const set = (p: number) => {
+        settings[key] = p;
+        showValue(p);
+        void save(msg);
+      };
+      showValue(settings[key]);
+      input.onchange = () => {
+        const p = parseWhole(input.value, range);
+        if (p === null) fail(msg, `Use a whole number from ${range[0]} to ${range[1]}.`);
+        else set(p);
+      };
+      return h("div", { class: "field" }, caption(`${label} (${range[0]}–${range[1]}% of the screen)`, msg), h("span", { class: "inline" }, ...chips, input, "%"));
     };
 
     const browsers = BROWSERS.map(([value, label]) =>
@@ -465,18 +490,22 @@ function renderSettings(
     });
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
 
+    const autoUpdate = h("input", { type: "checkbox", ariaLabel: "Install updates automatically", checked: settings.autoUpdate, onchange: () => { settings.autoUpdate = autoUpdate.checked; void save(n.autoUpdate); } });
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
 
     return [
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).
       h("div", { class: "field" }, caption("Check every", n.minutes), h("span", { class: "inline" }, ...chips, minutes, "min")),
       h("div", { class: "field" }, caption(`Text size (${TEXT_SCALE[0]}–${TEXT_SCALE[1]}%)`, n.text), h("span", { class: "inline" }, ...textChips, textSmaller, textScale, "%", textBigger)),
-      h("div", { class: "field" }, caption("List size (shrinks to fit the screen)", n.size), h("span", { class: "inline" }, ...sizes, listWidth, "×", listHeight, "px")),
+      listSide("listWidthPercent", "List width", LIST_WIDTH_PERCENT, LIST_WIDTHS, n.width),
+      listSide("listHeightPercent", "List height", LIST_HEIGHT_PERCENT, LIST_HEIGHTS, n.height),
       h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
       customColours,
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
+      h("div", { class: "field" }, caption("Updates", n.update), h("span", { class: "inline" }, updateLine, checkNow, installNow)),
+      h("label", { class: "check" }, autoUpdate, "Install updates automatically while the list is closed", n.autoUpdate),
       h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
     ];
   };
@@ -501,7 +530,10 @@ function renderSettings(
   showTab(startTab);
   panel.replaceChildren(strip.list, ...SETTINGS_TABS.map((t) => panels[t.key]));
   return {
-    update: workspaces.update,
+    update: (s) => {
+      workspaces.update(s);
+      showUpdate(s.update);
+    },
     select: (key) => {
       showTab(key);
       onSelect(key);

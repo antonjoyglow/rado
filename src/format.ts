@@ -1,4 +1,4 @@
-import type { Member, PrRef, ReviewItem } from "./api";
+import type { Member, PrRef, ReviewItem, UpdateState } from "./api";
 
 /** "WebApp !3353" on Azure DevOps, "rado #4" on GitHub. */
 export function prLabel(pr: PrRef): string {
@@ -65,11 +65,11 @@ export function parseScale(text: string): number | null {
   return parseWhole(text, [SCALE_MIN, SCALE_MAX]);
 }
 
-/** Allowed review list width and height in px, matching `LIST_*_RANGE` in `store.rs`. */
-export const LIST_WIDTH: readonly [number, number] = [360, 1600];
-export const LIST_HEIGHT: readonly [number, number] = [400, 1600];
+/** Allowed review list width and height in percent of its screen, matching `LIST_*_PERCENT_RANGE` in `store.rs`. */
+export const LIST_WIDTH_PERCENT: readonly [number, number] = [20, 100];
+export const LIST_HEIGHT_PERCENT: readonly [number, number] = [25, 100];
 
-/** A typed whole number inside `range`, such as a list width in px. */
+/** A typed whole number inside `range`, such as a list width in percent. */
 export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
   const trimmed = text.trim();
   // Number("") is 0, which would pass any range that starts at 0.
@@ -124,4 +124,13 @@ export function parseMinutes(text: string): number | null {
   // Number("") is 0, which would pass any range that starts at 0.
   const value = trimmed === "" ? NaN : Number(trimmed);
   return Number.isInteger(value) && value >= 1 && value <= 120 ? value : null;
+}
+
+/** The Updates line in Settings → General. */
+export function updateText(u: UpdateState, now: Date): string {
+  if (u.installing !== null) return `Downloading Rado ${u.available ?? ""}: ${u.installing}%. Rado restarts once it is installed.`;
+  if (!u.checkedAt) return `Rado ${u.current} · not checked yet`;
+  const checked = `checked ${ago(u.checkedAt, now)}`;
+  if (u.available) return `Rado ${u.current} · ${u.available} available · ${checked}`;
+  return u.error ? `Rado ${u.current} · ${checked}` : `Rado ${u.current} · up to date · ${checked}`;
 }
