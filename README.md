@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" width="128" height="128" alt="Rado's logo: a punk shoebill"></p>
+
 # Rado
 
 A floating `{ reviews | mine }` that counts the Azure DevOps and GitHub pull requests waiting on your review, ranks them, and notifies you when a new one arrives. Tauri 2: a Rust backend with a vanilla TypeScript UI.

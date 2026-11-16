@@ -965,7 +965,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &refresh, &quit_item])?;
     TrayIconBuilder::with_id("tray")
-        .icon(app.default_window_icon().cloned().expect("bundled icon"))
+        // The tray gets its own filled tile: the app icon's thin lines vanish at 16 px.
+        .icon(tauri::include_image!("icons/tray.png"))
         .tooltip("Rado")
         .menu(&menu)
         .show_menu_on_left_click(false)
