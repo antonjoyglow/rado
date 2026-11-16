@@ -31,7 +31,6 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-clipboard-manager = "2"
-tauri-plugin-updater = "2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["time", "sync", "macros"] }
 keyring = "4"

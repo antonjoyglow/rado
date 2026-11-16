@@ -1,4 +1,4 @@
-import type { Member, PrRef, ReviewItem, UpdateState } from "./api";
+import type { Member, PrRef, ReviewItem } from "./api";
 
 /** "WebApp !3353" on Azure DevOps, "rado #4" on GitHub. */
 export function prLabel(pr: PrRef): string {
@@ -124,13 +124,4 @@ export function parseMinutes(text: string): number | null {
   // Number("") is 0, which would pass any range that starts at 0.
   const value = trimmed === "" ? NaN : Number(trimmed);
   return Number.isInteger(value) && value >= 1 && value <= 120 ? value : null;
-}
-
-/** The Updates line in Settings → General. */
-export function updateText(u: UpdateState, now: Date): string {
-  if (u.installing !== null) return `Downloading Rado ${u.available ?? ""}: ${u.installing}%. Rado restarts once it is installed.`;
-  if (!u.checkedAt) return `Rado ${u.current} · not checked yet`;
-  const checked = `checked ${ago(u.checkedAt, now)}`;
-  if (u.available) return `Rado ${u.current} · ${u.available} available · ${checked}`;
-  return u.error ? `Rado ${u.current} · ${checked}` : `Rado ${u.current} · up to date · ${checked}`;
 }
