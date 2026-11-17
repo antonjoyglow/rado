@@ -120,15 +120,15 @@ body[data-view="list"] #app { display: flex; flex-direction: column; height: 100
 
 header { display: flex; align-items: center; gap: 4px; padding: 10px 10px 6px 14px; }
 header h1 { flex: 1; margin: 0; font-size: calc(15px * var(--text-scale, 1)); }
-/* The counter's bird at the same 1.35 times the title's size, in the theme's text colour. */
+/* The counter's bird (bird.ts) at the same 1.35 times the title's size, in the theme's text colour. */
 header .bird {
   flex: none;
   width: calc(20px * var(--text-scale, 1) * 200 / 240);
   height: calc(20px * var(--text-scale, 1));
   margin-right: 4px;
-  background: var(--fg);
-  mask: url("./counter-logo.svg") center / contain no-repeat;
+  color: var(--fg);
 }
+header .bird .jaw { transform-box: view-box; transform-origin: 133.5px 121.5px; }
 .icon { width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; }
 .icon:hover { background: var(--hover); }
 

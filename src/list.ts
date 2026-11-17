@@ -4,6 +4,7 @@ import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
+import { bird } from "./bird";
 import { counterPanel } from "./counter";
 import { serialSaver } from "./save";
 import { extensionMessage } from "./extension";
@@ -95,7 +96,7 @@ export function mountList(root: HTMLElement): void {
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
-  const bird = h("span", { class: "bird", ariaHidden: "true" });
+  const logo = bird();
   const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
@@ -119,7 +120,7 @@ export function mountList(root: HTMLElement): void {
   });
 
   root.append(
-    h("header", {}, bird, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
+    h("header", {}, logo, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
     status,
     strip.list,
     settingsPanel,
