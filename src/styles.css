@@ -12,7 +12,7 @@
   --normal: #a35f08;
   --low: #8a9099;
   --clear: var(--accent);
-  --scroll-thumb: color-mix(in srgb, var(--muted) 70%, var(--bg));
+  --scroll-thumb: color-mix(in srgb, var(--muted) 80%, var(--bg));
   font: 13px/1.4 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--fg);
 }
