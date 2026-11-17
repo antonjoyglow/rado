@@ -176,3 +176,8 @@ export async function watchSnapshot(render: (s: Snapshot) => void): Promise<void
   await listen<Snapshot>("snapshot", (e) => render(e.payload));
   render(await api.snapshot());
 }
+
+/** Once per refresh that brought PRs newly waiting on your review, with how many. */
+export async function watchFresh(on: (count: number) => void): Promise<void> {
+  await listen<number>("fresh", (e) => on(e.payload));
+}
