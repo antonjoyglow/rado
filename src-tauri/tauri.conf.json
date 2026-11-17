@@ -45,7 +45,11 @@
       "../browser-extension/manifest.json": "browser-extension/manifest.json",
       "../browser-extension/background.js": "browser-extension/background.js",
       "../browser-extension/grouping.js": "browser-extension/grouping.js",
-      "../browser-extension/title.js": "browser-extension/title.js"
+      "../browser-extension/title.js": "browser-extension/title.js",
+      "../browser-extension/icon-16.png": "browser-extension/icon-16.png",
+      "../browser-extension/icon-32.png": "browser-extension/icon-32.png",
+      "../browser-extension/icon-48.png": "browser-extension/icon-48.png",
+      "../browser-extension/icon-128.png": "browser-extension/icon-128.png"
     },
     "windows": {
       "nsis": {
