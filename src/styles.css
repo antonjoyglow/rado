@@ -158,7 +158,7 @@ header .bird .jaw { transform-box: view-box; transform-origin: 133.5px 121.5px; 
 
 .body { flex: 1; overflow-y: auto; padding: 4px 0 10px; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
 
-/* Spacing sized so all seven list tabs fit a 440 px window with two-digit counts; otherwise the strip scrolls sideways. */
+/* The list's tabs share the window's width and never shrink below their text, so the strip scrolls sideways below about 520 px. */
 .tabs { flex: none; display: flex; padding: 0 2px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; border-bottom: 1px solid var(--line); }
 .tabs[hidden] { display: none; }
 .settings .tabs { gap: 8px; padding: 0 8px; }
@@ -167,10 +167,12 @@ header .bird .jaw { transform-box: view-box; transform-origin: 133.5px 121.5px; 
   border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
   font-size: calc(12px * var(--text-scale, 1)); font-weight: 600; white-space: nowrap;
 }
-.tab .n { color: var(--muted); font-weight: 400; font-size: calc(11px * var(--text-scale, 1)); }
-.tab[data-empty="true"] { color: var(--muted); font-weight: 400; }
+#app > .tabs .tab { flex: 1 0 auto; justify-content: center; padding: 8px 8px 6px; gap: 4px; }
+.tab .n { color: var(--muted); font-weight: 400; font-size: calc(11px * var(--text-scale, 1)); font-variant-numeric: tabular-nums; }
+.tab[data-empty="true"] { color: var(--muted); }
 .tab:hover { background: var(--hover); }
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.tab[aria-selected="true"] .n { color: var(--accent); }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tab .next-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .tab:not([data-next="true"]) .next-dot { display: none; }
