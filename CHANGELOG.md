@@ -2,6 +2,13 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
+## [0.9.2] - 2026-11-17
+
+### Fixes
+
+- extension: ship the tab groups extension and show its status in Settings (#34)
+- settings: remove the Quit button from General (#33)
+
 ## [0.9.1] - 2026-11-16
 
 ### Features
