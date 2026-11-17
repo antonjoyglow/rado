@@ -41,6 +41,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../browser-extension/manifest.json": "browser-extension/manifest.json",
+      "../browser-extension/background.js": "browser-extension/background.js",
+      "../browser-extension/grouping.js": "browser-extension/grouping.js",
+      "../browser-extension/title.js": "browser-extension/title.js"
+    },
     "windows": {
       "nsis": {
         "template": "windows/installer.nsi"

@@ -217,6 +217,9 @@ header .bird {
 .settings button:disabled { opacity: 0.4; }
 .settings button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); }
 .chip[data-on="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.settings .extension { display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.settings .extension .steps { user-select: text; }
+.settings .extension:empty { display: none; }
 .settings .caption { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .note { font-size: calc(12px * var(--text-scale, 1)); }
 .note[data-kind="error"] { color: var(--urgent); }

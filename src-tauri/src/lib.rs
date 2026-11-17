@@ -1,5 +1,6 @@
 mod ado;
 mod export;
+mod extension;
 mod github;
 mod group;
 // Shared with the MCP server binary, which uses the parts the app doesn't.
@@ -1071,7 +1072,9 @@ pub fn run() {
             delete_workspace,
             get_autostart,
             set_autostart,
-            releases::open_newer_release
+            releases::open_newer_release,
+            extension::extension_status,
+            extension::set_up_extension
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
