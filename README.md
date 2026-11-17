@@ -148,7 +148,7 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows and **Quit**. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications and start with Windows; **Quit** is on the tray icon's right-click menu. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
 
