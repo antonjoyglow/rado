@@ -170,7 +170,6 @@ export const api = {
   openNewerRelease: () => invoke<void>("open_newer_release"),
   extensionStatus: (browser: "edge" | "chrome") => invoke<ExtensionStatus>("extension_status", { browser }),
   setUpExtension: (browser: "edge" | "chrome") => invoke<void>("set_up_extension", { browser }),
-  quit: () => invoke<void>("quit"),
 };
 
 export async function watchSnapshot(render: (s: Snapshot) => void): Promise<void> {

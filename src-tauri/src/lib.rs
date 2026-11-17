@@ -891,7 +891,6 @@ fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     if enabled { launcher.enable() } else { launcher.disable() }.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
 fn quit(app: AppHandle) {
     let _ = app.save_window_state(StateFlags::POSITION);
     app.exit(0);
@@ -1075,8 +1074,7 @@ pub fn run() {
             set_autostart,
             releases::open_newer_release,
             extension::extension_status,
-            extension::set_up_extension,
-            quit
+            extension::set_up_extension
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
