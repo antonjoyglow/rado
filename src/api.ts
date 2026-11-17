@@ -105,6 +105,12 @@ export interface Settings {
 }
 
 export type Browser = "system" | "edge" | "chrome";
+/** The tab groups extension in Edge or Chrome. `folder` is where the installer put it; `from` is set when the browser loads it from elsewhere. */
+export type ExtensionStatus = { folder: string } & (
+  | { state: "loaded"; from: string | null }
+  | { state: "gone"; path: string }
+  | { state: "off" | "notLoaded" }
+);
 /** "system" follows Windows' light or dark app mode. */
 export type Theme = "system" | "dark" | "light" | "highContrast" | "custom";
 /** The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest. */
@@ -162,6 +168,8 @@ export const api = {
   autostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   openNewerRelease: () => invoke<void>("open_newer_release"),
+  extensionStatus: (browser: "edge" | "chrome") => invoke<ExtensionStatus>("extension_status", { browser }),
+  setUpExtension: (browser: "edge" | "chrome") => invoke<void>("set_up_extension", { browser }),
   quit: () => invoke<void>("quit"),
 };
 

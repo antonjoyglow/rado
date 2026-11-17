@@ -6,6 +6,7 @@ import {
 import { h } from "./dom";
 import { counterPanel } from "./counter";
 import { serialSaver } from "./save";
+import { extensionMessage } from "./extension";
 import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
   defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
@@ -369,6 +370,38 @@ function renderSettings(
   void api.autostart().then((on) => (autostart.checked = on));
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
+  // Outlives rebuilds like `autostart`. Chromium writes its profile files a few seconds after Load unpacked,
+  // so after Set up the status is re-read on focus and every few seconds while it is on screen, until it is loaded.
+  const extension = h("div", { class: "extension", role: "status" });
+  let extensionRun = 0;
+  let settingUp = false;
+  const checkExtension = () => {
+    const browser = settings.browser;
+    const run = ++extensionRun;
+    if (browser === "system") return extension.replaceChildren();
+    api.extensionStatus(browser).then((s) => {
+      if (run !== extensionRun) return;
+      if (s.state === "loaded") settingUp = false;
+      const { text, steps } = extensionMessage(s, browser);
+      const setUp = h("button", { type: "button", onclick: () => {
+        settingUp = true;
+        api.setUpExtension(browser).catch((e) => fail(n.browser, e));
+      } }, "Set up");
+      extension.replaceChildren(h("span", { class: "inline" }, text, steps && setUp));
+      if (steps) extension.append(h("span", { class: "steps" }, steps));
+    }, (e) => {
+      if (run === extensionRun) extension.replaceChildren(String(e));
+    });
+  };
+  const recheck = () => {
+    if (!extension.isConnected) {
+      window.removeEventListener("focus", recheck);
+      clearInterval(extensionTimer);
+    } else if (settingUp && !document.hidden && extension.offsetParent !== null) checkExtension();
+  };
+  window.addEventListener("focus", recheck);
+  const extensionTimer = setInterval(recheck, 3000);
+
   /** The General tab's fields, filled from `settings`. */
   const generalFields = (): HTMLElement[] => {
     const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
@@ -439,8 +472,10 @@ function renderSettings(
     const setBrowser = (value: Browser) => {
       settings.browser = value;
       browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === value)));
+      checkExtension();
       void save(n.browser);
     };
+    checkExtension();
 
     const themes = THEMES.map(([value, label]) =>
       h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
@@ -485,7 +520,7 @@ function renderSettings(
       listSide("listHeightPercent", "List height", LIST_HEIGHT_PERCENT, LIST_HEIGHTS, n.height),
       h("div", { class: "field" }, caption("Theme", n.theme), h("span", { class: "inline" }, ...themes)),
       customColours,
-      h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
+      h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers), extension),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
       h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
