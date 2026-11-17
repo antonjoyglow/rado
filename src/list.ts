@@ -1,10 +1,11 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
-import { bird } from "./bird";
+import { bird, glow, yawn } from "./bird";
+import { glows, newReviewsText, refreshTitle, showStatus, statusLine } from "./status";
 import { counterPanel } from "./counter";
 import { serialSaver } from "./save";
 import { extensionMessage } from "./extension";
@@ -92,12 +93,13 @@ export function mountList(root: HTMLElement): void {
   const statusText = h("div");
   const newerText = h("span");
   const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void api.openNewerRelease() }, "Download"));
-  const status = h("div", { class: "status" }, statusText, newerLine);
+  const status = h("div", { class: "status", hidden: true }, statusText, newerLine);
+  const announcer = h("div", { class: "visually-hidden", role: "status" });
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
   const logo = bird();
-  const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
+  const refreshButton = h("button", { class: "icon refresh", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, h("span", { class: "refresh-glyph" }, "↻"));
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
   const workspace = workspaceChip(() => showSettings(true, "workspaces"));
@@ -125,6 +127,7 @@ export function mountList(root: HTMLElement): void {
     strip.list,
     settingsPanel,
     body,
+    announcer,
   );
   strip.select(tab ?? "needsReview");
 
@@ -161,18 +164,30 @@ export function mountList(root: HTMLElement): void {
 
   const renderStatus = () => {
     if (!snapshot) return;
+    const now = new Date();
+    const line = statusLine(snapshot, pollingSince, now);
     statusText.replaceChildren();
-    status.dataset.kind = snapshot.polling ? "busy" : snapshot.error ? "error" : "ok";
-    if (snapshot.polling) {
-      const seconds = pollingSince ? Math.round((Date.now() - pollingSince) / 1000) : 0;
-      statusText.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
-    } else if (snapshot.error) {
-      statusText.append(snapshot.error);
-    } else {
-      statusText.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
-    }
+    status.dataset.kind = line?.kind ?? "ok";
+    if (line?.kind === "busy") statusText.append(h("span", { class: "spinner" }), line.text);
+    else if (line) statusText.append(line.text);
     if (snapshot.warning) statusText.append(h("div", { class: "hint" }, snapshot.warning));
+    status.hidden = !showStatus(line, snapshot.warning, snapshot.newerRelease);
+    refreshButton.dataset.busy = String(snapshot.polling);
+    refreshButton.title = refreshTitle(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
   };
+
+  // A hidden list can't have focus (it hides when it loses it), so a yawn waits for the next focus.
+  let pendingYawn = 0;
+  let yawning: Animation | null = null;
+  const playYawn = (count: number) => {
+    if (yawning?.playState === "running") return;
+    yawning = yawn(logo);
+    announcer.textContent = newReviewsText(count);
+  };
+  void watchFresh((count) => {
+    if (document.hasFocus()) playYawn(count);
+    else pendingYawn += count;
+  });
 
   const renderBody = () => {
     if (!snapshot) return;
@@ -208,6 +223,7 @@ export function mountList(root: HTMLElement): void {
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     const rescaled = s.settings.textScale !== snapshot?.settings.textScale;
+    const refreshed = glows(snapshot, s);
     snapshot = s;
     applyTheme(document.documentElement, s.settings.theme, s.settings.customTheme);
     document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
@@ -218,10 +234,15 @@ export function mountList(root: HTMLElement): void {
     renderStatus();
     renderBody();
     if (rescaled) revealTab();
+    if (refreshed) glow(logo);
   });
   setInterval(renderStatus, 1000);
-  // Rows opened since the last render change which review is next.
-  window.addEventListener("focus", renderBody);
+  window.addEventListener("focus", () => {
+    // Rows opened since the last render change which review is next.
+    renderBody();
+    if (pendingYawn > 0) playYawn(pendingYawn);
+    pendingYawn = 0;
+  });
   window.addEventListener("keydown", (e) => {
     const step = workspaceStep(e);
     if (step !== null && snapshot && !isTyping(e.target)) {
