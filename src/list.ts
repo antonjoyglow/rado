@@ -488,7 +488,6 @@ function renderSettings(
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers)),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
-      h("div", { class: "end" }, h("button", { type: "button", onclick: () => void api.quit() }, "Quit")),
     ];
   };
   const counter = counterPanel(settings, { note, caption, fail, save });

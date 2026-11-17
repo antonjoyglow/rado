@@ -162,7 +162,6 @@ export const api = {
   autostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   openNewerRelease: () => invoke<void>("open_newer_release"),
-  quit: () => invoke<void>("quit"),
 };
 
 export async function watchSnapshot(render: (s: Snapshot) => void): Promise<void> {
