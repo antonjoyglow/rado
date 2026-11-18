@@ -342,7 +342,11 @@ fn apply(app: &AppHandle, workspace_id: &str, generation: u64, ado: Poll<AdoPoll
         }
     });
     let Some(applied) = applied else { return };
-    if applied.notify && !applied.fresh.is_empty() {
+    if applied.fresh.is_empty() {
+        return;
+    }
+    let _ = app.emit("fresh", applied.fresh.len());
+    if applied.notify {
         let title = match applied.fresh.len() {
             1 => "A PR needs you".to_string(),
             n => format!("{n} PRs need you"),
