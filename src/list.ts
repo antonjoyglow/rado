@@ -348,6 +348,8 @@ function ageCell(item: ReviewItem): HTMLElement {
 }
 
 function flash(button: HTMLButtonElement, text: string): void {
+  // A second click during the note would save the note as the label and end the note early.
+  if (button.dataset.flash) return;
   const label = button.textContent;
   button.textContent = text;
   button.dataset.flash = "true";
