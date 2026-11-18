@@ -91,12 +91,14 @@ pub enum Poll<T> {
     Fresh(T),
 }
 
-pub struct AdoPoll {
-    pub prs: Vec<ado::PullRequest>,
-    pub my_id: String,
-    pub teams: HashSet<String>,
-    pub threads: HashMap<i64, ado::PrThreads>,
-    pub urls: HashMap<i64, String>,
+impl<T> Poll<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Poll<U> {
+        match self {
+            Poll::Off => Poll::Off,
+            Poll::Failed(error) => Poll::Failed(error),
+            Poll::Fresh(answer) => Poll::Fresh(f(answer)),
+        }
+    }
 }
 
 /// What a poll needs, read under the lock with the generation it belongs to.
@@ -105,8 +107,6 @@ pub struct Ticket {
     pub generation: u64,
     pub pat: Result<Option<String>, String>,
     pub github_token: Result<Option<String>, String>,
-    /// A copy of the vote memory, for choosing which PRs' threads to fetch.
-    pub memory: VoteMemory,
 }
 
 /// What a filed poll asks the app to show.
@@ -275,12 +275,12 @@ impl Session {
             return None;
         }
         self.polling = true;
-        Some(Ticket { workspace, generation: self.generation, pat, github_token, memory: self.ws.memory.clone() })
+        Some(Ticket { workspace, generation: self.generation, pat, github_token })
     }
 
     /// Files a poll's result under the active workspace and saves what it changed. Nothing happens when the poll is
     /// stale: a switch, a new token or a changed source since `generation` was handed out.
-    pub fn apply_poll(&mut self, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>, now: DateTime<Utc>) -> Outcome {
+    pub fn apply_poll(&mut self, generation: u64, ado: Poll<ado::Fetched>, github: Poll<github::Fetched>, now: DateTime<Utc>) -> Outcome {
         let Some(applied) = self.file_poll(generation, ado, github, now) else { return Outcome::default() };
         let id = &self.settings.active_workspace;
         if let Some(memory) = &applied.memory {
@@ -295,7 +295,8 @@ impl Session {
         applied.outcome
     }
 
-    fn file_poll(&mut self, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>, now: DateTime<Utc>) -> Option<Applied> {
+    fn file_poll(&mut self, generation: u64, ado: Poll<ado::Fetched>, github: Poll<github::Fetched>, now: DateTime<Utc>) -> Option<Applied> {
+        // Before digesting: Azure DevOps's digest updates the vote memory, which a stale poll must not touch.
         if self.generation != generation {
             return None;
         }
@@ -311,81 +312,53 @@ impl Session {
         // Sources whose full list is in hand (fresh without a warning), and sources with no token saved.
         let mut answered: HashSet<Provider> = HashSet::new();
         let mut off: HashSet<Provider> = HashSet::new();
-        let mut ado_prs = None;
-        let mut github_refs = None;
+        let mut refs = HashMap::new();
         let mut missing = Vec::new();
-        let keep = |provider: Provider, items: &mut Vec<ReviewItem>, urls: &mut HashMap<i64, String>| {
-            for item in old_items.iter().filter(|i| i.provider == provider) {
-                if let Some(url) = old_urls.get(&item.id) {
-                    urls.insert(item.id, url.clone());
+        // In this order: the status line's errors, the queue's missing sources and the announcements follow it.
+        let polls = [
+            (Provider::Ado, ado.map(|fetched| ado::digest(fetched, &mut ws.memory, now))),
+            (Provider::GitHub, github.map(|fetched| github::digest(fetched, now))),
+        ];
+        for (provider, poll) in polls {
+            match poll {
+                Poll::Off => {
+                    ws.related.retain(|r| r.provider != provider);
+                    ws.baseline.remove(&provider);
+                    off.insert(provider);
                 }
-                items.push(item.clone());
-            }
-        };
-        match ado {
-            Poll::Off => {
-                ws.related.clear();
-                ws.baseline.remove(&Provider::Ado);
-                off.insert(Provider::Ado);
-            }
-            Poll::Failed(error) => {
-                errors.push(error);
-                missing.push(queue::AZURE_DEV_OPS.to_string());
-                keep(Provider::Ado, &mut items, &mut urls);
-            }
-            Poll::Fresh(poll) => {
-                fresh_sources.push((Provider::Ado, false));
-                answered.insert(Provider::Ado);
-                let me = score::Me { id: &poll.my_id, teams: &poll.teams };
-                let mut ranked = score::rank(&poll.prs, &me, &mut ws.memory, now);
-                score::attach_threads(&mut ranked, &poll.threads, &was_stale, now);
-                let mine: HashSet<i64> = ranked.iter().map(|i| i.id).collect();
-                let branches: HashSet<&str> = ranked.iter().map(|i| i.branch.as_str()).collect();
-                ws.related = poll
-                    .prs
-                    .iter()
-                    .filter(|pr| !mine.contains(&pr.pull_request_id) && branches.contains(pr.branch()))
-                    .map(|pr| group::Related {
-                        id: pr.pull_request_id,
-                        repo: pr.repository.name.clone(),
-                        title: pr.title.clone(),
-                        branch: pr.branch().to_string(),
-                        url: poll.urls.get(&pr.pull_request_id).cloned().unwrap_or_default(),
-                        created_at: pr.creation_date,
-                    })
-                    .collect();
-                applied.memory = Some(ws.memory.clone());
-                urls.extend(poll.urls);
-                items.extend(ranked);
-                ado_prs = Some(poll.prs);
-            }
-        }
-        match github {
-            Poll::Off => {
-                ws.baseline.remove(&Provider::GitHub);
-                off.insert(Provider::GitHub);
-            }
-            Poll::Failed(error) => {
-                errors.push(error);
-                missing.push(queue::GITHUB.to_string());
-                keep(Provider::GitHub, &mut items, &mut urls);
-            }
-            Poll::Fresh(fetched) => {
-                fresh_sources.push((Provider::GitHub, fetched.warning.is_some()));
-                match &fetched.warning {
-                    Some(warning) => errors.push(format!("GitHub: {warning}")),
-                    None => {
-                        answered.insert(Provider::GitHub);
+                // Its PRs, links and related PRs from the last good poll stay.
+                Poll::Failed(error) => {
+                    errors.push(error);
+                    missing.push(export::source_name(provider).to_string());
+                    for item in old_items.iter().filter(|i| i.provider == provider) {
+                        if let Some(url) = old_urls.get(&item.id) {
+                            urls.insert(item.id, url.clone());
+                        }
+                        items.push(item.clone());
                     }
                 }
-                if fetched.partial {
-                    missing.push(queue::GITHUB.to_string());
+                Poll::Fresh(mut poll) => {
+                    fresh_sources.push((provider, poll.warning.is_some()));
+                    match poll.warning {
+                        Some(warning) => errors.push(warning),
+                        None => {
+                            answered.insert(provider);
+                        }
+                    }
+                    if poll.queue_partial {
+                        missing.push(export::source_name(provider).to_string());
+                    }
+                    // Only Azure DevOps keeps a vote memory; its digest has just updated it.
+                    if provider == Provider::Ado {
+                        applied.memory = Some(ws.memory.clone());
+                    }
+                    score::attach_threads(&mut poll.items, &poll.threads, &was_stale, now);
+                    ws.related.retain(|r| r.provider != provider);
+                    ws.related.extend(poll.related);
+                    urls.extend(poll.urls);
+                    items.extend(poll.items);
+                    refs.insert(provider, poll.queue_refs);
                 }
-                let (mut ranked, gh_urls, threads) = github::items(&fetched, now);
-                score::attach_threads(&mut ranked, &threads, &was_stale, now);
-                urls.extend(gh_urls);
-                items.extend(ranked);
-                github_refs = Some(github::queue_refs(&fetched));
             }
         }
         items.sort_by(|a, b| b.score.cmp(&a.score).then(b.age_hours.cmp(&a.age_hours)));
@@ -415,8 +388,7 @@ impl Session {
         applied.outcome.notify = self.settings.notify;
         // At least one source is fresh here; a failed one is named in the queue so an agent knows its PRs are missing.
         let ctx = export::Context { organization: &organization, poll_minutes: self.settings.poll_minutes, now };
-        let sources = export::Sources { ado: ado_prs.as_deref(), github: github_refs.as_ref(), missing };
-        applied.queue = Some(export::queue(&ws.items, &sources, &ws.memory, &ws.urls, &ctx));
+        applied.queue = Some(export::queue(&ws.items, &export::Sources { refs, missing }, &ws.urls, &ctx));
         Some(applied)
     }
 
@@ -659,6 +631,39 @@ mod tests {
     use crate::store::tests::{MemorySecrets, TempDir};
     use crate::workspace::github_key;
 
+    /// An Azure DevOps PR on `branch`, with me (`me-id`) as a reviewer who cast `vote`, or not a reviewer at all.
+    fn ado_pr(id: i64, branch: &str, my_vote: Option<i32>) -> ado::PullRequest {
+        let reviewers = my_vote
+            .map(|vote| ado::Reviewer { id: "me-id".into(), display_name: "Me".into(), vote, is_required: false, is_container: false, has_declined: false })
+            .into_iter()
+            .collect();
+        ado::PullRequest {
+            pull_request_id: id,
+            title: format!("PR {id}"),
+            created_by: ado::IdentityRef { id: "author-id".into(), display_name: "Author".into() },
+            creation_date: Utc::now() - chrono::Duration::hours(8),
+            repository: ado::Repository {
+                id: "repo-id".into(),
+                name: "Api".into(),
+                project: ado::Project { id: "project-id".into(), name: "Contoso".into() },
+            },
+            source_ref_name: format!("refs/heads/{branch}"),
+            target_ref_name: "refs/heads/dev".into(),
+            is_draft: false,
+            reviewers,
+            last_merge_source_commit: Some(ado::Commit { commit_id: "sha1".into() }),
+        }
+    }
+
+    fn ado(prs: Vec<ado::PullRequest>) -> Poll<ado::Fetched> {
+        let urls = prs.iter().map(|pr| (pr.pull_request_id, format!("https://ado/{}", pr.pull_request_id))).collect();
+        Poll::Fresh(ado::Fetched { prs, my_id: "me-id".into(), teams: HashSet::new(), threads: HashMap::new(), urls })
+    }
+
+    fn related_ids(s: &Session) -> Vec<i64> {
+        s.ws.related.iter().map(|r| r.id).collect()
+    }
+
     fn pr(id: i64, state: ReviewState) -> ReviewItem {
         let facts = PrFacts {
             id,
@@ -714,7 +719,7 @@ mod tests {
     }
 
     /// Files a poll at the current generation and returns what it would save.
-    fn file(s: &mut Session, ado: Poll<AdoPoll>, github: Poll<github::Fetched>) -> Applied {
+    fn file(s: &mut Session, ado: Poll<ado::Fetched>, github: Poll<github::Fetched>) -> Applied {
         let generation = s.generation;
         s.file_poll(generation, ado, github, Utc::now()).expect("current poll")
     }
@@ -1114,6 +1119,92 @@ mod tests {
         assert_eq!(warning, None);
         assert_eq!(loaded.status().saved["b"], Saved { pat: true, github_token: true });
         assert_eq!(loaded.settings.active_workspace, "a");
+    }
+
+    // Filing an Azure DevOps poll.
+
+    #[test]
+    fn applyPoll_freshAzureDevOps_listsMine_relatesOthersOnTheBranch_andQueuesThem() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-fresh");
+        let prs = vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/x", None), ado_pr(103, "feature/y", None)];
+        let applied = file(&mut s, ado(prs), Poll::Off);
+        assert_eq!(listed(&s), ids(&[101]));
+        assert_eq!(related_ids(&s), [102], "same branch, not mine: related; another branch: left out");
+        let row = &s.rows()[0];
+        assert_eq!(row.members.iter().map(|m| (m.id, m.state.is_some())).collect::<Vec<_>>(), [(101, true), (102, false)]);
+        let queued = &applied.queue.expect("a queue").branches[0].prs[0];
+        assert_eq!(
+            (queued.provider.as_str(), queued.pr_id, queued.project.as_str(), queued.repo_id.as_str(), queued.source_commit.as_deref()),
+            (queue::AZURE_DEV_OPS, 101, "Contoso", "repo-id", Some("sha1"))
+        );
+        assert_eq!((queued.url.as_str(), queued.last_voted_commit.as_deref()), ("https://ado/101", None));
+    }
+
+    #[test]
+    fn applyPoll_freshAzureDevOps_pushSinceMyVote_isAReReviewAgainstTheVotedCommit_andSavesTheMemory() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-rereview");
+        s.ws.memory.insert(101, score::VotedAt { vote: 10, commit: "sha0".into() });
+        let generation = s.generation;
+        s.apply_poll(generation, ado(vec![ado_pr(101, "feature/x", Some(10))]), Poll::Off, Utc::now());
+        assert_eq!(s.ws.items[0].state, score::ReviewState::ReReview);
+        assert_eq!(s.store.memory("a").get(&101).map(|v| v.commit.as_str()), Some("sha0"), "the vote memory is saved");
+
+        let applied = file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(10))]), Poll::Off);
+        let queued = &applied.queue.expect("a queue").branches[0].prs[0];
+        assert_eq!(queued.last_voted_commit.as_deref(), Some("sha0"));
+    }
+
+    #[test]
+    fn applyPoll_relatedPrs_surviveAFailedAzureDevOpsPoll_andGoWhenItIsOff() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-related");
+        file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/x", None)]), Poll::Off);
+        file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), github(&[7]));
+        assert_eq!(related_ids(&s), [102], "a fresh GitHub answer must not wipe them");
+        assert_eq!(listed(&s), ids(&[101, 7]));
+        file(&mut s, Poll::Off, github(&[7]));
+        assert_eq!(related_ids(&s), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn applyPoll_bothSources_errorsAndMissingSourcesAreInAzureDevOpsThenGitHubOrder() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("both-order");
+        let applied = file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), Poll::Fresh(github::tests::partial(&[7])));
+        assert_eq!(s.ws.error.as_deref(), Some("Azure DevOps: HTTP 503 · GitHub: over 100 PRs in a search; only the first 100 are listed"));
+        assert_eq!(applied.queue.expect("a queue").missing_sources, [queue::AZURE_DEV_OPS, queue::GITHUB]);
+    }
+
+    #[test]
+    fn applyPoll_listsAndQueuesByScore_notInTheOrderTheSourceAnswered() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("sorted");
+        let mut required = ado_pr(103, "feature/c", Some(0));
+        required.reviewers[0].is_required = true;
+        let answered = vec![ado_pr(101, "feature/a", Some(10)), ado_pr(102, "feature/b", Some(0)), required];
+        let applied = file(&mut s, ado(answered), Poll::Off);
+        assert_eq!(s.ws.items.iter().map(|i| i.id).collect::<Vec<_>>(), [103, 102, 101], "required, then to review, then approved");
+        let queued: Vec<i64> = applied.queue.expect("a queue").branches.iter().flat_map(|b| &b.prs).map(|p| p.pr_id).collect();
+        assert_eq!(queued, [103, 102]);
+    }
+
+    #[test]
+    fn applyPoll_staleAzureDevOpsPoll_leavesTheVoteMemoryAlone() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("stale-memory");
+        s.ws.memory.insert(101, score::VotedAt { vote: 10, commit: "sha0".into() });
+        let stale = s.generation + 1;
+        let outcome = s.apply_poll(stale, ado(vec![ado_pr(101, "feature/x", Some(0))]), Poll::Off, Utc::now());
+        assert!(outcome.fresh.is_empty());
+        assert!(s.ws.memory.contains_key(&101), "a vote reset to 0 in a stale answer must not forget the vote");
+        assert!(s.store.memory("a").is_empty(), "nor save anything");
+    }
+
+    #[test]
+    fn applyPoll_bothSourcesFresh_announcesAzureDevOpsNewPrsThenGitHubs() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("both-fresh");
+        s.store.save_pat("a", "pat").expect("saved");
+        file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(0))]), github(&[7]));
+        let generation = s.generation;
+        let outcome = s.apply_poll(generation, ado(vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/z", Some(0))]), github(&[7, 8]), Utc::now());
+        assert_eq!(outcome.fresh.iter().map(|i| i.id).collect::<Vec<_>>(), [102, 8]);
+        assert_eq!(listed(&s), ids(&[101, 102, 7, 8]));
     }
 
     // The pure rules.
