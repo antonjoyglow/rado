@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6,12 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::queue::{self, Queue};
-use crate::score::VoteMemory;
+use crate::score::{Provider, VoteMemory};
 use crate::workspace::{self, Legacy, Workspace};
 
 const KEYRING_SERVICE: &str = "review-bracket";
 const MEMORY_FILE: &str = "votes.json";
 const HIDDEN_FILE: &str = "hidden.json";
+const HIDDEN_SOURCES_FILE: &str = "hidden-sources.json";
 /// A copy of the settings file from before workspaces, written once and never overwritten.
 const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 
@@ -293,6 +294,8 @@ pub struct Loaded {
     pub warning: Option<String>,
 }
 
+pub type Hidden = HashMap<i64, Option<Provider>>;
+
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -437,12 +440,21 @@ impl Store {
         self.write_in(id, MEMORY_FILE, memory)
     }
 
-    pub fn hidden(&self, id: &str) -> HashSet<i64> {
-        queue::read_json(&self.workspace_dir(id).join(HIDDEN_FILE)).unwrap_or_default()
+    /// Hidden PR ids, each with the source it came from; `None` when none is recorded or the entry is unreadable.
+    pub fn hidden(&self, id: &str) -> Hidden {
+        let dir = self.workspace_dir(id);
+        let ids: HashSet<i64> = queue::read_json(&dir.join(HIDDEN_FILE)).unwrap_or_default();
+        let sources: HashMap<String, Value> = queue::read_json(&dir.join(HIDDEN_SOURCES_FILE)).unwrap_or_default();
+        let source = |id: i64| sources.get(&id.to_string()).and_then(|v| serde_json::from_value(v.clone()).ok());
+        ids.into_iter().map(|id| (id, source(id))).collect()
     }
 
-    pub fn save_hidden(&self, id: &str, hidden: &HashSet<i64>) -> Result<(), String> {
-        self.write_in(id, HIDDEN_FILE, hidden)
+    /// The ids stay a plain array in `hidden.json`, which versions before 0.10.0 read; sources go beside it.
+    pub fn save_hidden(&self, id: &str, hidden: &Hidden) -> Result<(), String> {
+        let ids: HashSet<i64> = hidden.keys().copied().collect();
+        let sources: HashMap<i64, Provider> = hidden.iter().filter_map(|(id, source)| Some((*id, (*source)?))).collect();
+        self.write_in(id, HIDDEN_SOURCES_FILE, &sources)?;
+        self.write_in(id, HIDDEN_FILE, &ids)
     }
 
     /// For the MCP server (`rado-mcp`), which reads it and never touches the PAT.
@@ -450,16 +462,17 @@ impl Store {
         self.write_in(id, queue::QUEUE_FILE, queue)
     }
 
-    pub fn pat(&self, id: &str) -> Option<String> {
-        self.secrets.get(&workspace::pat_key(id))
+    /// The PAT, `None` when none is saved, or the error when Credential Manager couldn't be read.
+    pub fn read_pat(&self, id: &str) -> Result<Option<String>, String> {
+        self.secrets.read(&workspace::pat_key(id))
+    }
+
+    pub fn read_github_token(&self, id: &str) -> Result<Option<String>, String> {
+        self.secrets.read(&workspace::github_key(id))
     }
 
     pub fn save_pat(&self, id: &str, pat: &str) -> Result<(), String> {
         self.secrets.set(&workspace::pat_key(id), pat)
-    }
-
-    pub fn github_token(&self, id: &str) -> Option<String> {
-        self.secrets.get(&workspace::github_key(id))
     }
 
     pub fn save_github_token(&self, id: &str, token: &str) -> Result<(), String> {
@@ -572,7 +585,7 @@ pub(crate) mod tests {
         assert_eq!(secrets.keys(), { let mut k = vec![github_key(&ws.id), pat_key(&ws.id)]; k.sort(); k });
         assert_eq!((secrets.get(&pat_key(&ws.id)).as_deref(), secrets.get(&github_key(&ws.id)).as_deref()), (Some("pat"), Some("gh")));
         assert_eq!(std::fs::read_to_string(dir.0.join(BACKUP_FILE)).unwrap(), OLD_FILE);
-        assert_eq!(store(&dir, &secrets).hidden(&ws.id), HashSet::from([7]));
+        assert_eq!(store(&dir, &secrets).hidden(&ws.id), Hidden::from([(7, None)]));
         assert!(!dir.0.join("hidden.json").exists());
 
         let again = store(&dir, &secrets).load();
@@ -698,11 +711,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hidden_roundTripsSources_andReadsTheOldIdOnlyFile() {
+        let dir = TempDir::new("hidden");
+        let secrets = MemorySecrets::with(&[]);
+        let store = store(&dir, &secrets);
+        let hidden = Hidden::from([(1, Some(Provider::Ado)), (2, Some(Provider::GitHub)), (3, None)]);
+        store.save_hidden("a1", &hidden).unwrap();
+        assert_eq!(store.hidden("a1"), hidden);
+
+        let folder = queue::workspace_dir(&dir.0, "a1");
+        let ids: Vec<i64> = serde_json::from_slice(&std::fs::read(folder.join(HIDDEN_FILE)).unwrap()).unwrap();
+        assert_eq!(ids.len(), 3, "hidden.json stays the id array that older versions read");
+
+        std::fs::write(folder.join(HIDDEN_SOURCES_FILE), r#"{"4":"ado","5":"someday","x":"gitHub"}"#).unwrap();
+        std::fs::write(folder.join(HIDDEN_FILE), "[4, 5, 6]").unwrap();
+        assert_eq!(store.hidden("a1"), Hidden::from([(4, Some(Provider::Ado)), (5, None), (6, None)]));
+    }
+
+    #[test]
     fn forget_removesTheWorkspacesSecretsAndFolder() {
         let dir = TempDir::new("forget");
         let secrets = MemorySecrets::with(&[("ado-pat:a1", "p"), ("github-token:a1", "g"), ("ado-pat:b2", "q")]);
         let store = store(&dir, &secrets);
-        store.save_hidden("a1", &HashSet::from([1])).unwrap();
+        store.save_hidden("a1", &Hidden::from([(1, None)])).unwrap();
 
         store.forget("a1").unwrap();
 
