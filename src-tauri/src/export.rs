@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::queue::{AZURE_DEV_OPS, Branch, GITHUB, Queue, QueuedPr};
+use crate::queue::{AZURE_DEV_OPS, Branch, GITHUB, QUEUE_SCHEMA, Queue, QueuedPr};
 use crate::score::{Provider, ReviewItem, ReviewState, Tier};
 use crate::source::QueueRef;
 
@@ -64,6 +64,7 @@ pub fn queue(items: &[ReviewItem], sources: &Sources, urls: &HashMap<i64, String
         }
     }
     Queue {
+        schema_version: QUEUE_SCHEMA,
         refreshed: ctx.now,
         organization: ctx.organization.to_string(),
         poll_minutes: ctx.poll_minutes,

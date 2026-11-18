@@ -15,6 +15,9 @@ pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
 /// The drafts file keeps the newest marks only, so it stays small.
 pub const MAX_DRAFTS: usize = 500;
 pub const SETTINGS_FILE: &str = "settings.json";
+/// The queue file's schema. Bump it only for a change an older `rado-mcp` would misread: readers ignore fields they
+/// don't know, so an added field needs no bump.
+pub const QUEUE_SCHEMA: u32 = 1;
 
 /// Letters, digits and dashes only, so an id read from a hand-edited file can't point outside the data folder.
 pub fn is_workspace_id(id: &str) -> bool {
@@ -27,16 +30,19 @@ pub fn workspace_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 /// The active workspace's folder, named by `activeWorkspace` in the settings file; None before the first one exists.
-pub fn active_workspace_dir(root: &Path) -> Option<PathBuf> {
-    let settings: serde_json::Value = read_json(&root.join(SETTINGS_FILE))?;
-    let id = settings["activeWorkspace"].as_str().filter(|id| is_workspace_id(id))?;
-    Some(workspace_dir(root, id))
+pub fn active_workspace_dir(root: &Path) -> Result<Option<PathBuf>, String> {
+    let settings: Option<serde_json::Value> = read_json_file(&root.join(SETTINGS_FILE))?;
+    let id = settings.as_ref().and_then(|s| s["activeWorkspace"].as_str()).filter(|id| is_workspace_id(id));
+    Ok(id.map(|id| workspace_dir(root, id)))
 }
 
 /// The PRs waiting on my review at the last successful poll: not hidden, and not my own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Queue {
+    /// `QUEUE_SCHEMA` when written; files from before 0.11.0 have none and are schema 1.
+    #[serde(default = "first_schema")]
+    pub schema_version: u32,
     pub refreshed: DateTime<Utc>,
     /// The Azure DevOps organization; empty for a workspace with GitHub only.
     pub organization: String,
@@ -98,6 +104,10 @@ fn azure_dev_ops() -> String {
     AZURE_DEV_OPS.into()
 }
 
+fn first_schema() -> u32 {
+    1
+}
+
 /// The source commit at which the agent last drafted a review, keyed by PR id, oldest mark first. Still a plain JSON
 /// object, so older `rado-mcp` copies read it.
 pub type Drafts = IndexMap<i64, String>;
@@ -132,8 +142,20 @@ pub fn record_draft(drafts: &mut Drafts, pr_id: i64, commit: &str) {
     drafts.drain(..excess);
 }
 
+/// The file's contents, or None when it is missing, unreadable or not valid.
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    read_json_file(path).ok().flatten()
+}
+
+/// The file's contents; None when it doesn't exist, and an error naming the file when it can't be read (held by
+/// another program) or isn't valid.
+pub fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("{} is not valid: {e}", path.display()))
 }
 
 /// Writes to a temporary file and renames it over the target, so a reader never sees half a file. The temporary name
@@ -178,7 +200,7 @@ pub(crate) mod tests {
     }
 
     pub fn queue(branches: Vec<Branch>) -> Queue {
-        Queue { refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, missing_sources: vec![], branches }
+        Queue { schema_version: QUEUE_SCHEMA, refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, missing_sources: vec![], branches }
     }
 
     #[test]
@@ -189,6 +211,45 @@ pub(crate) mod tests {
         let q: Queue = serde_json::from_str(old).unwrap();
         let pr = &q.branches[0].prs[0];
         assert_eq!((pr.provider.as_str(), pr.pr_id, pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, 7, false, 0));
+        assert_eq!(q.schema_version, 1);
+    }
+
+    /// 0.10.0's `Queue`, as an older `rado-mcp` still reads it.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
+    struct QueueBeforeSchema {
+        refreshed: DateTime<Utc>,
+        organization: String,
+        poll_minutes: u32,
+        #[serde(default)]
+        missing_sources: Vec<String>,
+        branches: Vec<Branch>,
+    }
+
+    #[test]
+    fn queue_withASchema_staysReadableByOlderServers() {
+        let q = queue(vec![branch("a", vec![pr(1, "c1")])]);
+        let json = serde_json::to_string(&q).unwrap();
+
+        assert!(json.starts_with(r#"{"schemaVersion":1,"#), "{json}");
+        let old: QueueBeforeSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!((old.refreshed, old.branches), (q.refreshed, q.branches));
+    }
+
+    #[test]
+    fn readJsonFile_tellsMissingFromInvalid() {
+        let dir = std::env::temp_dir().join(format!("rado-queue-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let invalid = read_json_file::<Queue>(&path);
+        let missing = read_json_file::<Queue>(&dir.join("missing.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(invalid.unwrap_err().contains("is not valid"));
+        assert_eq!(missing, Ok(None));
     }
 
     fn branch(name: &str, prs: Vec<QueuedPr>) -> Branch {

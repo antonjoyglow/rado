@@ -13,12 +13,15 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, Queue};
+use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue};
 
-const PROTOCOL: &str = "2025-06-18";
+/// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
+const PROTOCOL: &str = "2025-11-25";
+const PROTOCOLS: [&str; 4] = [PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 fn main() {
     let dir = data_dir();
+    log(&startup(&dir));
     let mut stdout = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -26,10 +29,30 @@ fn main() {
             continue;
         }
         if let Some(response) = handle(&dir, Utc::now(), &line) {
+            if let Some(message) = error_message(&response) {
+                log(message);
+            }
             let _ = writeln!(stdout, "{response}");
             let _ = stdout.flush();
         }
     }
+}
+
+/// Stdout carries the protocol, so the log goes to stderr, which Claude Code keeps in its MCP logs.
+fn log(line: &str) {
+    let _ = writeln!(std::io::stderr(), "rado-mcp: {line}");
+}
+
+/// Logged at start, so a wrong data folder shows before the first tool call.
+fn startup(root: &Path) -> String {
+    let workspace = active_workspace(root).map_or_else(|e| e, |dir| format!("active workspace {}", dir.display()));
+    format!("{} started; data folder {}; {workspace}", env!("CARGO_PKG_VERSION"), root.display())
+}
+
+/// The error a reply carries, as a JSON-RPC error or as a failed tool call.
+fn error_message(response: &Value) -> Option<&str> {
+    let tool_error = response["result"]["isError"] == true;
+    response["error"]["message"].as_str().or_else(|| tool_error.then(|| response["result"]["content"][0]["text"].as_str()).flatten())
 }
 
 /// Rado's data folder, `%APPDATA%\dev.antonis.rado`; `RADO_DATA_DIR` overrides it.
@@ -49,13 +72,16 @@ fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
     let params = request.get("params").cloned().unwrap_or(Value::Null);
     let result = match request["method"].as_str().unwrap_or_default() {
         "initialize" => json!({
-            "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
+            "protocolVersion": params["protocolVersion"].as_str().filter(|v| PROTOCOLS.contains(v)).unwrap_or(PROTOCOL),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "rado", "version": env!("CARGO_PKG_VERSION") },
         }),
         "ping" => json!({}),
         "tools/list" => json!({ "tools": tools() }),
-        "tools/call" => call(root, now, &params),
+        "tools/call" => match call(root, now, &params) {
+            Ok(result) => result,
+            Err(message) => return Some(error(id, -32602, &message)),
+        },
         other => return Some(error(id, -32601, &format!("unknown method {other}"))),
     };
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
@@ -103,25 +129,52 @@ fn tools() -> Value {
     ])
 }
 
-fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Value {
+/// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
+fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
+    let args = &params["arguments"];
+    let tool = match params["name"].as_str() {
+        Some(name @ ("list_review_queue" | "mark_drafted")) => name,
+        other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
+    };
     // Read on every call, so a switch in Rado is followed without restarting this server.
-    let dir = queue::active_workspace_dir(root)
-        .ok_or_else(|| format!("Rado has no active workspace in {}. Start Rado once to set it up.", root.display()));
-    let outcome = dir.and_then(|dir| match params["name"].as_str() {
-        Some("list_review_queue") => list(&dir, now),
-        Some("mark_drafted") => mark_drafted(&dir, &params["arguments"]),
-        other => Err(format!("Unknown tool {other:?}")),
-    });
-    match outcome {
+    let outcome = active_workspace(root).and_then(|dir| if tool == "mark_drafted" { mark_drafted(&dir, args) } else { list(&dir, now) });
+    Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
-    }
+    })
 }
 
-fn read_queue(dir: &Path) -> Result<Queue, String> {
-    queue::read_json(&dir.join(QUEUE_FILE)).ok_or_else(|| {
-        format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
+fn active_workspace(root: &Path) -> Result<PathBuf, String> {
+    queue::active_workspace_dir(root)?.ok_or_else(|| {
+        format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
     })
+}
+
+/// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
+fn read_queue(dir: &Path) -> Result<Queue, String> {
+    let path = dir.join(QUEUE_FILE);
+    let retry = |e: String| format!("{e}. Rado rewrites it at its next poll; try again then.");
+    let file: Value = queue::read_json_file(&path).map_err(retry)?.ok_or_else(|| {
+        format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
+    })?;
+    let schema = file.get("schemaVersion").and_then(Value::as_u64).unwrap_or(1);
+    if schema > u64::from(QUEUE_SCHEMA) {
+        return Err(format!(
+            "{} has schema {schema}, but this rado-mcp {} reads up to {QUEUE_SCHEMA}. Restart this Claude session to start \
+             the rado-mcp installed with the newer Rado.",
+            path.display(),
+            env!("CARGO_PKG_VERSION"),
+        ));
+    }
+    serde_json::from_value(file).map_err(|e| retry(format!("{} is not valid: {e}", path.display())))
+}
+
+/// An unreadable or invalid file is an error, not an empty one: listing would bring every drafted PR back, and
+/// marking would replace all recorded drafts with one.
+fn read_drafts(path: &Path) -> Result<Drafts, String> {
+    queue::read_json_file(path)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| format!("{e}. Try again; if the file is damaged, delete it, and drafted PRs will be listed again."))
 }
 
 fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
@@ -134,7 +187,7 @@ fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
              Azure DevOps or GitHub. Review nothing from it; start Rado and run again."
         ));
     }
-    let drafts: Drafts = queue::read_json(&dir.join(DRAFTS_FILE)).unwrap_or_default();
+    let drafts = read_drafts(&dir.join(DRAFTS_FILE))?;
     Ok(json!({
         "organization": queue.organization,
         "refreshedMinutesAgo": age,
@@ -163,13 +216,7 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     }
     let _lock = lock_drafts(dir)?;
     let path = dir.join(DRAFTS_FILE);
-    // A file that exists but can't be read now (held by another program) must not be replaced by one with this mark
-    // only; an unparsable one has nothing left to keep.
-    let mut drafts: Drafts = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Drafts::default(),
-        Err(e) => return Err(format!("{}: {e}; mark it again", path.display())),
-    };
+    let mut drafts = read_drafts(&path)?;
     queue::record_draft(&mut drafts, pr_id, commit);
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
@@ -245,6 +292,41 @@ mod tests {
     }
 
     #[test]
+    fn initialize_unknownProtocol_answersTheNewestItSpeaks() {
+        let dir = TempDir::new("init-unknown");
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "1.0.0" } }));
+        assert_eq!(reply["result"]["protocolVersion"], PROTOCOL);
+    }
+
+    #[test]
+    fn unknownTool_isAProtocolError() {
+        let dir = TempDir::new("unknown-tool");
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "drop_queue" } }));
+        assert_eq!(reply["error"]["code"], -32602);
+        assert_eq!(reply["error"]["message"], "Unknown tool: drop_queue");
+        assert_eq!(error_message(&reply), Some("Unknown tool: drop_queue"));
+    }
+
+    #[test]
+    fn errorMessage_isTheFailedToolCallsText_andNoneOnSuccess() {
+        let dir = with_queue("log");
+        let failed = send(&dir.0, at(31), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue" } }));
+        let listed = send(&dir.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue" } }));
+        assert!(error_message(&failed).unwrap().contains("31 minutes old"));
+        assert_eq!(error_message(&listed), None);
+    }
+
+    #[test]
+    fn startup_namesTheDataFolderAndWhatIsWrongWithIt() {
+        let dir = with_queue("startup");
+        assert!(startup(&dir.0).ends_with(&format!("active workspace {}", queue::workspace_dir(&dir.0, "w1").display())));
+
+        let empty = TempDir::new("startup-empty");
+        let line = startup(&empty.0);
+        assert!(line.contains(&format!("data folder {}", empty.0.display())) && line.contains("RADO_DATA_DIR"), "{line}");
+    }
+
+    #[test]
     fn notification_getsNoReply() {
         let dir = TempDir::new("notify");
         assert_eq!(handle(&dir.0, at(0), r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
@@ -293,6 +375,53 @@ mod tests {
         let result = call_tool(&dir.0, at(0), "list_review_queue", json!({}));
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"].as_str().unwrap().contains("has not written a review queue"));
+    }
+
+    #[test]
+    fn listReviewQueue_invalidQueue_saysSoRatherThanMissing() {
+        let dir = with_queue("invalid");
+        std::fs::write(queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE), "{").unwrap();
+        let text = call_tool(&dir.0, at(0), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("is not valid") && text.contains("next poll"), "{text}");
+    }
+
+    #[test]
+    fn listReviewQueue_queueFromBeforeTheSchema_isRead() {
+        let dir = with_queue("unversioned");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let mut file: Value = queue::read_json(&path).unwrap();
+        file.as_object_mut().unwrap().remove("schemaVersion");
+        std::fs::write(&path, file.to_string()).unwrap();
+
+        assert_eq!(text(&call_tool(&dir.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 1);
+    }
+
+    #[test]
+    fn listReviewQueue_newerSchema_isRefusedAsNewerEvenWhenItsShapeChanged() {
+        let dir = with_queue("newer");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        std::fs::write(&path, json!({ "schemaVersion": QUEUE_SCHEMA + 1, "queue": [] }).to_string()).unwrap();
+
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {}", QUEUE_SCHEMA + 1)), "{result}");
+    }
+
+    #[test]
+    fn invalidDraftsFile_isAnErrorForBothTools_andIsKept() {
+        let dir = with_queue("bad-drafts");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        std::fs::write(&path, "{\"1\":").unwrap();
+
+        let listed = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
+        let marked = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2" }));
+
+        for result in [&listed, &marked] {
+            assert_eq!(result["isError"], true, "{result}");
+            assert!(result["content"][0]["text"].as_str().unwrap().contains("is not valid"), "{result}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"1\":");
     }
 
     #[test]
@@ -349,7 +478,7 @@ mod tests {
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
         drop(held);
 
-        assert!(result["content"][0]["text"].as_str().unwrap().ends_with("mark it again"), "{result}");
+        assert!(result["content"][0]["text"].as_str().unwrap().starts_with("Cannot read"), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
