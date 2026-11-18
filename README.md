@@ -17,7 +17,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
    Tokens go to Windows Credential Manager. Other fields save when you leave them.
 4. **Optional: link tickets.** Under **Tracker**, pick **Jira** and enter your site (`yourcompany.atlassian.net`), or **Linear** and enter your workspace (`yourteam`, as in `linear.app/yourteam`). Set **Team keys** (`ENG, OPS`) so only those keys become ticket chips.
 5. **Optional: more workspaces.** **+ Add workspace** adds another; switch with the chip in the list's header or **Ctrl+←** / **Ctrl+→**. Only the active workspace is polled and notifies.
-6. **Optional: the MCP server** for Claude review agents (Azure DevOps PRs only):
+6. **Optional: the MCP server** for Claude review agents (Azure DevOps and GitHub PRs):
 
    ```
    claude mcp add --scope user rado -- "%LOCALAPPDATA%\Rado\rado-mcp.exe"
@@ -133,10 +133,10 @@ To install, click **Set up**: it copies `edge://extensions` (or `chrome://extens
 
 ### MCP server
 
-`rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each good poll, from the active workspace (looked up on every call, so it follows a switch). It never reads your PAT. The agent reviews through the Azure DevOps MCP server and only drafts; it never posts or votes. GitHub PRs aren't in the queue yet.
+`rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each poll in which at least one source answered, from the active workspace (looked up on every call, so it follows a switch). It never reads your tokens. The agent reviews through the Azure DevOps or GitHub MCP server and only drafts; it never posts or votes.
 
-- `list_review_queue`: reviews waiting on you, best-ranked first, grouped by branch. Each PR has `project`, `repoId`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach Azure DevOps. Not mine, Hide and Show take effect at the next poll.
-- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. `commit` must be the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. Nothing changes in Azure DevOps or in Rado's list.
+- `list_review_queue`: reviews waiting on you on both providers, best-ranked first, grouped by branch. Each PR has `provider` (`azureDevOps` or `gitHub`), `project` (the GitHub owner), `repo`, `repoId` (`owner/repo` on GitHub), `number`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. `agentAuthored` is true when a bot opened the PR or it carries an `agent`, `ai`, `ai-generated` or `ai-assisted` label (GitHub only for now). `missingSources` names a provider whose last poll failed or came back partial, so some of its PRs may be absent rather than done; drafts are not pruned while it is set. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach either provider. Not mine, Hide and Show take effect at the next poll.
+- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. Pass the `prId` (not the GitHub PR number) and the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. While `missingSources` is set, a PR that is no longer queued is still recorded, unless the id is a queued PR's GitHub number at that commit. Drafts of PRs that left the queue are forgotten, except while a source is missing (up to 500 drafts). Nothing changes on Azure DevOps, GitHub or in Rado's list.
 
 Register the installed server with the command in [Quick setup](#quick-setup), or a source build with `npm run mcp:build` and `claude mcp add --scope user rado -- "<repo>\src-tauri\target\release\rado-mcp.exe"`. A Claude session holding the server locks the exe; close it before you rebuild.
 

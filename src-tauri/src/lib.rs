@@ -354,6 +354,8 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     // Pruning hidden PRs needs every source's full list; a failed or partial poll would drop its hidden ones.
     let mut complete = true;
     let mut ado_prs = None;
+    let mut github_refs = None;
+    let mut missing = Vec::new();
     let keep = |provider: score::Provider, items: &mut Vec<ReviewItem>, urls: &mut HashMap<i64, String>| {
         for item in old_items.iter().filter(|i| i.provider == provider) {
             if let Some(url) = old_urls.get(&item.id) {
@@ -370,6 +372,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         Poll::Failed(error) => {
             errors.push(error);
             complete = false;
+            missing.push(queue::AZURE_DEV_OPS.to_string());
             keep(score::Provider::Ado, &mut items, &mut urls);
         }
         Poll::Fresh(poll) => {
@@ -405,6 +408,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         Poll::Failed(error) => {
             errors.push(error);
             complete = false;
+            missing.push(queue::GITHUB.to_string());
             keep(score::Provider::GitHub, &mut items, &mut urls);
         }
         Poll::Fresh(fetched) => {
@@ -413,10 +417,14 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
                 errors.push(format!("GitHub: {warning}"));
                 complete = false;
             }
+            if fetched.partial {
+                missing.push(queue::GITHUB.to_string());
+            }
             let (mut ranked, gh_urls, threads) = github::items(&fetched, now);
             score::attach_threads(&mut ranked, &threads, &was_stale, now);
             urls.extend(gh_urls);
             items.extend(ranked);
+            github_refs = Some(github::queue_refs(&fetched));
         }
     }
     items.sort_by(|a, b| b.score.cmp(&a.score).then(b.age_hours.cmp(&a.age_hours)));
@@ -444,10 +452,10 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     }
     ws.last_refreshed = Some(now);
     applied.notify = s.settings.notify;
-    if let Some(prs) = &ado_prs {
-        let ctx = export::Context { organization: &organization, poll_minutes: s.settings.poll_minutes, now };
-        applied.queue = Some(export::queue(&ws.items, prs, &ws.memory, &ws.urls, &ctx));
-    }
+    // At least one source is fresh here; a failed one is named in the queue so an agent knows its PRs are missing.
+    let ctx = export::Context { organization: &organization, poll_minutes: s.settings.poll_minutes, now };
+    let sources = export::Sources { ado: ado_prs.as_deref(), github: github_refs.as_ref(), missing };
+    applied.queue = Some(export::queue(&ws.items, &sources, &ws.memory, &ws.urls, &ctx));
     Some(applied)
 }
 
@@ -1168,6 +1176,56 @@ mod tests {
 
     fn listed(s: &Inner) -> HashSet<i64> {
         s.ws.items.iter().map(|i| i.id).collect()
+    }
+
+    #[test]
+    fn applyPoll_gitHubOnly_writesAQueueWithItsPrs() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let applied = apply_poll(&mut s, generation, Poll::Off, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        let queue = applied.queue.expect("a queue");
+        let pr = &queue.branches[0].prs[0];
+        assert_eq!((pr.provider.as_str(), pr.pr_id, pr.repo_id.as_str()), (queue::GITHUB, 7, "o/repo"));
+        assert!(queue.missing_sources.is_empty());
+    }
+
+    #[test]
+    fn applyPoll_failedSource_isNamedInTheQueue() {
+        let mut s = two_workspaces();
+        let failed = Poll::Failed("Azure DevOps: HTTP 503".into());
+        let generation = s.credentials_generation;
+        let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert_eq!(applied.queue.expect("a queue").missing_sources, [queue::AZURE_DEV_OPS]);
+    }
+
+    #[test]
+    fn applyPoll_everySourceFailed_writesNoQueue() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let (ado, github) = (Poll::Failed("Azure DevOps: x".into()), Poll::Failed("GitHub: y".into()));
+        let applied = apply_poll(&mut s, generation, ado, github, Utc::now()).expect("current poll");
+        assert!(applied.queue.is_none(), "a stale queue must age out, not be re-stamped");
+    }
+
+    #[test]
+    fn applyPoll_partialGitHubPoll_queuesWhatCameBackAndNamesGitHub() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let applied = apply_poll(&mut s, generation, Poll::Off, Poll::Fresh(github::tests::partial(&[7])), Utc::now()).expect("current poll");
+        let queue = applied.queue.expect("a queue");
+        assert_eq!((queue.branches[0].prs[0].pr_id, queue.missing_sources.as_slice()), (7, [queue::GITHUB.to_string()].as_slice()));
+    }
+
+    #[test]
+    fn applyPoll_failedAzureDevOps_keepsItsRowsButLeavesThemOutOfTheQueue() {
+        let mut s = two_workspaces();
+        s.ws.items = vec![ReviewItem { provider: Provider::Ado, ..pr(1, ReviewState::NeedsReview) }];
+        let generation = s.credentials_generation;
+        let failed = Poll::Failed("Azure DevOps: HTTP 503".into());
+        let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert!(listed(&s).contains(&1));
+        let queued: Vec<i64> = applied.queue.expect("a queue").branches.iter().flat_map(|b| &b.prs).map(|p| p.pr_id).collect();
+        assert_eq!(queued, [7]);
     }
 
     #[test]
