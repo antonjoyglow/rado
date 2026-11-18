@@ -129,7 +129,7 @@ Every PR link Rado opens ends in `#rado=<branch>` (plus `&group` from an aggrega
 
 Without it, links open as ordinary tabs. The installer puts the extension in a `browser-extension` folder inside Rado's install folder. With *Edge* or *Chrome* chosen, Settings → General shows under **Open links in** whether that browser has it loaded, switched off, or loaded from a folder that no longer exists (an old repo checkout, or the removed `edge-extension` folder). Rado reads this from the `Preferences` and `Secure Preferences` of the browser's last-used profile, the one links open in; with *System default* it shows nothing.
 
-To install, click **Set up**: it copies `edge://extensions` (or `chrome://extensions`), opens a new tab in that browser and shows the folder in Explorer. Browsers don't open their own pages from another app, so paste the address into the tab and press Enter. Switch on **Developer mode**, click **Load unpacked** and pick the folder; the status turns to *loaded* within a few seconds. It asks for `tabs` and `tabGroups` and runs on `dev.azure.com` and `github.com` only. After a Rado update, click **Reload** on its card.
+To install, click **Set up**: it copies `edge://extensions` (or `chrome://extensions`), opens a new tab in that browser and shows the folder in Explorer. Browsers don't open their own pages from another app, so paste the address into the tab and press Enter. Switch on **Developer mode**, click **Load unpacked** and pick the folder; the status turns to *loaded* within a few seconds. It asks for `tabs` and `tabGroups` and runs on `dev.azure.com` and `github.com` only. After a Rado update, click **Reload** on its card; the card's version then matches Rado's.
 
 ### MCP server
 
