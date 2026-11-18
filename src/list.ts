@@ -1,11 +1,11 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
 import { counterPanel } from "./counter";
-import { serialSaver } from "./save";
+import { lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
 import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
@@ -334,13 +334,18 @@ function flash(button: HTMLButtonElement, text: string): void {
   }, 1500);
 }
 
+/** One save queue for the window's lifetime: Settings reopened while a save runs must queue behind it, not beside it. */
+let settingsSaver: LastingSaver<Settings> | null = null;
+
 function renderSettings(
   panel: HTMLElement,
   snapshot: Snapshot,
   startTab: SettingsTab,
   onSelect: (key: SettingsTab) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
-  const settings = { ...snapshot.settings };
+  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
+  // The snapshot lags a save still running; start from what that save sends.
+  const settings = { ...(saver.pending > 0 ? saver.latest : snapshot.settings) };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
   // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
   const note = () => h("span", { class: "note", role: "status" });
@@ -353,24 +358,30 @@ function renderSettings(
   };
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
-  // General and Counter share `settings` and save it whole. A failed save rolls both tabs back to the last saved
-  // values (the field notes outlive the rebuild, so the error stays shown).
-  const queueSave = serialSaver(settings, api.saveSettings, (saved) => {
+  // General and Counter share `settings` and save it whole. A failed save puts both tabs back to the last saved
+  // values in place, leaving the field being typed in alone.
+  saver.revert = (saved) => {
     Object.assign(settings, saved);
-    panels.general.replaceChildren(...generalFields());
+    generalShows.forEach((show) => show());
     counter.redraw();
-  });
+  };
+  const queueSave = (current: Settings) => saver.save(current);
   const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
+  const generalShows: (() => void)[] = [];
+  /** Re-shows `input` from `settings` after a rollback, unless the user is typing in it. */
+  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => {
+    if (document.activeElement !== input) show();
+  });
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
-  // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
+  // Not in `settings`, so a rollback leaves it as it is.
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
-  // Outlives rebuilds like `autostart`. Chromium writes its profile files a few seconds after Load unpacked,
+  // Chromium writes its profile files a few seconds after Load unpacked,
   // so after Set up the status is re-read on focus and every few seconds while it is on screen, until it is loaded.
   const extension = h("div", { class: "extension", role: "status" });
   let extensionRun = 0;
@@ -402,7 +413,7 @@ function renderSettings(
   window.addEventListener("focus", recheck);
   const extensionTimer = setInterval(recheck, 3000);
 
-  /** The General tab's fields, filled from `settings`. */
+  /** The General tab's fields, filled from `settings`; built once, and re-shown through `generalShows`. */
   const generalFields = (): HTMLElement[] => {
     const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
     const chips = POLL_CHOICES.map((m) =>
@@ -414,6 +425,10 @@ function renderSettings(
       chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
       void save(n.minutes);
     };
+    shown(minutes, () => {
+      minutes.value = String(settings.pollMinutes);
+      chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === settings.pollMinutes)));
+    });
     minutes.onchange = () => {
       const m = parseMinutes(minutes.value);
       if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
@@ -438,6 +453,7 @@ function renderSettings(
       void save(n.text);
     };
     showTextScale(settings.textScale);
+    shown(textScale, () => showTextScale(settings.textScale));
     textScale.onchange = () => {
       const percent = parseWhole(textScale.value, TEXT_SCALE);
       if (percent === null) fail(n.text, `Use a whole number from ${TEXT_SCALE[0]} to ${TEXT_SCALE[1]}.`);
@@ -458,6 +474,7 @@ function renderSettings(
         void save(msg);
       };
       showValue(settings[key]);
+      shown(input, () => showValue(settings[key]));
       input.onchange = () => {
         const p = parseWhole(input.value, range);
         if (p === null) fail(msg, `Use a whole number from ${range[0]} to ${range[1]}.`);
@@ -476,6 +493,10 @@ function renderSettings(
       void save(n.browser);
     };
     checkExtension();
+    generalShows.push(() => {
+      browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === settings.browser)));
+      checkExtension();
+    });
 
     const themes = THEMES.map(([value, label]) =>
       h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
@@ -492,6 +513,7 @@ function renderSettings(
       const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
       const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
       const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
+      shown(typed, () => (picker.value = typed.value = settings.customTheme[key]));
       const set = (value: string) => {
         fill(value);
         queueSave(settings).then(() => {
@@ -509,8 +531,13 @@ function renderSettings(
       return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
     });
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
+    generalShows.push(() => {
+      themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === settings.theme)));
+      customColours.hidden = settings.theme !== "custom";
+    });
 
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
+    generalShows.push(() => (notify.checked = settings.notify));
 
     return [
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).

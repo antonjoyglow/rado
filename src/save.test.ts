@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DROPPED, serialSaver } from "./save";
+import { DROPPED, lastingSaver, serialSaver } from "./save";
 
 type S = { a: number; b: number };
 
@@ -76,5 +76,46 @@ describe("serialSaver", () => {
     calls[0].fail("locked");
     await expect(failing).rejects.toThrow("locked");
     expect(reverted).toEqual({ a: 0, b: 0 });
+  });
+});
+
+describe("lastingSaver", () => {
+  it("lets a second view queue behind a running save and start from the value being saved", async () => {
+    const { calls, send, tick } = backend();
+    const saver = lastingSaver<S>({ a: 0, b: 0 }, send);
+    const first: S = { a: 0, b: 0 };
+    first.a = 1;
+    const running = saver.save(first);
+    await tick();
+
+    expect(saver.pending).toBe(1);
+    const second = { ...saver.latest };
+    expect(second).toEqual({ a: 1, b: 0 });
+    second.b = 2;
+    const queued = saver.save(second);
+    await tick();
+    expect(calls.length).toBe(1);
+
+    calls[0].ok();
+    await running;
+    await tick();
+    calls[1].ok();
+    await queued;
+    expect(calls.map((c) => c.value)).toEqual([{ a: 1, b: 0 }, { a: 1, b: 2 }]);
+    expect(saver.pending).toBe(0);
+  });
+
+  it("on a failure calls the latest view's revert and resets latest to the saved value", async () => {
+    const { calls, send, tick } = backend();
+    const saver = lastingSaver<S>({ a: 0, b: 0 }, send);
+    const reverts: string[] = [];
+    saver.revert = () => reverts.push("old view");
+    saver.revert = (saved) => reverts.push(`new view ${saved.a}`);
+    const failing = saver.save({ a: 5, b: 0 });
+    await tick();
+    calls[0].fail("locked");
+    await expect(failing).rejects.toThrow("locked");
+    expect(reverts).toEqual(["new view 0"]);
+    expect(saver.latest).toEqual({ a: 0, b: 0 });
   });
 });
