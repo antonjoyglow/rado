@@ -2,12 +2,24 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
-## [0.9.2] - 2026-11-17
+## [0.10.0] - 2026-11-18
+
+### Features
+
+- mcp: review agents get your GitHub PRs too, each marked when a bot opened it or it carries an agent label; the queue names a source whose last poll failed (#114)
+- list: a roomier header and tabs, scrollbars in your theme, a status line that shows only when something needs saying, and a header bird that glows on refresh and yawns at new reviews (#116)
+- settings: Remove… beside a saved PAT or GitHub token turns that source off (#118)
+- extension: the tab groups extension ships with Rado; Settings shows whether your browser has it loaded and helps set it up (#34)
+- extension: the Rado logo as the extension's icon (#36)
 
 ### Fixes
 
-- extension: ship the tab groups extension and show its status in Settings (#34)
-- settings: remove the Quit button from General (#33)
+- list: quieter rows: Copy and Not mine appear on hover or keyboard focus, details wrap as whole phrases, and Review next is clearer (#121)
+- list: when one source fails, the list and the counter show that the data is old instead of looking current (#119)
+- polling: a hidden PR stays hidden while its source fails or has no token, and a token Windows can't read shows as an error, not as missing (#115)
+- settings: a failed save keeps your focus and typing, and Settings reopened during a save no longer saves an older value over it (#117)
+- settings: Quit left General; it is on the tray icon's menu (#33)
+- release: the extension's version now follows Rado's (#120)
 
 ## [0.9.1] - 2026-11-16
 
