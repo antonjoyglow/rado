@@ -54,7 +54,8 @@ struct Inner {
     newer_release: Option<releases::NewerRelease>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
     #[serde(flatten)]
@@ -104,7 +105,7 @@ async fn poll_loop(app: AppHandle) {
         if let Some(ticket) = session(&app, Session::begin_poll) {
             poll_workspace(&app, ticket, &mut me, &mut changed).await;
         }
-        let minutes = shared.inner.lock().expect("state lock").session.settings().poll_minutes.clamp(1, 120);
+        let minutes = shared.inner.lock().expect("state lock").session.settings().poll_minutes.clamp(store::POLL_MINUTES_RANGE.0, store::POLL_MINUTES_RANGE.1);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)) => {}
             _ = shared.wake.notified() => {}

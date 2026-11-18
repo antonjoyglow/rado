@@ -3,13 +3,10 @@ import { h } from "./dom";
 import { heat, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
 import { parseHex } from "./theme";
 
-/** The look before the counter could be customised; matches `CounterStyle::default` in `store.rs`. */
-export const COUNTER_DEFAULT: Readonly<CounterStyle> = { reviews: null, mine: null, logo: "#ffffff", restOpacity: 55, hoverOpacity: 8 };
-export const DEFAULT_SCALE = 100;
+import { COUNTER_DEFAULT, COUNTER_HOVER_OPACITY as HOVER_RANGE, COUNTER_REST_OPACITY as REST_RANGE, DEFAULT_PILL_SCALE as DEFAULT_SCALE } from "./bindings/limits";
 
-/** Opacity limits in percent, matching `COUNTER_*_RANGE` in `store.rs`; below 20% at rest the counter is too faint to find. */
-export const REST_RANGE: readonly [number, number] = [20, 100];
-export const HOVER_RANGE: readonly [number, number] = [0, 100];
+/** The look before the counter could be customised, and its opacity limits in percent (from Rust). */
+export { COUNTER_DEFAULT, HOVER_RANGE, REST_RANGE };
 const REST_CHOICES = [30, 55, 80, 100];
 const HOVER_CHOICES = [0, 8, 25, 50];
 const SWATCHES = ["#ffffff", "#ffd60a", "#ff9f43", "#f26b6b", "#c792ea", "#6d9ef6", "#4cc07f"];

@@ -16,7 +16,7 @@ const HIDDEN_SOURCES_FILE: &str = "hidden-sources.json";
 /// A copy of the settings file from before workspaces, written once and never overwritten.
 const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub poll_minutes: u32,
@@ -27,7 +27,7 @@ pub struct Settings {
     /// Text size of the review list, in percent.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub text_scale: u32,
-    /// Size of the review list, in percent of the work area of the counter's screen. Files from 0.9.0 and
+    /// Size of the review list, in percent of the work area of the counter's screen, never under 360 px wide. Files from 0.9.0 and
     /// earlier hold `listWidth` / `listHeight` in pixels instead; those are ignored.
     #[serde(deserialize_with = "lenient_number::<_, 33>")]
     pub list_width_percent: u32,
@@ -49,6 +49,7 @@ pub struct Settings {
     pub active_workspace: String,
     /// The workspace made from the pre-workspace settings, while their secrets and files still need moving into it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
     pub migrating_to: Option<String>,
 }
 
@@ -76,7 +77,7 @@ fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwn
 }
 
 /// Where Rado opens links.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Browser {
     Edge,
@@ -86,7 +87,7 @@ pub enum Browser {
 }
 
 /// Colours of the review list. `System` follows Windows' light or dark app mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Theme {
     #[default]
@@ -98,7 +99,7 @@ pub enum Theme {
 }
 
 /// The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CustomTheme {
     pub background: String,
@@ -126,7 +127,7 @@ impl CustomTheme {
 }
 
 /// The counter's look. A number colour of `None` is heat: blue at 0 through to red at 10 or more.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CounterStyle {
     #[serde(deserialize_with = "lenient_choice")]
@@ -196,17 +197,19 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
 /// Smallest and largest counter size, in percent. Below 75% the numbers stop being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
-/// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
+/// Smallest and largest list text size, in percent.
 pub const TEXT_SCALE_RANGE: (u32, u32) = (80, 150);
-/// Smallest and largest review list, in percent of its screen, matching `LIST_*_PERCENT` in `format.ts`.
+/// Smallest and largest review list, in percent of its screen.
 pub const LIST_WIDTH_PERCENT_RANGE: (u32, u32) = (20, 100);
 pub const LIST_HEIGHT_PERCENT_RANGE: (u32, u32) = (25, 100);
+/// Shortest and longest time between polls, in minutes.
+pub const POLL_MINUTES_RANGE: (u32, u32) = (1, 120);
 
 impl Settings {
     /// Pulls values typed or edited by hand back into their allowed ranges.
     pub fn clamped(self) -> Self {
         Self {
-            poll_minutes: self.poll_minutes.clamp(1, 120),
+            poll_minutes: self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
             text_scale: self.text_scale.clamp(TEXT_SCALE_RANGE.0, TEXT_SCALE_RANGE.1),
             list_width_percent: self.list_width_percent.clamp(LIST_WIDTH_PERCENT_RANGE.0, LIST_WIDTH_PERCENT_RANGE.1),
@@ -515,6 +518,30 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::workspace::{LEGACY_GITHUB_KEY, LEGACY_PAT_KEY, Tracker, github_key, pat_key};
+
+    /// Writes the limits and defaults the frontend imports next to the ts-rs types; CI fails when the
+    /// committed file differs, so the two sides can't drift apart.
+    #[test]
+    fn export_limits() {
+        let range = |name: &str, (min, max): (u32, u32)| format!("export const {name}: readonly [number, number] = [{min}, {max}];\n");
+        let defaults = Settings::default();
+        let text = [
+            "// Generated from the Rust constants by `cargo test` (store.rs, `export_limits`). Do not edit this file manually.\n".to_string(),
+            "import type { CounterStyle } from \"./CounterStyle\";\n\n".to_string(),
+            range("POLL_MINUTES", POLL_MINUTES_RANGE),
+            range("PILL_SCALE", PILL_SCALE_RANGE),
+            range("TEXT_SCALE", TEXT_SCALE_RANGE),
+            range("LIST_WIDTH_PERCENT", LIST_WIDTH_PERCENT_RANGE),
+            range("LIST_HEIGHT_PERCENT", LIST_HEIGHT_PERCENT_RANGE),
+            range("COUNTER_REST_OPACITY", COUNTER_REST_RANGE),
+            range("COUNTER_HOVER_OPACITY", COUNTER_HOVER_RANGE),
+            format!("export const DEFAULT_PILL_SCALE = {};\n", defaults.pill_scale),
+            format!("export const COUNTER_DEFAULT: Readonly<CounterStyle> = {};\n", serde_json::to_string(&defaults.counter).unwrap()),
+        ]
+        .concat();
+        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR, set in .cargo/config.toml");
+        std::fs::write(std::path::Path::new(&dir).join("limits.ts"), text).unwrap();
+    }
 
     #[derive(Clone, Default)]
     pub struct MemorySecrets {

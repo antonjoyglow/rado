@@ -10,7 +10,7 @@ const LATEST: &str = "https://api.github.com/repos/antonjoyglow/rado/releases/la
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// A release newer than the running Rado, and where to get it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NewerRelease {
     pub version: String,

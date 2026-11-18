@@ -18,7 +18,8 @@ const UNPACKED: i64 = 4;
 /// Folder names the extension has shipped under; the only clue left once its folder is gone.
 const FOLDER_NAMES: [&str; 2] = ["browser-extension", "edge-extension"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(rename = "ExtensionState")]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum Status {
     /// Loaded and switched on; `from` names the folder when it isn't the bundled one.
@@ -31,7 +32,8 @@ pub enum Status {
 }
 
 /// The extension's status in one browser, and the folder the installer put it in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(export, rename = "ExtensionStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     folder: String,

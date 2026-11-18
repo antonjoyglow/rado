@@ -7,11 +7,14 @@ use crate::score::{CommentStats, Provider, ReviewItem, ReviewState};
 use crate::workspace::Tracker;
 
 /// One PR inside a row; `state` is `None` for a PR on the same branch that I am not asked to review.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
+    /// Unique across sources; what `open_pr` takes.
+    #[ts(type = "number")]
     pub id: i64,
     pub provider: Provider,
+    #[ts(type = "number")]
     pub number: i64,
     pub repo: String,
     pub title: String,
@@ -34,8 +37,11 @@ pub struct Related {
     pub created_at: DateTime<Utc>,
 }
 
-/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole.
-#[derive(Debug, Clone, Serialize)]
+/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole:
+/// `createdAt` is when its earliest PR assigned to me (or mine) was opened, and `updatedAt` the latest activity
+/// across those PRs, a later sibling's opening included.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "ReviewItem")]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRow {
     pub key: String,
@@ -43,6 +49,7 @@ pub struct ReviewRow {
     pub summary: ReviewItem,
     pub members: Vec<Member>,
     /// Age of the row's most recently opened PR; "Your PRs" sorts on it, newest first.
+    #[ts(type = "number")]
     pub newest_age_hours: i64,
     /// The tracker's issue key in the branch name, such as `ABC-12` in `feature/ABC-12-login`; none without a tracker.
     pub ticket: Option<String>,
@@ -208,7 +215,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
 }
 
 /// The counter's two numbers, counted in rows: rows waiting on my review, and rows of mine that need work.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, ts_rs::TS)]
 pub struct Counts {
     pub reviews: u32,
     pub mine: u32,

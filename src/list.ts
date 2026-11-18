@@ -3,6 +3,7 @@ import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, datesTooltip, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
+import { POLL_MINUTES } from "./bindings/limits";
 import { h } from "./dom";
 import { bird, glow, yawn } from "./bird";
 import { glows, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
@@ -441,7 +442,7 @@ function renderSettings(
 
   /** The General tab's fields, filled from `settings`; built once, and re-shown through `generalShows`. */
   const generalFields = (): HTMLElement[] => {
-    const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
+    const minutes = h("input", { type: "number", min: String(POLL_MINUTES[0]), max: String(POLL_MINUTES[1]), value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
     const chips = POLL_CHOICES.map((m) =>
       h("button", { type: "button", class: "chip", data: { on: String(m === settings.pollMinutes) }, onclick: () => setMinutes(m) }, `${m} min`),
     );
@@ -457,7 +458,7 @@ function renderSettings(
     });
     minutes.onchange = () => {
       const m = parseMinutes(minutes.value);
-      if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
+      if (m === null) fail(n.minutes, `Use a whole number from ${POLL_MINUTES[0]} to ${POLL_MINUTES[1]}.`);
       else setMinutes(m);
     };
 

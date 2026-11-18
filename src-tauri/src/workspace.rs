@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// A named set of sources; only the active one is polled. A source is on once its secret is saved.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Workspace {
     /// Stable across renames; names this workspace's keyring entries and data folder.
@@ -18,7 +19,7 @@ pub struct Workspace {
     pub tracker: Tracker,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AdoSource {
     pub organization: String,
@@ -26,7 +27,7 @@ pub struct AdoSource {
     pub teams: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GithubSource {
     /// Repos (`owner/name`) whose open PRs, other than drafts and mine, all count as waiting on my review.
@@ -35,7 +36,7 @@ pub struct GithubSource {
 
 /// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
 /// only branch keys with one of them count.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Tracker {
     #[default]

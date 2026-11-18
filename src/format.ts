@@ -1,4 +1,7 @@
 import type { Member, PrRef, ReviewItem } from "./api";
+import { PILL_SCALE, POLL_MINUTES } from "./bindings/limits";
+
+export { LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, TEXT_SCALE } from "./bindings/limits";
 
 /** "WebApp !3353" on Azure DevOps, "rado #4" on GitHub. */
 export function prLabel(pr: PrRef): string {
@@ -55,19 +58,14 @@ export function newestFirst(items: ReviewItem[]): ReviewItem[] {
   return [...items].sort((a, b) => a.newestAgeHours - b.newestAgeHours);
 }
 
-/** Counter size limits and button step, in percent; Rust clamps to the same range. */
-export const SCALE_MIN = 75;
-export const SCALE_MAX = 200;
+/** Counter size limits and button step, in percent. */
+export const [SCALE_MIN, SCALE_MAX] = PILL_SCALE;
 export const SCALE_STEP = 25;
 
 /** A typed counter size: any whole percent from SCALE_MIN to SCALE_MAX. */
 export function parseScale(text: string): number | null {
   return parseWhole(text, [SCALE_MIN, SCALE_MAX]);
 }
-
-/** Allowed review list width and height in percent of its screen, matching `LIST_*_PERCENT_RANGE` in `store.rs`. */
-export const LIST_WIDTH_PERCENT: readonly [number, number] = [20, 100];
-export const LIST_HEIGHT_PERCENT: readonly [number, number] = [25, 100];
 
 /** A typed whole number inside `range`, such as a list width in percent. */
 export function parseWhole(text: string, [min, max]: readonly [number, number]): number | null {
@@ -77,8 +75,7 @@ export function parseWhole(text: string, [min, max]: readonly [number, number]):
   return Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
-/** List text size limits, button step and chips, in percent; Rust clamps to the same range. */
-export const TEXT_SCALE: readonly [number, number] = [80, 150];
+/** List text size button step and chips, in percent. */
 export const TEXT_STEP = 5;
 export const TEXT_CHOICES = [90, 100, 115, 130] as const;
 
@@ -145,8 +142,5 @@ export function datesTooltip(members: Member[], format: (iso: string) => string)
 }
 
 export function parseMinutes(text: string): number | null {
-  const trimmed = text.trim();
-  // Number("") is 0, which would pass any range that starts at 0.
-  const value = trimmed === "" ? NaN : Number(trimmed);
-  return Number.isInteger(value) && value >= 1 && value <= 120 ? value : null;
+  return parseWhole(text, POLL_MINUTES);
 }

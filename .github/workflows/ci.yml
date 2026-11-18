@@ -23,4 +23,12 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Generated TS types match the Rust ones
+        shell: bash
+        run: |
+          changed=$(git status --porcelain src/bindings)
+          if [ -n "$changed" ]; then
+            echo "$changed"; git diff src/bindings
+            echo "::error::src/bindings is out of date: run cargo test and commit the result"; exit 1
+          fi
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
