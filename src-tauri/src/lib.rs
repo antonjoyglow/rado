@@ -1199,6 +1199,15 @@ mod tests {
     }
 
     #[test]
+    fn applyPoll_everySourceFailed_writesNoQueue() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let (ado, github) = (Poll::Failed("Azure DevOps: x".into()), Poll::Failed("GitHub: y".into()));
+        let applied = apply_poll(&mut s, generation, ado, github, Utc::now()).expect("current poll");
+        assert!(applied.queue.is_none(), "a stale queue must age out, not be re-stamped");
+    }
+
+    #[test]
     fn applyPoll_partialGitHubPoll_queuesWhatCameBackAndNamesGitHub() {
         let mut s = two_workspaces();
         let generation = s.credentials_generation;

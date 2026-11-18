@@ -85,8 +85,9 @@ fn tools() -> Value {
         {
             "name": "mark_drafted",
             "description": "Records that a draft review now exists for this PR at this source commit, so later runs skip it \
-                until someone pushes again. Call it once per PR, after the draft is published. Changes nothing on Azure DevOps \
-                or GitHub.",
+                until someone pushes again. Call it once per PR, after the draft is published, with the prId (not the GitHub \
+                PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
+                out of the queue is still accepted. Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -146,20 +147,22 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
     let queue = read_queue(dir)?;
     // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
-    // source is missing, a PR listed before it dropped out is accepted: a draft hides a PR only at this id and commit.
-    let queued = queue.branches.iter().flat_map(|b| &b.prs).any(|p| p.pr_id == pr_id && p.source_commit.as_deref() == Some(commit));
-    if !queued && queue.missing_sources.is_empty() {
-        return Err(format!("PR {pr_id} at {commit} is not in Rado's review queue; list it again"));
+    // source is missing, a PR listed before it dropped out is accepted (a draft hides a PR only at this id and commit),
+    // unless the commit belongs to a queued PR under another id: then the id is wrong, such as a GitHub PR number.
+    let prs = || queue.branches.iter().flat_map(|b| &b.prs);
+    let queued = prs().any(|p| p.pr_id == pr_id && p.source_commit.as_deref() == Some(commit));
+    let other_id = prs().any(|p| p.source_commit.as_deref() == Some(commit));
+    if !queued && (queue.missing_sources.is_empty() || other_id) {
+        return Err(format!("PR {pr_id} at {commit} is not in Rado's review queue; pass the prId from list_review_queue"));
     }
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
-    drafts.insert(pr_id, commit.to_string());
     // A source that failed or answered in part is missing PRs, so their drafts survive until it answers in full, up
     // to a cap for a source that stays missing.
-    if queue.missing_sources.is_empty() || drafts.len() > MAX_DRAFTS_WHILE_MISSING {
+    if queue.missing_sources.is_empty() || drafts.len() >= MAX_DRAFTS_WHILE_MISSING {
         queue::prune(&mut drafts, &queue);
-        drafts.insert(pr_id, commit.to_string());
     }
+    drafts.insert(pr_id, commit.to_string());
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
@@ -312,6 +315,20 @@ mod tests {
         assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 5, "commit": "c5" })).get("isError"), None);
 
         assert_eq!(queue::read_json::<Drafts>(&path.join(DRAFTS_FILE)).unwrap(), Drafts::from([(5, "c5".to_string())]));
+    }
+
+    #[test]
+    fn markDrafted_whileASourceIsMissing_wrongIdForAQueuedCommit_isAnError() {
+        let dir = with_queue("wrong-id");
+        let path = queue::workspace_dir(&dir.0, "w1");
+        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
+        q.missing_sources = vec![queue::GITHUB.into()];
+        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 12, "commit": "c1" }));
+
+        assert_eq!(result["isError"], true);
+        assert!(!path.join(DRAFTS_FILE).exists());
     }
 
     #[test]
