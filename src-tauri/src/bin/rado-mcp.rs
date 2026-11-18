@@ -87,7 +87,7 @@ fn tools() -> Value {
             "description": "Records that a draft review now exists for this PR at this source commit, so later runs skip it \
                 until someone pushes again. Call it once per PR, after the draft is published, with the prId (not the GitHub \
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
-                out of the queue is still accepted, unless the id is a queued PR's GitHub number. A queued PR at another \
+                out of the queue is still accepted, unless the id is a queued PR's GitHub number at that commit. A queued PR at another \
                 commit is refused: list again. Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
@@ -338,6 +338,10 @@ mod tests {
 
         let sibling = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 5, "commit": "c1" }));
         assert_eq!(sibling.get("isError"), None);
+        let same_number_other_commit = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 12, "commit": "c9" }));
+        assert_eq!(same_number_other_commit.get("isError"), None);
+        let drafts: Drafts = queue::read_json(&path.join(DRAFTS_FILE)).unwrap();
+        assert_eq!(drafts, Drafts::from([(5, "c1".to_string()), (12, "c9".to_string())]));
     }
 
     #[test]
