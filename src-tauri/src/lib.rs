@@ -367,9 +367,9 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     let mut urls = HashMap::new();
     let mut errors = Vec::new();
     let mut fresh_sources = Vec::new();
-    // Sources whose full list is in hand: fresh without a warning, or off (no token saved, so it has no PRs).
-    // A hidden PR is pruned only once it closed according to its own source's full list.
-    let mut complete: HashSet<score::Provider> = HashSet::new();
+    // Sources whose full list is in hand (fresh without a warning), and sources with no token saved.
+    let mut answered: HashSet<score::Provider> = HashSet::new();
+    let mut off: HashSet<score::Provider> = HashSet::new();
     let mut ado_prs = None;
     let mut github_refs = None;
     let mut missing = Vec::new();
@@ -385,7 +385,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         Poll::Off => {
             ws.related.clear();
             ws.known_actionable.remove(&score::Provider::Ado);
-            complete.insert(score::Provider::Ado);
+            off.insert(score::Provider::Ado);
         }
         Poll::Failed(error) => {
             errors.push(error);
@@ -394,7 +394,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         }
         Poll::Fresh(poll) => {
             fresh_sources.push((score::Provider::Ado, false));
-            complete.insert(score::Provider::Ado);
+            answered.insert(score::Provider::Ado);
             let me = score::Me { id: &poll.my_id, teams: &poll.teams };
             let mut ranked = score::rank(&poll.prs, &me, &mut ws.memory, now);
             score::attach_threads(&mut ranked, &poll.threads, &was_stale, now);
@@ -422,7 +422,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     match github {
         Poll::Off => {
             ws.known_actionable.remove(&score::Provider::GitHub);
-            complete.insert(score::Provider::GitHub);
+            off.insert(score::Provider::GitHub);
         }
         Poll::Failed(error) => {
             errors.push(error);
@@ -434,7 +434,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
             match &fetched.warning {
                 Some(warning) => errors.push(format!("GitHub: {warning}")),
                 None => {
-                    complete.insert(score::Provider::GitHub);
+                    answered.insert(score::Provider::GitHub);
                 }
             }
             if fetched.partial {
@@ -455,7 +455,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     if fresh_sources.is_empty() {
         return Some(applied);
     }
-    if prune_hidden(ws, &complete) {
+    if prune_hidden(ws, &answered, &off) {
         applied.hidden = Some(hidden_file(ws));
     }
     mark_hidden(ws);
@@ -488,17 +488,18 @@ fn next_known(known: Option<&HashSet<i64>>, listed: &[&ReviewItem], partial: boo
     (waiting, new)
 }
 
-/// Drops hidden PRs that closed: ones no longer listed, by a source in `complete`. A PR with no known source (hidden
-/// before sources were saved) waits until every source is complete. True when the saved file must change.
-fn prune_hidden(ws: &mut WorkspaceState, complete: &HashSet<score::Provider>) -> bool {
+/// Drops hidden PRs that closed: ones no longer listed by their source's full answer. A source that is off never
+/// answered, so its hidden PRs wait for it. A PR with no known source (hidden before sources were saved) goes once
+/// every source either answered or is off. True when the saved files must change.
+fn prune_hidden(ws: &mut WorkspaceState, answered: &HashSet<score::Provider>, off: &HashSet<score::Provider>) -> bool {
     let mut changed = false;
     for item in ws.items.iter().filter(|i| ws.hidden.contains(&i.id)) {
         changed |= ws.hidden_source.insert(item.id, item.provider) != Some(item.provider);
     }
-    let every = [score::Provider::Ado, score::Provider::GitHub].iter().all(|p| complete.contains(p));
+    let every = [score::Provider::Ado, score::Provider::GitHub].iter().all(|p| answered.contains(p) || off.contains(p));
     let before = ws.hidden.len();
     let (urls, sources) = (&ws.urls, &ws.hidden_source);
-    ws.hidden.retain(|id| urls.contains_key(id) || !sources.get(id).map_or(every, |p| complete.contains(p)));
+    ws.hidden.retain(|id| urls.contains_key(id) || !sources.get(id).map_or(every, |p| answered.contains(p)));
     let hidden = &ws.hidden;
     ws.hidden_source.retain(|id, _| hidden.contains(id));
     changed || ws.hidden.len() != before
@@ -1241,15 +1242,15 @@ mod tests {
     fn pruneHidden_learningASource_isSaved() {
         let mut ws = hidden_state();
         ws.urls.insert(1, "https://x/1".into());
-        assert!(prune_hidden(&mut ws, &complete(&[])), "1's source was learned, so the file changes");
+        assert!(prune_hidden(&mut ws, &complete(&[]), &complete(&[])), "1's source was learned, so the file changes");
         assert_eq!(hidden_file(&ws), store::Hidden::from([(1, Some(Provider::Ado)), (2, Some(Provider::GitHub)), (3, None)]));
-        assert!(!prune_hidden(&mut ws, &complete(&[])));
+        assert!(!prune_hidden(&mut ws, &complete(&[]), &complete(&[])));
     }
 
     #[test]
     fn pruneHidden_failedAzureDevOps_keepsItsHiddenPrs_andPrunesGitHubsClosedOnes() {
         let mut ws = hidden_state();
-        assert!(prune_hidden(&mut ws, &complete(&[Provider::GitHub])));
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::GitHub]), &complete(&[])));
         assert_eq!(ws.hidden, ids(&[1, 3]), "1 is Azure DevOps's, 3 has no known source while Azure DevOps failed");
         assert_eq!(ws.hidden_source.get(&1), Some(&Provider::Ado));
     }
@@ -1259,7 +1260,7 @@ mod tests {
         let mut ws = hidden_state();
         ws.items.clear();
         ws.hidden_source.insert(1, Provider::Ado);
-        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado])));
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado]), &complete(&[])));
         assert_eq!(ws.hidden, ids(&[2, 3]));
     }
 
@@ -1267,9 +1268,30 @@ mod tests {
     fn pruneHidden_everySourceComplete_prunesWhatClosed_andKeepsWhatIsOpen() {
         let mut ws = hidden_state();
         ws.urls.insert(1, "https://x/1".into());
-        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado, Provider::GitHub])));
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado, Provider::GitHub]), &complete(&[])));
         assert_eq!(ws.hidden, ids(&[1]));
         assert_eq!(ws.hidden_source.keys().copied().collect::<HashSet<_>>(), ids(&[1]));
+    }
+
+    #[test]
+    fn pruneHidden_sourceTurnedOff_keepsItsHiddenPrs_butAnUnknownOneGoes() {
+        let mut ws = hidden_state();
+        ws.items.clear();
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado]), &complete(&[Provider::GitHub])));
+        assert_eq!(ws.hidden, ids(&[2]), "2 is GitHub's, which is off; 1 closed on Azure DevOps; 3 has no source");
+    }
+
+    #[test]
+    fn applyPoll_gitHubOnly_prunesClosedPrs_andDoesntRewriteTheFileEachPoll() {
+        let mut s = two_workspaces();
+        s.ws.hidden = ids(&[7, 8]);
+        let poll = |s: &mut Inner| {
+            let generation = s.credentials_generation;
+            apply_poll(s, generation, Poll::Off, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll")
+        };
+        let first = poll(&mut s).hidden.expect("8 closed; 7's source learned");
+        assert_eq!(first, store::Hidden::from([(7, Some(Provider::GitHub))]));
+        assert!(poll(&mut s).hidden.is_none(), "nothing changed");
     }
 
     #[test]

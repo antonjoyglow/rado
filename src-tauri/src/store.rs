@@ -12,6 +12,7 @@ use crate::workspace::{self, Legacy, Workspace};
 const KEYRING_SERVICE: &str = "review-bracket";
 const MEMORY_FILE: &str = "votes.json";
 const HIDDEN_FILE: &str = "hidden.json";
+const HIDDEN_SOURCES_FILE: &str = "hidden-sources.json";
 /// A copy of the settings file from before workspaces, written once and never overwritten.
 const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 
@@ -439,21 +440,21 @@ impl Store {
         self.write_in(id, MEMORY_FILE, memory)
     }
 
-    /// Hidden PR ids, each with the source it came from; a file from before sources were kept gives `None`.
+    /// Hidden PR ids, each with the source it came from; `None` when none is recorded or the entry is unreadable.
     pub fn hidden(&self, id: &str) -> Hidden {
-        // Not an untagged enum: serde can't read integer map keys through one.
-        let file: Option<Value> = queue::read_json(&self.workspace_dir(id).join(HIDDEN_FILE));
-        match file {
-            Some(value @ Value::Array(_)) => {
-                serde_json::from_value::<HashSet<i64>>(value).unwrap_or_default().into_iter().map(|id| (id, None)).collect()
-            }
-            Some(value) => serde_json::from_value(value).unwrap_or_default(),
-            None => Hidden::new(),
-        }
+        let dir = self.workspace_dir(id);
+        let ids: HashSet<i64> = queue::read_json(&dir.join(HIDDEN_FILE)).unwrap_or_default();
+        let sources: HashMap<String, Value> = queue::read_json(&dir.join(HIDDEN_SOURCES_FILE)).unwrap_or_default();
+        let source = |id: i64| sources.get(&id.to_string()).and_then(|v| serde_json::from_value(v.clone()).ok());
+        ids.into_iter().map(|id| (id, source(id))).collect()
     }
 
+    /// The ids stay a plain array in `hidden.json`, which versions before 0.10.0 read; sources go beside it.
     pub fn save_hidden(&self, id: &str, hidden: &Hidden) -> Result<(), String> {
-        self.write_in(id, HIDDEN_FILE, hidden)
+        let ids: HashSet<i64> = hidden.keys().copied().collect();
+        let sources: HashMap<i64, Provider> = hidden.iter().filter_map(|(id, source)| Some((*id, (*source)?))).collect();
+        self.write_in(id, HIDDEN_SOURCES_FILE, &sources)?;
+        self.write_in(id, HIDDEN_FILE, &ids)
     }
 
     /// For the MCP server (`rado-mcp`), which reads it and never touches the PAT.
@@ -718,8 +719,13 @@ pub(crate) mod tests {
         store.save_hidden("a1", &hidden).unwrap();
         assert_eq!(store.hidden("a1"), hidden);
 
-        std::fs::write(queue::workspace_dir(&dir.0, "a1").join(HIDDEN_FILE), "[4, 5]").unwrap();
-        assert_eq!(store.hidden("a1"), Hidden::from([(4, None), (5, None)]));
+        let folder = queue::workspace_dir(&dir.0, "a1");
+        let ids: Vec<i64> = serde_json::from_slice(&std::fs::read(folder.join(HIDDEN_FILE)).unwrap()).unwrap();
+        assert_eq!(ids.len(), 3, "hidden.json stays the id array that older versions read");
+
+        std::fs::write(folder.join(HIDDEN_SOURCES_FILE), r#"{"4":"ado","5":"someday","x":"gitHub"}"#).unwrap();
+        std::fs::write(folder.join(HIDDEN_FILE), "[4, 5, 6]").unwrap();
+        assert_eq!(store.hidden("a1"), Hidden::from([(4, Some(Provider::Ado)), (5, None), (6, None)]));
     }
 
     #[test]
