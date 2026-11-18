@@ -233,11 +233,18 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
             if current(s) {
                 s.saved.insert(workspace.id.clone(), saved);
                 s.polling = false;
-                // After the last token is removed, its rows must not stay listed as if current.
+                // After the last token is removed, its rows must not stay listed, nor queued for an agent, as if current.
                 s.ws.items.clear();
                 s.ws.urls.clear();
                 s.ws.related.clear();
-                s.ws.known_actionable.clear();
+                let empty = queue::Queue {
+                    refreshed: Utc::now(),
+                    organization: workspace.azure_dev_ops.organization.clone(),
+                    poll_minutes: s.settings.poll_minutes,
+                    missing_sources: Vec::new(),
+                    branches: Vec::new(),
+                };
+                let _ = shared.store.save_queue(&workspace.id, &empty);
                 s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
             }
         });

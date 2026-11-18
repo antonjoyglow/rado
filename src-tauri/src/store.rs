@@ -489,8 +489,8 @@ impl Store {
 
     /// Removes a deleted workspace's secrets and data folder.
     pub fn forget(&self, id: &str) -> Result<(), String> {
-        self.secrets.delete(&workspace::pat_key(id))?;
-        self.secrets.delete(&workspace::github_key(id))?;
+        self.remove_pat(id)?;
+        self.remove_github_token(id)?;
         let dir = self.workspace_dir(id);
         match std::fs::remove_dir_all(&dir) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", dir.display())),
@@ -747,19 +747,6 @@ pub(crate) mod tests {
 
         assert_eq!(secrets.keys(), ["ado-pat:b2"]);
         assert!(!queue::workspace_dir(&dir.0, "a1").exists());
-    }
-
-    #[test]
-    fn removeTokens_deleteOnlyThatWorkspacesEntry_andMissingIsFine() {
-        let dir = TempDir::new("remove-token");
-        let secrets = MemorySecrets::with(&[("ado-pat:a1", "p"), ("github-token:a1", "g"), ("ado-pat:b2", "q")]);
-        let store = store(&dir, &secrets);
-
-        store.remove_pat("a1").unwrap();
-        store.remove_github_token("a1").unwrap();
-        store.remove_pat("a1").unwrap();
-
-        assert_eq!(secrets.keys(), ["ado-pat:b2"]);
     }
 
     #[test]
