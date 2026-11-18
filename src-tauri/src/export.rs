@@ -29,13 +29,6 @@ pub struct GitHubRef {
     pub agent: bool,
 }
 
-/// Labels that mark a PR as written by an agent, compared without case.
-const AGENT_LABELS: [&str; 4] = ["agent", "ai", "ai-generated", "ai-assisted"];
-
-pub fn is_agent_label(name: &str) -> bool {
-    AGENT_LABELS.iter().any(|l| l.eq_ignore_ascii_case(name.trim()))
-}
-
 /// The reviews waiting on me, grouped by branch in rank order, with what an agent needs to call the provider.
 /// Leaves out hidden PRs, my own PRs, PRs I approved or am waiting on, and PRs of a source that wasn't fresh.
 pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls: &HashMap<i64, String>, ctx: &Context) -> Queue {
@@ -74,8 +67,9 @@ pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls:
             age_hours: item.age_hours,
             draft: item.draft,
             required: item.required,
+            // A vote dismissed without a push leaves nothing new to diff against, so the whole PR is the review.
+            last_voted_commit: last_voted.filter(|v| re_review && Some(v) != source_commit.as_ref()),
             source_commit,
-            last_voted_commit: last_voted.filter(|_| re_review),
         };
         // The same branch name on two providers is two changes.
         match branches.iter_mut().find(|b| b.branch == item.branch && b.prs[0].provider == provider) {
@@ -224,9 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn isAgentLabel_matchesWholeNamesWithoutCase() {
-        assert!(is_agent_label("AI-Generated") && is_agent_label(" agent "));
-        assert!(!is_agent_label("airflow") && !is_agent_label("agents"));
+    fn queue_voteDismissedWithoutAPush_hasNoLastVotedCommit() {
+        let dismissed = GitHubRef { last_voted: Some("h2".into()), ..github_ref(false) };
+        let refs = HashMap::from([(9_000_001, dismissed)]);
+        let sources = Sources { ado: None, github: Some(&refs), missing: vec![] };
+
+        let q = queue(&[on_github(9_000_001, "feat", ReviewState::ReReview)], &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
+
+        assert_eq!(q.branches[0].prs[0].last_voted_commit, None);
     }
 
     #[test]

@@ -416,6 +416,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
             if let Some(warning) = &fetched.warning {
                 errors.push(format!("GitHub: {warning}"));
                 complete = false;
+                missing.push(queue::GITHUB.to_string());
             }
             let (mut ranked, gh_urls, threads) = github::items(&fetched, now);
             score::attach_threads(&mut ranked, &threads, &was_stale, now);
@@ -1193,6 +1194,27 @@ mod tests {
         let generation = s.credentials_generation;
         let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
         assert_eq!(applied.queue.expect("a queue").missing_sources, [queue::AZURE_DEV_OPS]);
+    }
+
+    #[test]
+    fn applyPoll_partialGitHubPoll_queuesWhatCameBackAndNamesGitHub() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let applied = apply_poll(&mut s, generation, Poll::Off, Poll::Fresh(github::tests::partial(&[7])), Utc::now()).expect("current poll");
+        let queue = applied.queue.expect("a queue");
+        assert_eq!((queue.branches[0].prs[0].pr_id, queue.missing_sources.as_slice()), (7, [queue::GITHUB.to_string()].as_slice()));
+    }
+
+    #[test]
+    fn applyPoll_failedAzureDevOps_keepsItsRowsButLeavesThemOutOfTheQueue() {
+        let mut s = two_workspaces();
+        s.ws.items = vec![ReviewItem { provider: Provider::Ado, ..pr(1, ReviewState::NeedsReview) }];
+        let generation = s.credentials_generation;
+        let failed = Poll::Failed("Azure DevOps: HTTP 503".into());
+        let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert!(listed(&s).contains(&1));
+        let queued: Vec<i64> = applied.queue.expect("a queue").branches.iter().flat_map(|b| &b.prs).map(|p| p.pr_id).collect();
+        assert_eq!(queued, [7]);
     }
 
     #[test]

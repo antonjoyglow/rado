@@ -71,12 +71,13 @@ fn tools() -> Value {
             "description": "The pull requests waiting on the user's review, from Rado, best-ranked first, on Azure DevOps \
                 and GitHub. PRs are grouped by source branch: one branch is one change, even across repos. Hidden PRs, the \
                 user's own PRs and PRs already drafted at their current source commit are left out. Each PR has a provider: \
-                for azureDevOps, project, repo, repoId and number (the PR id) are what the Azure DevOps MCP tools take; for \
-                gitHub, project is the owner, repo the repository name and number the PR number. sourceCommit is the head \
-                commit to review. agentAuthored is true for a PR opened by a bot or labelled as agent work. A reReview PR has \
-                new pushes since the user's vote: lastVotedCommit is the commit they voted on, so review only what changed \
-                since then. missingSources names a provider whose last poll failed: its PRs are absent, not done. \
-                Fails when Rado's data is stale; then review nothing.",
+                for azureDevOps, project, repo, repoId and prId are what the Azure DevOps MCP tools take; for gitHub, project \
+                is the owner, repo the repository name and number the PR number. sourceCommit is the head commit to review. \
+                agentAuthored (GitHub only; always false on Azure DevOps) is true for a PR opened by a bot account or \
+                labelled agent, ai, ai-generated or ai-assisted. A reReview PR with lastVotedCommit has new pushes since \
+                the user's vote, so review only what changed since that commit; without it, review the whole PR. \
+                missingSources names a provider whose last poll failed or came back partial: some of its PRs may be \
+                absent, which doesn't mean they are done. Fails when Rado's data is stale; then review nothing.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "title": "List review queue", "readOnlyHint": true, "openWorldHint": false },
         },
@@ -151,7 +152,10 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
     drafts.insert(pr_id, commit.to_string());
-    queue::prune(&mut drafts, &queue);
+    // A source that failed or answered in part is missing PRs; their drafts must survive until it answers in full.
+    if queue.missing_sources.is_empty() {
+        queue::prune(&mut drafts, &queue);
+    }
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
@@ -277,6 +281,21 @@ mod tests {
 
         let ids: Vec<i64> = body["branches"][0]["prs"].as_array().unwrap().iter().map(|p| p["prId"].as_i64().unwrap()).collect();
         assert_eq!(ids, [2]);
+    }
+
+    #[test]
+    fn markDrafted_whileASourceIsMissing_keepsOtherDrafts() {
+        let dir = with_queue("missing-source");
+        let path = queue::workspace_dir(&dir.0, "w1");
+        write_json_atomic(&path.join(DRAFTS_FILE), &Drafts::from([(99, "c99".to_string())])).unwrap();
+        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
+        q.missing_sources = vec![queue::GITHUB.into()];
+        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+
+        let drafts: Drafts = queue::read_json(&path.join(DRAFTS_FILE)).unwrap();
+        assert_eq!(drafts, Drafts::from([(1, "c1".to_string()), (99, "c99".to_string())]));
     }
 
     #[test]

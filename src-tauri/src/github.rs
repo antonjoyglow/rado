@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::ado::PrThreads;
-use crate::export::{self, GitHubRef};
+use crate::export::GitHubRef;
 use crate::score::{self, CommentStats, PrFacts, Provider, ReviewItem, ReviewState};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
@@ -120,7 +120,14 @@ pub struct PullRequest {
     votes: Nodes<Review>,
     review_threads: Nodes<Thread>,
     comments: Count,
-    labels: Nodes<Label>,
+    /// Only for the agent flag, so a missing or null list must not drop the PR.
+    #[serde(default, deserialize_with = "labels_or_none")]
+    labels: Vec<Label>,
+}
+
+fn labels_or_none<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Label>, D::Error> {
+    let nodes = Option::<Nodes<Option<Label>>>::deserialize(deserializer)?;
+    Ok(nodes.map(|n| n.nodes.into_iter().flatten().collect()).unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -268,6 +275,9 @@ pub fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap
     (items, urls, threads)
 }
 
+/// Labels that mark a PR as written by an agent, compared whole and without case.
+const AGENT_LABELS: [&str; 4] = ["agent", "ai", "ai-generated", "ai-assisted"];
+
 /// What the MCP queue needs for each fetched PR, by id: the owner, head commit, my last vote's commit and whether
 /// an agent wrote it.
 pub fn queue_refs(fetched: &Fetched) -> HashMap<i64, GitHubRef> {
@@ -276,7 +286,7 @@ pub fn queue_refs(fetched: &Fetched) -> HashMap<i64, GitHubRef> {
         .iter()
         .map(|(pr, _)| {
             let agent = pr.author.as_ref().is_some_and(|a| a.kind.as_deref() == Some("Bot"))
-                || pr.labels.nodes.iter().any(|l| export::is_agent_label(&l.name));
+                || pr.labels.iter().any(|l| AGENT_LABELS.iter().any(|a| a.eq_ignore_ascii_case(l.name.trim())));
             let reference = GitHubRef {
                 owner: pr.repository.owner.login.clone(),
                 head: pr.head_ref_oid.clone(),
@@ -593,9 +603,27 @@ pub(crate) mod tests {
         let mut labelled = node(2, "a", &[ME], &[]);
         labelled["labels"]["nodes"] = serde_json::json!([{ "name": "bug" }, { "name": "AI-Generated" }]);
         let mut other = node(3, "a", &[ME], &[]);
-        other["labels"]["nodes"] = serde_json::json!([{ "name": "airflow" }]);
+        other["labels"]["nodes"] = serde_json::json!([{ "name": "airflow" }, { "name": "agents" }]);
         let refs = queue_refs(&parse(&body(vec![bot, labelled, other], vec![], vec![])).unwrap());
         assert_eq!((refs[&1].agent, refs[&2].agent, refs[&3].agent), (true, true, false));
+    }
+
+    #[test]
+    fn nullLabels_keepThePr() {
+        let mut none = node(1, "a", &[ME], &[]);
+        none["labels"] = serde_json::Value::Null;
+        let mut null_node = node(2, "a", &[ME], &[]);
+        null_node["labels"]["nodes"] = serde_json::json!([null, { "name": "agent" }]);
+        let fetched = parse(&body(vec![none, null_node], vec![], vec![])).unwrap();
+        assert_eq!(fetched.prs.len(), 2);
+        assert!(queue_refs(&fetched)[&2].agent);
+    }
+
+    /// A poll whose PRs all request my review directly, from a search over 100 results.
+    pub fn partial(ids: &[i64]) -> Fetched {
+        let mut json: serde_json::Value = serde_json::from_slice(&body(ids.iter().map(|&id| node(id, "a", &[ME], &[])).collect(), vec![], vec![])).unwrap();
+        json["data"]["requested"]["issueCount"] = 140.into();
+        parse(&serde_json::to_vec(&json).unwrap()).unwrap()
     }
 
     #[test]

@@ -36,7 +36,8 @@ pub struct Queue {
     /// The Azure DevOps organization; empty for a workspace with GitHub only.
     pub organization: String,
     pub poll_minutes: u32,
-    /// Sources whose last poll failed (`azureDevOps`, `gitHub`): their PRs are missing from `branches`.
+    /// Sources whose last poll failed or came back partial (`azureDevOps`, `gitHub`): some of their PRs may be missing
+    /// from `branches`, so their drafts are not pruned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_sources: Vec<String>,
     /// Best-ranked first. One branch is one change, even when it spans several repos.
@@ -179,7 +180,7 @@ pub(crate) mod tests {
              "tier":"normal","score":50,"ageHours":1,"draft":false,"required":false,"sourceCommit":"c","lastVotedCommit":null}]}]}"#;
         let q: Queue = serde_json::from_str(old).unwrap();
         let pr = &q.branches[0].prs[0];
-        assert_eq!((pr.provider.as_str(), pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, false, 0));
+        assert_eq!((pr.provider.as_str(), pr.pr_id, pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, 7, false, 0));
     }
 
     fn branch(name: &str, prs: Vec<QueuedPr>) -> Branch {
