@@ -325,7 +325,8 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
     ),
     h("div", { class: "side" },
       ageCell(item),
-      h("span", { class: "actions" },
+      // A click between or beside the buttons must not open the row.
+      h("span", { class: "actions", onclick: (e: Event) => e.stopPropagation() },
         copy,
         h("button", {
           class: "action",

@@ -242,8 +242,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 /* Hidden actions stay in the Tab order. :focus-within would keep them shown after a mouse click on a chip. */
 @media (hover: hover) {
   .row .actions { opacity: 0; pointer-events: none; }
-  .row:hover .actions, .row:has(:focus-visible) .actions { opacity: 1; pointer-events: auto; }
-  .row:hover .age, .row:has(:focus-visible) .age { opacity: 0; }
+  .row:hover .actions, .row:has(:focus-visible) .actions, .row:has([data-flash]) .actions { opacity: 1; pointer-events: auto; }
+  .row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; }
 }
 @media (hover: none) {
   .row .side { column-gap: 8px; }
