@@ -450,16 +450,17 @@ impl Store {
         self.write_in(id, queue::QUEUE_FILE, queue)
     }
 
-    pub fn pat(&self, id: &str) -> Option<String> {
-        self.secrets.get(&workspace::pat_key(id))
+    /// The PAT, `None` when none is saved, or the error when Credential Manager couldn't be read.
+    pub fn read_pat(&self, id: &str) -> Result<Option<String>, String> {
+        self.secrets.read(&workspace::pat_key(id))
+    }
+
+    pub fn read_github_token(&self, id: &str) -> Result<Option<String>, String> {
+        self.secrets.read(&workspace::github_key(id))
     }
 
     pub fn save_pat(&self, id: &str, pat: &str) -> Result<(), String> {
         self.secrets.set(&workspace::pat_key(id), pat)
-    }
-
-    pub fn github_token(&self, id: &str) -> Option<String> {
-        self.secrets.get(&workspace::github_key(id))
     }
 
     pub fn save_github_token(&self, id: &str, token: &str) -> Result<(), String> {
