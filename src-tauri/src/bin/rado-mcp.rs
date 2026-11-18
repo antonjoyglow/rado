@@ -336,14 +336,21 @@ mod tests {
         assert_eq!(drafts.len() as i64, AGENTS * MARKS_EACH);
     }
 
+    /// Windows only: elsewhere a file lock doesn't stop a read.
+    #[cfg(windows)]
     #[test]
-    fn markDrafted_draftsFileUnreadable_isAnError() {
-        let dir = with_queue("unreadable");
-        std::fs::create_dir(queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE)).unwrap();
+    fn markDrafted_draftsFileLockedByAnotherProgram_isAnErrorAndKeepsTheDrafts() {
+        let dir = with_queue("locked");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        write_json_atomic(&path, &Drafts::from([(9, "c9".to_string())])).unwrap();
+        let held = File::options().read(true).write(true).open(&path).unwrap();
+        held.lock().unwrap();
 
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+        drop(held);
 
-        assert_eq!(result["isError"], true);
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
     #[test]
