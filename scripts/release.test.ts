@@ -113,6 +113,7 @@ describe("bumpVersions", () => {
     "src-tauri/tauri.conf.json": '{\n  "productName": "Rado",\n  "version": "0.7.0",\n  "plugins": { "x": { "version": "1" } }\n}\n',
     "src-tauri/Cargo.toml": '[package]\nname = "rado"\nversion = "0.7.0"\n\n[dependencies]\ntauri = { version = "2" }\n',
     "src-tauri/Cargo.lock": '[[package]]\r\nname = "quote"\r\nversion = "0.7.0"\r\n\r\n[[package]]\r\nname = "rado"\r\nversion = "0.7.0"\r\n',
+    "browser-extension/manifest.json": '{\n  "manifest_version": 3,\n  "name": "Rado tab groups",\n  "version": "0.7.0"\n}\n',
   };
   const out = bumpVersions(files, "0.8.0");
 
@@ -123,6 +124,7 @@ describe("bumpVersions", () => {
     expect(out["src-tauri/tauri.conf.json"]).toBe(files["src-tauri/tauri.conf.json"].replace('"0.7.0"', '"0.8.0"'));
     expect(out["src-tauri/Cargo.toml"]).toBe(files["src-tauri/Cargo.toml"].replace('"0.7.0"', '"0.8.0"'));
     expect(out["src-tauri/Cargo.lock"]).toBe(files["src-tauri/Cargo.lock"].replace('name = "rado"\r\nversion = "0.7.0"', 'name = "rado"\r\nversion = "0.8.0"'));
+    expect(out["browser-extension/manifest.json"]).toBe(files["browser-extension/manifest.json"].replace('"0.7.0"', '"0.8.0"'));
   });
 
   it("keepsJsonFormattingAndLineEndings", () => {

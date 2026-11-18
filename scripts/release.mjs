@@ -88,6 +88,8 @@ export function bumpVersions(files, version) {
     "src-tauri/tauri.conf.json": swap("tauri.conf.json", files["src-tauri/tauri.conf.json"], /("version":\s*")[^"]+(")/, `$1${version}$2`),
     "src-tauri/Cargo.toml": swap("Cargo.toml", files["src-tauri/Cargo.toml"], /^(version = ")[^"]+(")/m, `$1${version}$2`),
     "src-tauri/Cargo.lock": swap("Cargo.lock", files["src-tauri/Cargo.lock"], /(name = "rado"\r?\nversion = ")[^"]+(")/, `$1${version}$2`),
+    // The browser shows it on the extension's card, so an update that changed the extension can be told apart.
+    "browser-extension/manifest.json": swap("manifest.json", files["browser-extension/manifest.json"], /("version":\s*")[^"]+(")/, `$1${version}$2`),
   };
 }
 
@@ -126,7 +128,7 @@ function main(args) {
     console.log(existing ? report : `${report}\n\n${section}`);
     return;
   }
-  const names = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock"];
+  const names = ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "browser-extension/manifest.json"];
   const files = bumpVersions(Object.fromEntries(names.map((n) => [n, readFileSync(n, "utf8")])), version);
   if (!existing) files["CHANGELOG.md"] = upsertSection(changelog, version, section);
   for (const [n, text] of Object.entries(files)) writeFileSync(n, text);

@@ -33,8 +33,13 @@ pub fn active_workspace_dir(root: &Path) -> Option<PathBuf> {
 #[serde(rename_all = "camelCase")]
 pub struct Queue {
     pub refreshed: DateTime<Utc>,
+    /// The Azure DevOps organization; empty for a workspace with GitHub only.
     pub organization: String,
     pub poll_minutes: u32,
+    /// Sources whose last poll failed or came back partial (`azureDevOps`, `gitHub`): some of their PRs may be missing
+    /// from `branches`, so their drafts are not pruned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_sources: Vec<String>,
     /// Best-ranked first. One branch is one change, even when it spans several repos.
     pub branches: Vec<Branch>,
 }
@@ -49,10 +54,22 @@ pub struct Branch {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedPr {
+    /// `azureDevOps` or `gitHub`; files written before GitHub was queued have Azure DevOps PRs only.
+    #[serde(default = "azure_dev_ops")]
+    pub provider: String,
+    /// Unique across providers: the Azure DevOps PR id, or GitHub's database id. `mark_drafted` takes this one.
     pub pr_id: i64,
+    /// The number in the PR's URL: the PR id on Azure DevOps, the PR number on GitHub.
+    #[serde(default)]
+    pub number: i64,
+    /// The Azure DevOps project, or the GitHub owner.
     pub project: String,
     pub repo: String,
+    /// The Azure DevOps repository id, or `owner/repo` on GitHub.
     pub repo_id: String,
+    /// Opened by a bot account, or labelled as agent work (`agent`, `ai`, `ai-generated`, `ai-assisted`).
+    #[serde(default)]
+    pub agent_authored: bool,
     pub url: String,
     pub title: String,
     pub author: String,
@@ -67,6 +84,13 @@ pub struct QueuedPr {
     pub source_commit: Option<String>,
     /// The source commit when I last voted; set for a re-review, so only the changes since then need a look.
     pub last_voted_commit: Option<String>,
+}
+
+pub const AZURE_DEV_OPS: &str = "azureDevOps";
+pub const GITHUB: &str = "gitHub";
+
+fn azure_dev_ops() -> String {
+    AZURE_DEV_OPS.into()
 }
 
 /// The source commit at which the agent last drafted a review, keyed by PR id.
@@ -123,10 +147,13 @@ pub(crate) mod tests {
 
     pub fn pr(pr_id: i64, commit: &str) -> QueuedPr {
         QueuedPr {
+            provider: AZURE_DEV_OPS.into(),
             pr_id,
+            number: pr_id,
             project: "Contoso".into(),
             repo: "Api".into(),
             repo_id: "repo-id".into(),
+            agent_authored: false,
             url: format!("https://dev.azure.com/org/Contoso/_git/Api/pullrequest/{pr_id}"),
             title: format!("PR {pr_id}"),
             author: "Author".into(),
@@ -143,7 +170,17 @@ pub(crate) mod tests {
     }
 
     pub fn queue(branches: Vec<Branch>) -> Queue {
-        Queue { refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, branches }
+        Queue { refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, missing_sources: vec![], branches }
+    }
+
+    #[test]
+    fn queue_writtenBeforeGitHubWasQueued_readsAsAzureDevOps() {
+        let old = r#"{"refreshed":"2026-11-10T09:00:00Z","organization":"org","pollMinutes":3,"branches":[{"branch":"a","prs":[
+            {"prId":7,"project":"P","repo":"R","repoId":"rid","url":"u","title":"t","author":"a","target":"dev","state":"needsReview",
+             "tier":"normal","score":50,"ageHours":1,"draft":false,"required":false,"sourceCommit":"c","lastVotedCommit":null}]}]}"#;
+        let q: Queue = serde_json::from_str(old).unwrap();
+        let pr = &q.branches[0].prs[0];
+        assert_eq!((pr.provider.as_str(), pr.pr_id, pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, 7, false, 0));
     }
 
     fn branch(name: &str, prs: Vec<QueuedPr>) -> Branch {

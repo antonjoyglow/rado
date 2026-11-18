@@ -38,24 +38,32 @@ const STATUS_ON_LIGHT = { "--urgent": "#c22d2d", "--normal": "#a35f08", "--clear
 const STATUS_ON_DARK = { "--urgent": "#f26b6b", "--normal": "#d98a1c", "--clear": "#4cc07f" };
 
 /** Every variable a custom theme sets; `--low` is only a dot, so the stylesheet's grey stays. */
-const VARIABLES = ["--bg", "--fg", "--muted", "--line", "--hover", "--accent", "--on-accent", "--urgent", "--normal", "--clear"];
+const VARIABLES = ["--bg", "--fg", "--muted", "--line", "--hover", "--next-bg", "--accent", "--on-accent", "--urgent", "--normal", "--clear"];
 
 /** Every list colour variable, derived from the three picked colours. */
 export function customPalette({ background: bg, text: fg, accent }: CustomTheme): Record<string, string> {
   // A tint toward the text colour, unless that tint costs the text its 4.5:1; then a tint the other way.
   const away = luminance(fg) > luminance(bg) ? "#000000" : "#ffffff";
   const hover = [mix(fg, bg, 0.07), mix(away, bg, 0.07)].find((c) => contrast(fg, c) >= READABLE) ?? mix(fg, bg, 0.07);
-  // `color` blended toward the text colour just enough to read at 4.5:1 on the background and hover colours.
-  const readable = (color: string) =>
-    Array.from({ length: 20 }, (_, i) => mix(fg, color, i * 0.05)).find((c) => contrast(c, bg) >= READABLE && contrast(c, hover) >= READABLE) ?? fg;
+  // `color` blended toward the text colour just enough to read at 4.5:1 on every one of `unders`, if any blend does.
+  const blend = (color: string, unders: string[]) =>
+    Array.from({ length: 20 }, (_, i) => mix(fg, color, i * 0.05)).find((c) => unders.every((under) => contrast(c, under) >= READABLE));
   const status = luminance(bg) < 0.18 ? STATUS_ON_DARK : STATUS_ON_LIGHT;
+  const muted = mix(fg, bg, 0.6);
+  // The Review next row's tint, the stylesheet's 6% of accent. None where some text could no longer read on it,
+  // since status colours blended that far toward the text would all end up the text colour.
+  const tint = mix(accent, bg, 0.06);
+  const tinted = contrast(fg, tint) >= READABLE && [muted, ...Object.values(status)].every((c) => blend(c, [bg, hover, tint]));
+  const nextBg = tinted ? tint : bg;
+  const readable = (color: string) => blend(color, [bg, hover, nextBg]) ?? fg;
   return {
     "--bg": bg,
     "--fg": fg,
     // As faint as still reads.
-    "--muted": readable(mix(fg, bg, 0.6)),
+    "--muted": readable(muted),
     "--line": mix(fg, bg, 0.18),
     "--hover": hover,
+    "--next-bg": nextBg,
     "--accent": accent,
     "--on-accent": contrast("#000000", accent) >= contrast("#ffffff", accent) ? "#000000" : "#ffffff",
     ...Object.fromEntries(Object.entries(status).map(([name, color]) => [name, readable(color)])),

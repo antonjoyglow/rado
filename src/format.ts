@@ -101,7 +101,7 @@ export function hoursSince(iso: string, now: Date): number {
 }
 
 /**
- * The age column: opened, then last activity. Both are measured against `now`, so they stay consistent
+ * A row's times: opened, then last activity. Both are measured against `now`, so they stay consistent
  * between polls. The second part is absent when there was no activity after opening or it is unknown.
  */
 export function ageColumn(createdAt: string, updatedAt: string | null, now: Date): { opened: string; active: string | null } {
@@ -112,7 +112,32 @@ export function ageColumn(createdAt: string, updatedAt: string | null, now: Date
   };
 }
 
-/** Hover text for the age column: one line per PR with its exact opened and, when known, last-activity times. */
+/** One phrase of a row's details line; `kind` names the ones with a colour of their own. */
+export interface RowFact {
+  text: string;
+  kind?: "required" | "approved" | "objected";
+  title?: string;
+}
+
+/** A row's details, in display order. */
+export function rowFacts(item: ReviewItem): RowFact[] {
+  const { approvals, objections, comments } = item;
+  const facts: (RowFact | false | null)[] = [
+    ...(item.members.length > 1 ? [{ text: `${item.members.length} PRs` }, { text: item.branch }] : []),
+    { text: item.author },
+    item.required && { text: "required", kind: "required" },
+    approvals > 0 && { text: `✓ ${approvals}`, kind: "approved", title: `${approvals} approved` },
+    objections > 0 && { text: `✗ ${objections}`, kind: "objected", title: `${objections} rejected or waiting for author` },
+    comments && comments.total > 0 && {
+      text: `${comments.total} comment${comments.total === 1 ? "" : "s"}${comments.openThreads > 0 ? ` (${comments.openThreads} open)` : ""}`,
+    },
+    item.draft && { text: "draft" },
+    item.releaseTarget && { text: `→ ${item.target}`, title: `Merges into ${item.target}` },
+  ];
+  return facts.filter((f): f is RowFact => Boolean(f));
+}
+
+/** Hover text for a row's details: one line per PR with its exact opened and, when known, last-activity times. */
 export function datesTooltip(members: Member[], format: (iso: string) => string): string {
   return members
     .map((m) => `${prLabel(m)}: opened ${format(m.createdAt)}${m.updatedAt ? ` · last activity ${format(m.updatedAt)}` : ""}`)

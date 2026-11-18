@@ -1,11 +1,13 @@
-import { api, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, ago, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
+import { bird, glow, yawn } from "./bird";
+import { glows, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
-import { serialSaver } from "./save";
+import { lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
 import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
@@ -91,12 +93,13 @@ export function mountList(root: HTMLElement): void {
   const statusText = h("div");
   const newerText = h("span");
   const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void api.openNewerRelease() }, "Download"));
-  const status = h("div", { class: "status" }, statusText, newerLine);
+  const status = h("div", { class: "status", hidden: true }, statusText, newerLine);
+  const announcer = h("div", { class: "visually-hidden", role: "status" });
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
-  const bird = h("span", { class: "bird", ariaHidden: "true" });
-  const refreshButton = h("button", { class: "icon", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, "↻");
+  const logo = bird();
+  const refreshButton = h("button", { class: "icon refresh", type: "button", ariaLabel: "Refresh now", title: "Refresh now", onclick: () => void api.refresh() }, h("span", { class: "refresh-glyph" }, "↻"));
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
   const workspace = workspaceChip(() => showSettings(true, "workspaces"));
@@ -119,11 +122,12 @@ export function mountList(root: HTMLElement): void {
   });
 
   root.append(
-    h("header", {}, bird, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
+    h("header", {}, logo, heading, workspace.chip, refreshButton, settingsButton, closeButton, workspace.picker),
     status,
     strip.list,
     settingsPanel,
     body,
+    announcer,
   );
   strip.select(tab ?? "needsReview");
 
@@ -159,19 +163,32 @@ export function mountList(root: HTMLElement): void {
   let pollingSince: number | null = null;
 
   const renderStatus = () => {
-    if (!snapshot) return;
+    if (!snapshot || document.hidden) return;
+    const now = new Date();
+    const line = statusLine(snapshot, pollingSince, now);
     statusText.replaceChildren();
-    status.dataset.kind = snapshot.polling ? "busy" : snapshot.error ? "error" : "ok";
-    if (snapshot.polling) {
-      const seconds = pollingSince ? Math.round((Date.now() - pollingSince) / 1000) : 0;
-      statusText.append(h("span", { class: "spinner" }), `Refreshing… usually 1–3 s (${seconds} s)`);
-    } else if (snapshot.error) {
-      statusText.append(snapshot.error);
-    } else {
-      statusText.append(`Refreshed ${ago(snapshot.lastRefreshed, new Date())} · every ${snapshot.settings.pollMinutes} min`);
-    }
+    status.dataset.kind = line?.kind ?? "ok";
+    if (line?.kind === "busy") statusText.append(h("span", { class: "spinner" }), line.text);
+    else if (line) statusText.append(line.text);
     if (snapshot.warning) statusText.append(h("div", { class: "hint" }, snapshot.warning));
+    status.hidden = !showStatus(line, snapshot.warning, snapshot.newerRelease);
+    refreshButton.dataset.busy = String(snapshot.polling);
+    refreshButton.title = refreshTitle(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
   };
+
+  // A hidden list can't have focus (it hides when it loses it), so a yawn waits for the next focus.
+  let heldYawn = 0;
+  let yawning: Animation | null = null;
+  const settleYawn = ({ held, play }: Yawn) => {
+    heldYawn = held;
+    if (play === 0) return;
+    // Cleared first so a screen reader announces a repeat of the same text.
+    announcer.textContent = "";
+    requestAnimationFrame(() => { announcer.textContent = newReviewsText(play); });
+    if (yawning?.playState === "running") return;
+    yawning = yawn(logo);
+  };
+  void watchFresh((count) => settleYawn(onFresh(heldYawn, count, document.hasFocus())));
 
   const renderBody = () => {
     if (!snapshot) return;
@@ -180,7 +197,8 @@ export function mountList(root: HTMLElement): void {
       if (settingsPanel.hidden) showSettings(true, "workspaces");
       return;
     }
-    if (!snapshot.lastRefreshed) {
+    // One source can have rows while another has a token but never answered, which leaves lastRefreshed unset.
+    if (!snapshot.lastRefreshed && snapshot.items.length === 0) {
       body.append(h("p", { class: "empty" }, snapshot.error ? "Nothing loaded yet." : "Loading your reviews…"));
       return;
     }
@@ -207,6 +225,8 @@ export function mountList(root: HTMLElement): void {
   void watchSnapshot((s) => {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     const rescaled = s.settings.textScale !== snapshot?.settings.textScale;
+    const refreshed = glows(snapshot, s);
+    heldYawn = onSnapshot(heldYawn, snapshot?.settings.activeWorkspace ?? null, s.settings.activeWorkspace);
     snapshot = s;
     applyTheme(document.documentElement, s.settings.theme, s.settings.customTheme);
     document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
@@ -217,10 +237,15 @@ export function mountList(root: HTMLElement): void {
     renderStatus();
     renderBody();
     if (rescaled) revealTab();
+    if (refreshed) glow(logo);
   });
   setInterval(renderStatus, 1000);
-  // Rows opened since the last render change which review is next.
-  window.addEventListener("focus", renderBody);
+  document.addEventListener("visibilitychange", renderStatus);
+  window.addEventListener("focus", () => {
+    // Rows opened since the last render change which review is next.
+    renderBody();
+    settleYawn(onFocus(heldYawn));
+  });
   window.addEventListener("keydown", (e) => {
     const step = workspaceStep(e);
     if (step !== null && snapshot && !isTyping(e.target)) {
@@ -240,17 +265,15 @@ const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", l
 
 function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   const aggregate = item.members.length > 1;
-  // Plain text, so the outlined chips are exactly the things that open something.
-  const facts = [
-    h("span", {}, aggregate ? `${item.members.length} PRs · ${item.branch} · ${item.author}` : item.author),
-    item.required && h("span", { class: "required" }, "required"),
-    item.approvals > 0 && h("span", { class: "approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
-    item.objections > 0 && h("span", { class: "objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
-    item.comments && item.comments.total > 0 && h("span", {}, `${item.comments.total} comment${item.comments.total === 1 ? "" : "s"}${item.comments.openThreads > 0 ? ` (${item.comments.openThreads} open)` : ""}`),
-    item.draft && h("span", {}, "draft"),
-    item.releaseTarget && h("span", { title: `Merges into ${item.target}` }, `→ ${item.target}`),
-  ].filter((f): f is HTMLSpanElement => Boolean(f));
-  const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" · ", f]));
+  // Plain text, so the outlined chips are exactly the things that open something. The separating dots are
+  // drawn by the stylesheet inside each phrase, so a line never starts with one.
+  const facts = rowFacts(item).map(({ text, kind, title }) => {
+    const fact = h("span", { class: kind }, text);
+    if (title) fact.title = title;
+    return fact;
+  });
+  if (isNext) facts.unshift(h("span", { class: "next-label" }, "Review next"));
+  const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" ", f]));
   const members = item.members.map((m) => h("button", {
       class: "member",
       type: "button",
@@ -263,7 +286,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
       },
     }, prLabel(m)));
   const ticket = item.ticket && h("button", {
-    class: "member ticket",
+    class: "member",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
     onclick: (e: MouseEvent) => {
@@ -278,53 +301,56 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
     onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
   const tier = item.hidden ? "low" : item.tier;
-  // The title button is the keyboard target for opening the row: its click bubbles to this div, as does a click
-  // anywhere else on the row. The chips are buttons of their own beside it and stop their clicks here.
-  return h("div", { class: "row", data: { tier, next: String(isNext) } },
-    h("div", {
-      class: "open",
-      onclick: () => {
-        opened(item.key);
-        void api.openRow(item.key);
-      },
+  // The title button is the keyboard target for opening the row: its click bubbles to the row, as does a click
+  // anywhere else on it. The chips stop their clicks, and the actions cell stops its own.
+  return h("div", {
+    class: "row",
+    data: { tier, next: String(isNext) },
+    onclick: () => {
+      opened(item.key);
+      void api.openRow(item.key);
     },
-      h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
-      h("div", { class: "main" },
-        isNext && h("span", { class: "next-label" }, "Review next"),
-        h("button", {
-          class: "title",
-          type: "button",
-          title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
-        }, item.title),
-        h("span", { class: "meta" }, ...meta),
-        h("span", { class: "members" }, ticket, ...members),
-      ),
-      ageCell(item),
-    ),
-    h("span", { class: "actions" },
-      copy,
+  },
+    h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
+    h("div", { class: "main" },
       h("button", {
-        class: "action",
+        class: "title",
         type: "button",
-        title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
-        onclick: () => void api.setHidden(item.key, !item.hidden),
-      }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+        title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
+      }, item.title),
+      h("span", { class: "meta", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) }, ...meta),
+      h("span", { class: "members" }, ticket, ...members),
+    ),
+    h("div", { class: "side" },
+      ageCell(item),
+      // A click between or beside the buttons must not open the row.
+      h("span", { class: "actions", onclick: (e: Event) => e.stopPropagation() },
+        copy,
+        h("button", {
+          class: "action",
+          type: "button",
+          title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
+          onclick: () => void api.setHidden(item.key, !item.hidden),
+        }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+      ),
     ),
   );
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-/** When the row's earliest PR opened, then its last activity. Hover shows each PR's exact times. */
+/** When the row's earliest PR opened, then its last activity. */
 function ageCell(item: ReviewItem): HTMLElement {
   const { opened, active } = ageColumn(item.createdAt, item.updatedAt, new Date());
-  return h("span", { class: "age", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) },
+  return h("span", { class: "age" },
     h("span", {}, opened),
     active && h("span", {}, active),
   );
 }
 
 function flash(button: HTMLButtonElement, text: string): void {
+  // A second click during the note would save the note as the label and end the note early.
+  if (button.dataset.flash) return;
   const label = button.textContent;
   button.textContent = text;
   button.dataset.flash = "true";
@@ -334,13 +360,18 @@ function flash(button: HTMLButtonElement, text: string): void {
   }, 1500);
 }
 
+/** One save queue for the window's lifetime: Settings reopened while a save runs must queue behind it, not beside it. */
+let settingsSaver: LastingSaver<Settings> | null = null;
+
 function renderSettings(
   panel: HTMLElement,
   snapshot: Snapshot,
   startTab: SettingsTab,
   onSelect: (key: SettingsTab) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
-  const settings = { ...snapshot.settings };
+  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
+  // This saver is the only writer of these settings, and the snapshot can lag a save just made.
+  const settings = { ...saver.latest };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
   // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
   const note = () => h("span", { class: "note", role: "status" });
@@ -353,24 +384,30 @@ function renderSettings(
   };
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
-  // General and Counter share `settings` and save it whole. A failed save rolls both tabs back to the last saved
-  // values (the field notes outlive the rebuild, so the error stays shown).
-  const queueSave = serialSaver(settings, api.saveSettings, (saved) => {
+  // General and Counter share `settings` and save it whole. A failed save puts both tabs back to the last saved
+  // values in place; a General field that has focus is put back when it loses it.
+  saver.revert = (saved) => {
     Object.assign(settings, saved);
-    panels.general.replaceChildren(...generalFields());
+    generalShows.forEach((show) => show());
     counter.redraw();
+  };
+  const save = (n: HTMLElement) => saver.save(settings).then(() => ok(n), (e) => fail(n, e));
+  const generalShows: (() => void)[] = [];
+  /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
+  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => {
+    if (document.activeElement === input) input.addEventListener("blur", show, { once: true });
+    else show();
   });
-  const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
-  // Not in `settings`, so a rollback's rebuild reuses it rather than reading it again.
+  // Not in `settings`, so a rollback leaves it as it is.
   const autostart = h("input", { type: "checkbox", ariaLabel: "Start with Windows", onchange: () => api.setAutostart(autostart.checked).then(() => ok(n.autostart), (e) => fail(n.autostart, e)) });
   void api.autostart().then((on) => (autostart.checked = on));
   const startWithWindows = h("label", { class: "check" }, autostart, "Start with Windows", n.autostart);
 
-  // Outlives rebuilds like `autostart`. Chromium writes its profile files a few seconds after Load unpacked,
+  // Chromium writes its profile files a few seconds after Load unpacked,
   // so after Set up the status is re-read on focus and every few seconds while it is on screen, until it is loaded.
   const extension = h("div", { class: "extension", role: "status" });
   let extensionRun = 0;
@@ -402,7 +439,7 @@ function renderSettings(
   window.addEventListener("focus", recheck);
   const extensionTimer = setInterval(recheck, 3000);
 
-  /** The General tab's fields, filled from `settings`. */
+  /** The General tab's fields, filled from `settings`; built once, and re-shown through `generalShows`. */
   const generalFields = (): HTMLElement[] => {
     const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
     const chips = POLL_CHOICES.map((m) =>
@@ -414,6 +451,10 @@ function renderSettings(
       chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === m)));
       void save(n.minutes);
     };
+    shown(minutes, () => {
+      minutes.value = String(settings.pollMinutes);
+      chips.forEach((c, i) => (c.dataset.on = String(POLL_CHOICES[i] === settings.pollMinutes)));
+    });
     minutes.onchange = () => {
       const m = parseMinutes(minutes.value);
       if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
@@ -438,6 +479,7 @@ function renderSettings(
       void save(n.text);
     };
     showTextScale(settings.textScale);
+    shown(textScale, () => showTextScale(settings.textScale));
     textScale.onchange = () => {
       const percent = parseWhole(textScale.value, TEXT_SCALE);
       if (percent === null) fail(n.text, `Use a whole number from ${TEXT_SCALE[0]} to ${TEXT_SCALE[1]}.`);
@@ -458,6 +500,7 @@ function renderSettings(
         void save(msg);
       };
       showValue(settings[key]);
+      shown(input, () => showValue(settings[key]));
       input.onchange = () => {
         const p = parseWhole(input.value, range);
         if (p === null) fail(msg, `Use a whole number from ${range[0]} to ${range[1]}.`);
@@ -476,6 +519,10 @@ function renderSettings(
       void save(n.browser);
     };
     checkExtension();
+    generalShows.push(() => {
+      browsers.forEach((c, i) => (c.dataset.on = String(BROWSERS[i][0] === settings.browser)));
+      checkExtension();
+    });
 
     const themes = THEMES.map(([value, label]) =>
       h("button", { type: "button", class: "chip", data: { on: String(value === settings.theme) }, onclick: () => setTheme(value) }, label),
@@ -492,9 +539,10 @@ function renderSettings(
       const picker = h("input", { type: "color", value: settings.customTheme[key], ariaLabel: `${label} colour` });
       const typed = h("input", { type: "text", class: "hex", value: settings.customTheme[key], spellcheck: false, ariaLabel: `${label} colour, as hex` });
       const fill = (value: string) => (settings.customTheme[key] = picker.value = typed.value = value);
+      shown(typed, () => (picker.value = typed.value = settings.customTheme[key]));
       const set = (value: string) => {
         fill(value);
-        queueSave(settings).then(() => {
+        saver.save(settings).then(() => {
           const hard = unreadable(settings.customTheme);
           if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
           else ok(n.custom);
@@ -509,8 +557,13 @@ function renderSettings(
       return h("span", { class: "inline" }, h("span", { class: "colour-name" }, label), picker, typed);
     });
     const customColours = h("div", { class: "field", hidden: settings.theme !== "custom" }, caption("Custom colours", n.custom), ...colourRows);
+    generalShows.push(() => {
+      themes.forEach((c, i) => (c.dataset.on = String(THEMES[i][0] === settings.theme)));
+      customColours.hidden = settings.theme !== "custom";
+    });
 
     const notify = h("input", { type: "checkbox", ariaLabel: "Notify me about new reviews", checked: settings.notify, onchange: () => { settings.notify = notify.checked; void save(n.notify); } });
+    generalShows.push(() => (notify.checked = settings.notify));
 
     return [
       // Not <label>: a label forwards clicks on its caption to its first button (a chip, or −).

@@ -159,6 +159,8 @@ export const api = {
   setHidden: (key: string, hidden: boolean) => invoke<void>("set_hidden", { key, hidden }),
   savePat: (workspace: string, pat: string) => invoke<void>("save_pat", { workspace, pat }),
   saveGithubToken: (workspace: string, token: string) => invoke<void>("save_github_token", { workspace, token }),
+  removePat: (workspace: string) => invoke<void>("remove_pat", { workspace }),
+  removeGithubToken: (workspace: string) => invoke<void>("remove_github_token", { workspace }),
   /** The general settings; the workspaces in it are ignored. */
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   addWorkspace: (name: string) => invoke<string>("add_workspace", { name }),
@@ -175,4 +177,9 @@ export const api = {
 export async function watchSnapshot(render: (s: Snapshot) => void): Promise<void> {
   await listen<Snapshot>("snapshot", (e) => render(e.payload));
   render(await api.snapshot());
+}
+
+/** Once per refresh that brought PRs newly waiting on your review, with how many. */
+export async function watchFresh(on: (count: number) => void): Promise<void> {
+  await listen<number>("fresh", (e) => on(e.payload));
 }

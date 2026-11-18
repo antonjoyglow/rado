@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -138,10 +138,37 @@ describe("parseWhole", () => {
   });
 });
 
+const member = (over: Partial<Member>): Member => ({
+  id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", ...over,
+});
+
+describe("rowFacts", () => {
+  it("singlePr_isJustTheAuthor", () => expect(rowFacts(item({ members: [member({})] }))).toEqual([{ text: "a" }]));
+
+  it("aggregate_splitsCountBranchAndAuthorIntoSeparatePhrases", () =>
+    expect(rowFacts(item({ members: [member({}), member({ id: 2 })] })).map((f) => f.text)).toEqual(["2 PRs", "feature/x", "a"]));
+
+  it("everyFact_inDisplayOrderWithItsKindAndTooltip", () =>
+    expect(rowFacts(item({
+      required: true, approvals: 2, objections: 1, comments: { total: 3, openThreads: 1 }, draft: true, releaseTarget: true, target: "main",
+    }))).toEqual([
+      { text: "a" },
+      { text: "required", kind: "required" },
+      { text: "✓ 2", kind: "approved", title: "2 approved" },
+      { text: "✗ 1", kind: "objected", title: "1 rejected or waiting for author" },
+      { text: "3 comments (1 open)" },
+      { text: "draft" },
+      { text: "→ main", title: "Merges into main" },
+    ]));
+
+  it("oneComment_isSingularAndNoOpenThreadsAreLeftOut", () =>
+    expect(rowFacts(item({ comments: { total: 1, openThreads: 0 } }))[1]).toEqual({ text: "1 comment" }));
+
+  it("noComments_isLeftOut", () =>
+    expect(rowFacts(item({ comments: { total: 0, openThreads: 0 } }))).toEqual([{ text: "a" }]));
+});
+
 describe("datesTooltip", () => {
-  const member = (over: Partial<Member>): Member => ({
-    id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", ...over,
-  });
   it("listsEachPrWithItsTimes_relatedOrQuietPrsShowOnlyOpened", () =>
     expect(datesTooltip([member({}), member({ id: 2, number: 2, repo: "Core", state: null, updatedAt: null })], (iso) => `<${iso}>`)).toBe(
       "WebApp !1: opened <C> · last activity <U>\nCore !2: opened <C>",

@@ -14,10 +14,10 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
    - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token and click **Save**. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
-   Tokens go to Windows Credential Manager. Other fields save when you leave them.
+   Tokens go to Windows Credential Manager; **Remove…** beside a saved one deletes it and turns that source off. Other fields save when you leave them.
 4. **Optional: link tickets.** Under **Tracker**, pick **Jira** and enter your site (`yourcompany.atlassian.net`), or **Linear** and enter your workspace (`yourteam`, as in `linear.app/yourteam`). Set **Team keys** (`ENG, OPS`) so only those keys become ticket chips.
 5. **Optional: more workspaces.** **+ Add workspace** adds another; switch with the chip in the list's header or **Ctrl+←** / **Ctrl+→**. Only the active workspace is polled and notifies.
-6. **Optional: the MCP server** for Claude review agents (Azure DevOps PRs only):
+6. **Optional: the MCP server** for Claude review agents (Azure DevOps and GitHub PRs):
 
    ```
    claude mcp add --scope user rado -- "%LOCALAPPDATA%\Rado\rado-mcp.exe"
@@ -65,7 +65,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
 - `reviews`, Rado's bird, `mine`; the bird is white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
 - By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
-- `!` and the bird, with no mine number: the active workspace has no token, or the first refresh failed. The tooltip starts with the active workspace's name.
+- `!` and the bird, with no mine number: the active workspace has no token, or a source is failing and the list is older than two refreshes (or that source never loaded). The tooltip starts with the active workspace's name and ends with when the list was last checked. The list's age is the oldest of its sources, so one failing source isn't hidden by another's fresh answer.
 - Always on top. By default it sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
 - **Settings → Counter** changes its look; each change saves as you pick it.
   - *Reviews number* and *Mine number*: **Heat**, a swatch, the colour picker or a typed hex colour. *Logo* (the bird and the `!`): the same without Heat. Settings saved by 0.9.0 keep their braces colour as the logo colour.
@@ -81,11 +81,12 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 - Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. Arrow keys, Home and End move between tabs.
 - The list reopens on the tab you last chose. Before you choose one, it opens the first of *Review*, *Re-review* and *Mine* that had rows at start. Each tab keeps its scroll position.
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
-- **Review next:** the top-ranked review gets the label, an accent bar and a dot on its tab. Rows you opened since Rado started move behind the others; once you've opened them all, it marks the one you opened longest ago.
+- **Review next:** the top-ranked review's details start with *Review next*, its row gets a tint and an accent bar, and its tab gets a dot. Rows you opened since Rado started move behind the others; once you've opened them all, it marks the one you opened longest ago.
 - **Rows:** PRs with the same source branch in different repos form one row (*N PRs · branch*), titled and placed by their highest-ranked PR, with summed approvals and comments. GitHub and Azure DevOps PRs never share a row. PR chips read `repo !n` (Azure DevOps) or `repo #n` (GitHub).
-- **Row details:** `✓ n` approved, `✗ n` rejected or waiting for author, `n comments (m open)` (system threads such as votes and pushes don't count), *required*, *draft*, and `→ <target>` when it merges into `master`, `main`, `qa` or `release`. On the right: *opened* and *active* (the latest push, vote, comment, reviewer or status change; activity in the first five minutes counts as opening). An aggregate uses its earliest PR's opening and its latest activity. Hover for each PR's exact times.
+- **Row details:** `✓ n` approved, `✗ n` rejected or waiting for author, `n comments (m open)` (system threads such as votes and pushes don't count), *required*, *draft*, and `→ <target>` when it merges into `master`, `main`, `qa` or `release`. On the right: *opened* and *active* (the latest push, vote, comment, reviewer or status change; activity in the first five minutes counts as opening). An aggregate uses its earliest PR's opening and its latest activity. Hover the details for each PR's exact times.
+- **Copy** and **Not mine** (or **Hide**, **Show**) take the times' place while you hover a row or move into it with the keyboard; on a touchscreen they stay beside the times.
 - **Copy** copies the PR link; for an aggregate, one `repo: link` line per PR.
-- **Not mine** (on a review) or **Hide** (on your own PR) drops the row from the count and notifications until it closes. On GitHub that's until it leaves Rado's GitHub results, for example once a teammate covers a team request. Hidden PRs are forgotten only after a poll in which every source answered in full. **Show** on the *Hidden* tab brings one back. Hiding is local; Azure DevOps or GitHub still lists you as a reviewer.
+- **Not mine** (on a review) or **Hide** (on your own PR) drops the row from the count and notifications until it closes. On GitHub that's until it leaves Rado's GitHub results, for example once a teammate covers a team request. A hidden PR is forgotten once its own source answers in full without it; while that source fails, answers in part or has no token, it stays hidden. One hidden before 0.10.0 has no recorded source until it's listed again, and until then waits for every source with a token to answer in full. A token that Windows Credential Manager can't read shows as an error for that source, not as a missing token. **Show** on the *Hidden* tab brings one back. Hiding is local; Azure DevOps or GitHub still lists you as a reviewer.
 - **Quiet:** a review with no activity for 21 days leaves the count, notifications and the MCP queue, and moves to *Quiet*. Any activity brings it back, with a notification. Your own PRs never go quiet; a PR whose threads failed to load stays where it was.
 - **Esc** closes the workspace picker, then leaves settings, then hides the list.
 
@@ -129,14 +130,14 @@ Every PR link Rado opens ends in `#rado=<branch>` (plus `&group` from an aggrega
 
 Without it, links open as ordinary tabs. The installer puts the extension in a `browser-extension` folder inside Rado's install folder. With *Edge* or *Chrome* chosen, Settings → General shows under **Open links in** whether that browser has it loaded, switched off, or loaded from a folder that no longer exists (an old repo checkout, or the removed `edge-extension` folder). Rado reads this from the `Preferences` and `Secure Preferences` of the browser's last-used profile, the one links open in; with *System default* it shows nothing.
 
-To install, click **Set up**: it copies `edge://extensions` (or `chrome://extensions`), opens a new tab in that browser and shows the folder in Explorer. Browsers don't open their own pages from another app, so paste the address into the tab and press Enter. Switch on **Developer mode**, click **Load unpacked** and pick the folder; the status turns to *loaded* within a few seconds. It asks for `tabs` and `tabGroups` and runs on `dev.azure.com` and `github.com` only. After a Rado update, click **Reload** on its card.
+To install, click **Set up**: it copies `edge://extensions` (or `chrome://extensions`), opens a new tab in that browser and shows the folder in Explorer. Browsers don't open their own pages from another app, so paste the address into the tab and press Enter. Switch on **Developer mode**, click **Load unpacked** and pick the folder; the status turns to *loaded* within a few seconds. It asks for `tabs` and `tabGroups` and runs on `dev.azure.com` and `github.com` only. After a Rado update, click **Reload** on its card; the card's version then matches Rado's.
 
 ### MCP server
 
-`rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each good poll, from the active workspace (looked up on every call, so it follows a switch). It never reads your PAT. The agent reviews through the Azure DevOps MCP server and only drafts; it never posts or votes. GitHub PRs aren't in the queue yet.
+`rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each poll in which at least one source answered, from the active workspace (looked up on every call, so it follows a switch). It never reads your tokens. The agent reviews through the Azure DevOps or GitHub MCP server and only drafts; it never posts or votes.
 
-- `list_review_queue`: reviews waiting on you, best-ranked first, grouped by branch. Each PR has `project`, `repoId`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach Azure DevOps. Not mine, Hide and Show take effect at the next poll.
-- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. `commit` must be the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. Nothing changes in Azure DevOps or in Rado's list.
+- `list_review_queue`: reviews waiting on you on both providers, best-ranked first, grouped by branch. Each PR has `provider` (`azureDevOps` or `gitHub`), `project` (the GitHub owner), `repo`, `repoId` (`owner/repo` on GitHub), `number`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. `agentAuthored` is true when a bot opened the PR or it carries an `agent`, `ai`, `ai-generated` or `ai-assisted` label (GitHub only for now). `missingSources` names a provider whose last poll failed or came back partial, so some of its PRs may be absent rather than done; drafts are not pruned while it is set. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach either provider. Not mine, Hide and Show take effect at the next poll.
+- `mark_drafted(prId, commit)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. Pass the `prId` (not the GitHub PR number) and the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. While `missingSources` is set, a PR that is no longer queued is still recorded, unless the id is a queued PR's GitHub number at that commit. Drafts of PRs that left the queue are forgotten, except while a source is missing (up to 500 drafts). Nothing changes on Azure DevOps, GitHub or in Rado's list.
 
 Register the installed server with the command in [Quick setup](#quick-setup), or a source build with `npm run mcp:build` and `claude mcp add --scope user rado -- "<repo>\src-tauri\target\release\rado-mcp.exe"`. A Claude session holding the server locks the exe; close it before you rebuild.
 
@@ -146,7 +147,7 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 - Everything else is under `%APPDATA%\dev.antonis.rado\`:
   - `settings.json`: settings and workspaces, with the active one
   - `.window-state.json`: the counter's position
-  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits)
+  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed) with `hidden-sources.json` (which source each came from), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits)
 
 ### Settings
 
