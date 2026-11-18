@@ -1,6 +1,6 @@
 //! Rado's MCP server, for scheduled review agents. It serves the review queue that the Rado app writes after each
 //! poll (`queue.json`, in the active workspace's folder) over stdio, and records which PRs already have a draft
-//! review. It never reads the PAT; the review itself goes through the Azure DevOps MCP server.
+//! review. It never reads a token; the review itself goes through the Azure DevOps or GitHub MCP server.
 
 #[allow(dead_code)]
 #[path = "../queue.rs"]
@@ -68,11 +68,14 @@ fn tools() -> Value {
     json!([
         {
             "name": "list_review_queue",
-            "description": "The Azure DevOps pull requests waiting on the user's review, from Rado, best-ranked first. \
-                PRs are grouped by source branch: one branch is one change, even across repos. Hidden PRs, the user's own PRs \
-                and PRs already drafted at their current source commit are left out. Each PR has project, repo, repoId, prId \
-                and sourceCommit for the Azure DevOps MCP tools. A reReview PR has new pushes since the user's vote: \
-                lastVotedCommit is the commit they voted on, so review only what changed since then. \
+            "description": "The pull requests waiting on the user's review, from Rado, best-ranked first, on Azure DevOps \
+                and GitHub. PRs are grouped by source branch: one branch is one change, even across repos. Hidden PRs, the \
+                user's own PRs and PRs already drafted at their current source commit are left out. Each PR has a provider: \
+                for azureDevOps, project, repo, repoId and number (the PR id) are what the Azure DevOps MCP tools take; for \
+                gitHub, project is the owner, repo the repository name and number the PR number. sourceCommit is the head \
+                commit to review. agentAuthored is true for a PR opened by a bot or labelled as agent work. A reReview PR has \
+                new pushes since the user's vote: lastVotedCommit is the commit they voted on, so review only what changed \
+                since then. missingSources names a provider whose last poll failed: its PRs are absent, not done. \
                 Fails when Rado's data is stale; then review nothing.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "title": "List review queue", "readOnlyHint": true, "openWorldHint": false },
@@ -80,7 +83,8 @@ fn tools() -> Value {
         {
             "name": "mark_drafted",
             "description": "Records that a draft review now exists for this PR at this source commit, so later runs skip it \
-                until someone pushes again. Call it once per PR, after the draft is published. Changes nothing in Azure DevOps.",
+                until someone pushes again. Call it once per PR, after the draft is published. Changes nothing on Azure DevOps \
+                or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -122,14 +126,15 @@ fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
     let limit = queue::stale_after_minutes(queue.poll_minutes);
     if age > limit {
         return Err(format!(
-            "Rado's review queue is {age} minutes old (the limit is {limit}): Rado is not running or cannot reach Azure DevOps. \
-             Review nothing from it; start Rado and run again."
+            "Rado's review queue is {age} minutes old (the limit is {limit}): Rado is not running or cannot reach \
+             Azure DevOps or GitHub. Review nothing from it; start Rado and run again."
         ));
     }
     let drafts: Drafts = queue::read_json(&dir.join(DRAFTS_FILE)).unwrap_or_default();
     Ok(json!({
         "organization": queue.organization,
         "refreshedMinutesAgo": age,
+        "missingSources": queue.missing_sources,
         "branches": queue::pending(&queue, &drafts),
     }))
 }
@@ -241,6 +246,8 @@ mod tests {
         assert_eq!(body["refreshedMinutesAgo"], 5);
         assert_eq!(body["branches"][0]["prs"][1]["prId"], 2);
         assert_eq!(body["branches"][0]["prs"][1]["sourceCommit"], "c2");
+        assert_eq!(body["branches"][0]["prs"][1]["provider"], "azureDevOps");
+        assert_eq!(body["missingSources"], json!([]));
     }
 
     #[test]

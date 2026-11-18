@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::ado::PrThreads;
+use crate::export::{self, GitHubRef};
 use crate::score::{self, CommentStats, PrFacts, Provider, ReviewItem, ReviewState};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
@@ -16,8 +17,9 @@ const ENDPOINT: &str = "https://api.github.com/graphql";
 const QUERY: &str = r#"
 fragment pr on PullRequest {
   databaseId number title url isDraft createdAt updatedAt headRefName baseRefName headRefOid
-  author { login }
-  repository { name }
+  author { __typename login }
+  repository { name owner { login } }
+  labels(first: 20) { nodes { name } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } }
   latestOpinionatedReviews(first: 30) { nodes { state author { login } commit { oid } } }
   votes: reviews(last: 100, states: [APPROVED, CHANGES_REQUESTED, DISMISSED]) { nodes { state author { login } commit { oid } } }
@@ -85,6 +87,14 @@ impl Search {
 #[derive(Debug, Clone, Deserialize)]
 struct Login {
     login: String,
+    /// `User` or `Bot` (an app such as an agent or Dependabot); the viewer has none.
+    #[serde(rename = "__typename", default)]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Label {
+    name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,11 +120,13 @@ pub struct PullRequest {
     votes: Nodes<Review>,
     review_threads: Nodes<Thread>,
     comments: Count,
+    labels: Nodes<Label>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct Repo {
     name: String,
+    owner: Login,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -256,11 +268,36 @@ pub fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap
     (items, urls, threads)
 }
 
+/// What the MCP queue needs for each fetched PR, by id: the owner, head commit, my last vote's commit and whether
+/// an agent wrote it.
+pub fn queue_refs(fetched: &Fetched) -> HashMap<i64, GitHubRef> {
+    fetched
+        .prs
+        .iter()
+        .map(|(pr, _)| {
+            let agent = pr.author.as_ref().is_some_and(|a| a.kind.as_deref() == Some("Bot"))
+                || pr.labels.nodes.iter().any(|l| export::is_agent_label(&l.name));
+            let reference = GitHubRef {
+                owner: pr.repository.owner.login.clone(),
+                head: pr.head_ref_oid.clone(),
+                last_voted: my_last_vote(pr, &fetched.viewer).and_then(|r| r.commit.as_ref()).map(|c| c.oid.clone()),
+                agent,
+            };
+            (pr.database_id, reference)
+        })
+        .collect()
+}
+
+/// My latest approval, change request or dismissed vote; later comments don't replace it.
+fn my_last_vote<'a>(pr: &'a PullRequest, viewer: &str) -> Option<&'a Review> {
+    pr.votes.nodes.iter().rev().find(|r| r.author.as_ref().is_some_and(|l| l.login.eq_ignore_ascii_case(viewer)))
+}
+
 fn classify(pr: &PullRequest, found: Found, viewer: &str, now: DateTime<Utc>) -> Option<ReviewItem> {
     let is = |login: &Option<Login>| login.as_ref().is_some_and(|l| l.login.eq_ignore_ascii_case(viewer));
     let votes = || pr.latest_opinionated_reviews.nodes.iter().filter(|r| matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED"));
     // A repo that dismisses stale approvals on push turns my vote into DISMISSED, which counts as a push since it.
-    let my_last = pr.votes.nodes.iter().rev().find(|r| is(&r.author));
+    let my_last = my_last_vote(pr, viewer);
     let dismissed = my_last.is_some_and(|r| r.state == "DISMISSED");
     let pushed_since_vote = dismissed || my_last.is_some_and(|r| r.commit.as_ref().is_none_or(|c| c.oid != pr.head_ref_oid));
     let direct = pr
@@ -337,7 +374,8 @@ pub(crate) mod tests {
             "databaseId": id, "number": id % 1000, "title": format!("PR {id}"), "url": format!("https://github.com/o/repo/pull/{}", id % 1000),
             "isDraft": false, "createdAt": "2026-11-10T12:00:00Z", "updatedAt": "2026-11-11T09:00:00Z",
             "headRefName": "feature/ABC-1", "baseRefName": "main", "headRefOid": "head",
-            "author": { "login": author }, "repository": { "name": "repo" },
+            "author": { "__typename": "User", "login": author }, "repository": { "name": "repo", "owner": { "login": "o" } },
+            "labels": { "nodes": [] },
             "reviewRequests": { "nodes": requests.iter().map(|r| if *r == "TEAM" {
                 serde_json::json!({ "requestedReviewer": { "__typename": "Team" } })
             } else {
@@ -538,6 +576,26 @@ pub(crate) mod tests {
     #[test]
     fn nonPrSearchNode_isSkipped() {
         assert_eq!(parse(&body(vec![serde_json::json!({}), node(1, "a", &[ME], &[])], vec![], vec![])).unwrap().prs.len(), 1);
+    }
+
+    #[test]
+    fn queueRefs_carryOwnerHeadAndMyLastVotedCommit() {
+        let reviews = [("me", "APPROVED", "old"), ("me", "COMMENTED", "head")];
+        let refs = queue_refs(&parse(&body(vec![], vec![node(1, "a", &[], &reviews)], vec![])).unwrap());
+        let r = &refs[&1];
+        assert_eq!((r.owner.as_str(), r.head.as_str(), r.last_voted.as_deref(), r.agent), ("o", "head", Some("old"), false));
+    }
+
+    #[test]
+    fn queueRefs_botAuthorOrAgentLabel_isAgentAuthored() {
+        let mut bot = node(1, "copilot", &[ME], &[]);
+        bot["author"]["__typename"] = "Bot".into();
+        let mut labelled = node(2, "a", &[ME], &[]);
+        labelled["labels"]["nodes"] = serde_json::json!([{ "name": "bug" }, { "name": "AI-Generated" }]);
+        let mut other = node(3, "a", &[ME], &[]);
+        other["labels"]["nodes"] = serde_json::json!([{ "name": "airflow" }]);
+        let refs = queue_refs(&parse(&body(vec![bot, labelled, other], vec![], vec![])).unwrap());
+        assert_eq!((refs[&1].agent, refs[&2].agent, refs[&3].agent), (true, true, false));
     }
 
     #[test]
