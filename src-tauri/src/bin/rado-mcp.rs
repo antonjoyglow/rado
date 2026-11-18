@@ -349,7 +349,7 @@ mod tests {
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
         drop(held);
 
-        assert_eq!(result["isError"], true, "{result}");
+        assert!(result["content"][0]["text"].as_str().unwrap().ends_with("mark it again"), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
