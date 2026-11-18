@@ -241,9 +241,9 @@ impl Session {
 
     /// Makes `id` the active workspace, parking the current one and reading `id`'s files if it wasn't visited since
     /// start. Makes the poll in flight stale and wakes the poller.
-    fn switch_to(&mut self, id: &str) -> bool {
+    fn switch_to(&mut self, id: &str) {
         if id == self.settings.active_workspace || self.known(id).is_err() {
-            return false;
+            return;
         }
         let target = self.parked.remove(id).unwrap_or_else(|| WorkspaceState::load(&self.store, id));
         let previous = std::mem::replace(&mut self.ws, target);
@@ -252,7 +252,6 @@ impl Session {
         self.generation += 1;
         self.wake = true;
         self.polling = self.active_saved().any();
-        true
     }
 
     /// Starts a poll of the active workspace: None when there is nothing to poll. With no token saved, the
@@ -566,8 +565,9 @@ impl Session {
 
     pub fn switch(&mut self, id: &str) -> Result<(), String> {
         self.edit_workspaces(|s| {
+            s.known(id)?;
             s.switch_to(id);
-            if id == s.settings.active_workspace { Ok(()) } else { Err("That workspace is gone".to_string()) }
+            Ok(())
         })
     }
 
@@ -772,7 +772,73 @@ mod tests {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-secret-bad");
         assert_eq!(s.save_secret("a", Provider::Ado, "   "), Err("The PAT is empty".into()));
         assert_eq!(s.save_secret("zz", Provider::GitHub, "t"), Err("That workspace is gone".into()));
-        assert_eq!((s.store.read_pat("a"), s.take_wake()), (Ok(None), false));
+        assert_eq!((s.store.read_pat("a"), s.store.read_github_token("zz"), s.take_wake()), (Ok(None), Ok(None), false));
+    }
+
+    #[test]
+    fn beginPoll_unreadableToken_stillPolls_andKeepsTheList() {
+        let Fixture { mut s, secrets, dir: _dir } = two_workspaces("begin-poll-unreadable");
+        poll(&mut s, &[1]);
+        secrets.fail_reads(true);
+        let ticket = s.begin_poll().expect("a ticket: the source fails with the read error instead of turning off");
+        assert!(ticket.github_token.is_err());
+        assert_eq!(listed(&s), ids(&[1]));
+        assert!(s.status().saved["a"].github_token, "an unreadable token counts as saved");
+    }
+
+    #[test]
+    fn beginPoll_noTokens_removesTheQueueFile() {
+        let Fixture { mut s, dir, .. } = two_workspaces("begin-poll-queue");
+        poll(&mut s, &[1]);
+        let queue_file = queue::workspace_dir(&dir.0, "a").join(queue::QUEUE_FILE);
+        assert!(queue_file.exists(), "the poll wrote a queue");
+        s.remove_secret("a", Provider::GitHub).expect("removed");
+        assert!(s.begin_poll().is_none());
+        assert!(!queue_file.exists());
+    }
+
+    // General settings and adding a workspace.
+
+    #[test]
+    fn saveSettings_keepsTheWorkspaces_reportsWindowChanges_andWakesOnlyForTheInterval() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-settings");
+        let sent = Settings { workspaces: Vec::new(), active_workspace: "zz".into(), pill_scale: s.settings.pill_scale + 20, ..s.settings.clone() };
+        let change = s.save_settings(sent).expect("saved");
+        assert_eq!(change, SettingsChange { pill_scale: Some(s.settings.pill_scale), list_resized: false });
+        assert_eq!((s.settings.workspaces.len(), s.settings.active_workspace.as_str()), (2, "a"), "the workspaces change only through their own methods");
+        assert!(!s.take_wake(), "a size change needs no new data");
+
+        let sent = Settings { poll_minutes: s.settings.poll_minutes + 1, ..s.settings.clone() };
+        assert_eq!(s.save_settings(sent).expect("saved"), SettingsChange::default());
+        assert!(s.take_wake());
+    }
+
+    #[test]
+    fn addWorkspace_namesAnUnnamedOne_andSavesIt() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("add-workspace");
+        let id = s.add_workspace("  ").expect("added");
+        let added = s.settings.workspaces.iter().find(|w| w.id == id).expect("listed");
+        assert_eq!(added.name, "Workspace 3");
+        assert_eq!(s.store.load().settings.workspaces.len(), 3, "saved");
+        assert_eq!(s.settings.active_workspace, "a");
+    }
+
+    #[test]
+    fn ticketUrl_rowWithoutATicket_saysSo() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ticket-url");
+        poll(&mut s, &[1]);
+        let key = s.rows()[0].key.clone();
+        assert_eq!(s.ticket_url(&key), Err("That row's branch names no ticket".into()));
+        assert_eq!(s.ticket_url("nope"), Err("That row is gone; refresh the list".into()));
+    }
+
+    #[test]
+    fn status_keepsTheSnapshotKeysTheWindowsRead() {
+        let Fixture { s, dir: _dir, .. } = two_workspaces("status-keys");
+        let value = serde_json::to_value(s.status()).expect("serializes");
+        let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["error", "hasGithubToken", "hasPat", "items", "lastRefreshed", "polling", "saved", "settings"]);
     }
 
     #[test]
@@ -843,6 +909,7 @@ mod tests {
         s.set_hidden(&key, true).expect("hidden");
         assert_eq!(s.store.hidden("a"), store::Hidden::from([(1, Some(Provider::GitHub))]));
         assert_eq!(poll(&mut s, &[1]), ids(&[]), "hidden PRs are not news");
+        assert!(!s.ws.baseline[&Provider::GitHub].contains(&1), "a hidden PR leaves the baseline");
 
         s.set_hidden(&key, false).expect("shown");
         assert!(s.store.hidden("a").is_empty());
@@ -889,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn switchTo_keepsEachWorkspacesHiddenPrsAndVoteMemoryApart() {
+    fn switch_keepsEachWorkspacesHiddenPrsApart() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("switch-apart");
         s.store.save_hidden("b", &store::Hidden::from([(9, None)])).expect("saved");
         s.ws.hidden.insert(1);
@@ -959,9 +1026,12 @@ mod tests {
     fn applyPoll_notifyFollowsTheSetting() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("notify");
         poll(&mut s, &[1]);
-        s.settings.notify = false;
         let generation = s.generation;
         let outcome = s.apply_poll(generation, Poll::Off, github(&[1, 2]), Utc::now());
+        assert_eq!((outcome.fresh.len(), outcome.notify), (1, true));
+
+        s.settings.notify = false;
+        let outcome = s.apply_poll(generation, Poll::Off, github(&[1, 2, 3]), Utc::now());
         assert_eq!((outcome.fresh.len(), outcome.notify), (1, false), "still fresh for the counter, but no notification");
     }
 
