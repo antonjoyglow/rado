@@ -479,6 +479,14 @@ impl Store {
         self.secrets.set(&workspace::github_key(id), token)
     }
 
+    pub fn remove_pat(&self, id: &str) -> Result<(), String> {
+        self.secrets.delete(&workspace::pat_key(id))
+    }
+
+    pub fn remove_github_token(&self, id: &str) -> Result<(), String> {
+        self.secrets.delete(&workspace::github_key(id))
+    }
+
     /// Removes a deleted workspace's secrets and data folder.
     pub fn forget(&self, id: &str) -> Result<(), String> {
         self.secrets.delete(&workspace::pat_key(id))?;
@@ -739,6 +747,19 @@ pub(crate) mod tests {
 
         assert_eq!(secrets.keys(), ["ado-pat:b2"]);
         assert!(!queue::workspace_dir(&dir.0, "a1").exists());
+    }
+
+    #[test]
+    fn removeTokens_deleteOnlyThatWorkspacesEntry_andMissingIsFine() {
+        let dir = TempDir::new("remove-token");
+        let secrets = MemorySecrets::with(&[("ado-pat:a1", "p"), ("github-token:a1", "g"), ("ado-pat:b2", "q")]);
+        let store = store(&dir, &secrets);
+
+        store.remove_pat("a1").unwrap();
+        store.remove_github_token("a1").unwrap();
+        store.remove_pat("a1").unwrap();
+
+        assert_eq!(secrets.keys(), ["ado-pat:b2"]);
     }
 
     #[test]

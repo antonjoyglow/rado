@@ -233,6 +233,11 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
             if current(s) {
                 s.saved.insert(workspace.id.clone(), saved);
                 s.polling = false;
+                // After the last token is removed, its rows must not stay listed as if current.
+                s.ws.items.clear();
+                s.ws.urls.clear();
+                s.ws.related.clear();
+                s.ws.known_actionable.clear();
                 s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
             }
         });
@@ -718,15 +723,15 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
     result
 }
 
-/// After a new secret for `id`: a poll for it running now is stale, and its next good poll is a baseline.
-fn secret_saved(app: &AppHandle, id: &str, provider: score::Provider) {
+/// After a secret for `id` is saved or removed: a poll for it running now is stale, and its next good poll is a baseline.
+fn secret_changed(app: &AppHandle, id: &str, provider: score::Provider, now_saved: bool) {
     let shared = app.state::<Shared>();
     let mut active = false;
     update(app, |s| {
         let saved = s.saved.entry(id.to_string()).or_default();
         match provider {
-            score::Provider::Ado => saved.pat = true,
-            score::Provider::GitHub => saved.github_token = true,
+            score::Provider::Ado => saved.pat = now_saved,
+            score::Provider::GitHub => saved.github_token = now_saved,
         }
         active = id == s.settings.active_workspace;
         if active {
@@ -756,7 +761,24 @@ fn save_pat(app: AppHandle, workspace: String, pat: String) -> Result<(), String
     }
     known_workspace(&app, &workspace)?;
     app.state::<Shared>().store.save_pat(&workspace, pat)?;
-    secret_saved(&app, &workspace, score::Provider::Ado);
+    secret_changed(&app, &workspace, score::Provider::Ado, true);
+    Ok(())
+}
+
+/// Turns the workspace's Azure DevOps source off; its rows leave at the next poll.
+#[tauri::command]
+fn remove_pat(app: AppHandle, workspace: String) -> Result<(), String> {
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.remove_pat(&workspace)?;
+    secret_changed(&app, &workspace, score::Provider::Ado, false);
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_github_token(app: AppHandle, workspace: String) -> Result<(), String> {
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.remove_github_token(&workspace)?;
+    secret_changed(&app, &workspace, score::Provider::GitHub, false);
     Ok(())
 }
 
@@ -768,7 +790,7 @@ fn save_github_token(app: AppHandle, workspace: String, token: String) -> Result
     }
     known_workspace(&app, &workspace)?;
     app.state::<Shared>().store.save_github_token(&workspace, token)?;
-    secret_saved(&app, &workspace, score::Provider::GitHub);
+    secret_changed(&app, &workspace, score::Provider::GitHub, true);
     Ok(())
 }
 
@@ -1114,6 +1136,8 @@ pub fn run() {
             set_hidden,
             save_pat,
             save_github_token,
+            remove_pat,
+            remove_github_token,
             save_settings,
             add_workspace,
             save_workspace,
