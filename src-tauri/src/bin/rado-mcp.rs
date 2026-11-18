@@ -87,7 +87,8 @@ fn tools() -> Value {
             "description": "Records that a draft review now exists for this PR at this source commit, so later runs skip it \
                 until someone pushes again. Call it once per PR, after the draft is published, with the prId (not the GitHub \
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
-                out of the queue is still accepted. Changes nothing on Azure DevOps or GitHub.",
+                out of the queue is still accepted, unless the id is a queued PR's GitHub number. A queued PR at another \
+                commit is refused: list again. Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -147,13 +148,18 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
     let queue = read_queue(dir)?;
     // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
-    // source is missing, a PR listed before it dropped out is accepted (a draft hides a PR only at this id and commit),
-    // unless the commit belongs to a queued PR under another id: then the id is wrong, such as a GitHub PR number.
+    // source is missing, a PR listed before it dropped out is accepted, since a draft hides a PR only at this id and
+    // commit; a GitHub PR number passed as the id is still refused.
     let prs = || queue.branches.iter().flat_map(|b| &b.prs);
-    let queued = prs().any(|p| p.pr_id == pr_id && p.source_commit.as_deref() == Some(commit));
-    let other_id = prs().any(|p| p.source_commit.as_deref() == Some(commit));
-    if !queued && (queue.missing_sources.is_empty() || other_id) {
-        return Err(format!("PR {pr_id} at {commit} is not in Rado's review queue; pass the prId from list_review_queue"));
+    if let Some(queued) = prs().find(|p| p.pr_id == pr_id) {
+        if queued.source_commit.as_deref() != Some(commit) {
+            let current = queued.source_commit.as_deref().unwrap_or("no known commit");
+            return Err(format!("PR {pr_id} is queued at {current}, not {commit}; list it again and review that commit"));
+        }
+    } else if queue.missing_sources.is_empty() {
+        return Err(format!("PR {pr_id} is not in Rado's review queue; list it again"));
+    } else if prs().any(|p| p.number == pr_id && p.source_commit.as_deref() == Some(commit)) {
+        return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
@@ -318,17 +324,34 @@ mod tests {
     }
 
     #[test]
-    fn markDrafted_whileASourceIsMissing_wrongIdForAQueuedCommit_isAnError() {
+    fn markDrafted_whileASourceIsMissing_aPrNumberAsTheId_isAnError_butASiblingAtTheSameCommitIsRecorded() {
         let dir = with_queue("wrong-id");
+        let path = queue::workspace_dir(&dir.0, "w1");
+        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
+        q.missing_sources = vec![queue::GITHUB.into()];
+        q.branches[0].prs[0].number = 12;
+        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+
+        let number = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 12, "commit": "c1" }));
+        assert_eq!(number["isError"], true);
+        assert!(!path.join(DRAFTS_FILE).exists());
+
+        let sibling = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 5, "commit": "c1" }));
+        assert_eq!(sibling.get("isError"), None);
+    }
+
+    #[test]
+    fn markDrafted_whileASourceIsMissing_queuedPrAtAnotherCommit_isAnError() {
+        let dir = with_queue("stale-commit");
         let path = queue::workspace_dir(&dir.0, "w1");
         let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
         q.missing_sources = vec![queue::GITHUB.into()];
         write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
 
-        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 12, "commit": "c1" }));
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "old" }));
 
         assert_eq!(result["isError"], true);
-        assert!(!path.join(DRAFTS_FILE).exists());
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("queued at c1"));
     }
 
     #[test]
