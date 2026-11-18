@@ -530,6 +530,11 @@ pub(crate) mod tests {
             secrets
         }
 
+        /// Makes every read fail, as a locked Credential Manager does.
+        pub fn fail_reads(&self, fail: bool) {
+            *self.fail_reads.lock().unwrap() = fail;
+        }
+
         fn keys(&self) -> Vec<String> {
             let mut keys: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();
             keys.sort();
