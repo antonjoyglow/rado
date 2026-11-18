@@ -1,3 +1,5 @@
 # `cargo test` writes the TS types the frontend imports (ts-rs) here; CI fails when they differ from the committed ones.
 [env]
 TS_RS_EXPORT_DIR = { value = "src/bindings", relative = true }
+# i64 ids and ages are JSON numbers, well under 2^53, not bigint.
+TS_RS_LARGE_INT = "number"

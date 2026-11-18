@@ -22,6 +22,9 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      # Removed first, so a file left behind by a removed or renamed Rust type shows as drift too.
+      - run: rm src/bindings/*.ts
+        shell: bash
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Generated TS types match the Rust ones
         shell: bash

@@ -11,10 +11,8 @@ use crate::workspace::Tracker;
 #[serde(rename_all = "camelCase")]
 pub struct Member {
     /// Unique across sources; what `open_pr` takes.
-    #[ts(type = "number")]
     pub id: i64,
     pub provider: Provider,
-    #[ts(type = "number")]
     pub number: i64,
     pub repo: String,
     pub title: String,
@@ -49,7 +47,6 @@ pub struct ReviewRow {
     pub summary: ReviewItem,
     pub members: Vec<Member>,
     /// Age of the row's most recently opened PR; "Your PRs" sorts on it, newest first.
-    #[ts(type = "number")]
     pub newest_age_hours: i64,
     /// The tracker's issue key in the branch name, such as `ABC-12` in `feature/ABC-12-login`; none without a tracker.
     pub ticket: Option<String>,

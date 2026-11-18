@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 
+/// Where a PR stands for me. `stale`: a review with no activity for three weeks, left out of the count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ReviewState {
@@ -46,11 +47,9 @@ pub enum Tier {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewItem {
     /// Unique across sources: the Azure DevOps PR id, or the GitHub PR's global `databaseId`.
-    #[ts(type = "number")]
     pub id: i64,
     pub provider: Provider,
     /// The number people see: `!id` on Azure DevOps, `#number` within the GitHub repo.
-    #[ts(type = "number")]
     pub number: i64,
     pub title: String,
     pub repo: String,
@@ -60,7 +59,6 @@ pub struct ReviewItem {
     pub target: String,
     /// Merges into a release branch (`is_release_target`); the list names the target only then.
     pub release_target: bool,
-    #[ts(type = "number")]
     pub age_hours: i64,
     pub created_at: DateTime<Utc>,
     /// Last thread update (push, vote, comment, reviewer or status change) after opening;
