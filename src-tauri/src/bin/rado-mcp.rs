@@ -6,16 +6,16 @@
 #[path = "../queue.rs"]
 mod queue;
 
+use std::fs::File;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, Drafts, QUEUE_FILE, Queue};
+use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, Queue};
 
 const PROTOCOL: &str = "2025-06-18";
-const MAX_DRAFTS_WHILE_MISSING: usize = 500;
 
 fn main() {
     let dir = data_dir();
@@ -161,16 +161,21 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     } else if prs().any(|p| p.number == pr_id && p.source_commit.as_deref() == Some(commit)) {
         return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
+    let _lock = lock_drafts(dir)?;
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
-    // A source that failed or answered in part is missing PRs, so their drafts survive until it answers in full, up
-    // to a cap for a source that stays missing.
-    if queue.missing_sources.is_empty() || drafts.len() >= MAX_DRAFTS_WHILE_MISSING {
-        queue::prune(&mut drafts, &queue);
-    }
-    drafts.insert(pr_id, commit.to_string());
+    queue::record_draft(&mut drafts, pr_id, commit);
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
+}
+
+/// Waits for other `rado-mcp` processes to finish recording; the lock goes when the file is dropped or its process
+/// ends, so a crashed agent can't leave it held.
+fn lock_drafts(dir: &Path) -> Result<File, String> {
+    let path = dir.join(DRAFTS_LOCK_FILE);
+    let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    file.lock().map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -297,18 +302,46 @@ mod tests {
     }
 
     #[test]
-    fn markDrafted_whileASourceIsMissing_keepsOtherDrafts() {
-        let dir = with_queue("missing-source");
-        let path = queue::workspace_dir(&dir.0, "w1");
-        write_json_atomic(&path.join(DRAFTS_FILE), &Drafts::from([(99, "c99".to_string())])).unwrap();
-        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
-        q.missing_sources = vec![queue::GITHUB.into()];
-        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+    fn markDrafted_agentsMarkingAtOnce_allMarksAreKept() {
+        const AGENTS: i64 = 8;
+        const MARKS_EACH: i64 = 8;
+        let dir = TempDir::new("parallel");
+        let workspace = queue::workspace_dir(&dir.0, "w1");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"w1"}"#).unwrap();
+        let prs = (1..=AGENTS * MARKS_EACH).map(|id| pr(id, &format!("c{id}"))).collect();
+        write_json_atomic(&workspace.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs }])).unwrap();
+        let start = std::sync::Barrier::new(AGENTS as usize);
 
+        std::thread::scope(|s| {
+            for agent in 0..AGENTS {
+                let (root, start) = (&dir.0, &start);
+                s.spawn(move || {
+                    start.wait();
+                    for id in (1..=MARKS_EACH).map(|n| agent * MARKS_EACH + n) {
+                        let result = call_tool(root, at(1), "mark_drafted", json!({ "prId": id, "commit": format!("c{id}") }));
+                        assert_eq!(result.get("isError"), None, "{result}");
+                    }
+                });
+            }
+        });
+
+        let drafts: Drafts = queue::read_json(&workspace.join(DRAFTS_FILE)).unwrap();
+        assert_eq!(drafts.len() as i64, AGENTS * MARKS_EACH);
+    }
+
+    #[test]
+    fn markDrafted_prThatLeftTheQueueAndCameBack_isStillSkipped() {
+        let dir = with_queue("came-back");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let full: Queue = queue::read_json(&path).unwrap();
         assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+        write_json_atomic(&path, &make_queue(vec![Branch { branch: "ABC-1".into(), prs: vec![pr(2, "c2")] }])).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2" })).get("isError"), None);
 
-        let drafts: Drafts = queue::read_json(&path.join(DRAFTS_FILE)).unwrap();
-        assert_eq!(drafts, Drafts::from([(1, "c1".to_string()), (99, "c99".to_string())]));
+        write_json_atomic(&path, &full).unwrap();
+
+        assert_eq!(text(&call_tool(&dir.0, at(2), "list_review_queue", json!({})))["branches"], json!([]));
     }
 
     #[test]
@@ -356,21 +389,6 @@ mod tests {
 
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"].as_str().unwrap().contains("queued at c1"));
-    }
-
-    #[test]
-    fn markDrafted_sourceMissingForLong_prunesPastTheCap() {
-        let dir = with_queue("cap");
-        let path = queue::workspace_dir(&dir.0, "w1");
-        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
-        q.missing_sources = vec![queue::GITHUB.into()];
-        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
-        let old: Drafts = (1000..1000 + MAX_DRAFTS_WHILE_MISSING as i64).map(|id| (id, "c".to_string())).collect();
-        write_json_atomic(&path.join(DRAFTS_FILE), &old).unwrap();
-
-        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
-
-        assert_eq!(queue::read_json::<Drafts>(&path.join(DRAFTS_FILE)).unwrap(), Drafts::from([(1, "c1".to_string())]));
     }
 
     #[test]
