@@ -242,7 +242,7 @@ pub struct Fetched {
 /// what the queue needs.
 pub fn digest(fetched: Fetched, memory: &mut VoteMemory, now: DateTime<Utc>) -> SourcePoll {
     let me = Me { id: &fetched.my_id, teams: &fetched.teams };
-    let items = rank(&fetched.prs, &me, memory, now);
+    let items = classify_all(&fetched.prs, &me, memory, now);
     let mine: HashSet<i64> = items.iter().map(|i| i.id).collect();
     let branches: HashSet<&str> = items.iter().map(|i| i.branch.as_str()).collect();
     let related = fetched
@@ -318,7 +318,7 @@ pub fn involves(pr: &PullRequest, me: &Me) -> bool {
 }
 
 /// The PRs I wrote or am asked to review, unsorted; updates `memory` with my current votes.
-pub fn rank(prs: &[PullRequest], me: &Me, memory: &mut VoteMemory, now: DateTime<Utc>) -> Vec<ReviewItem> {
+fn classify_all(prs: &[PullRequest], me: &Me, memory: &mut VoteMemory, now: DateTime<Utc>) -> Vec<ReviewItem> {
     let items: Vec<ReviewItem> = prs.iter().filter_map(|pr| classify(pr, me, memory, now)).collect();
     let open: HashSet<i64> = prs.iter().map(|pr| pr.pull_request_id).collect();
     memory.retain(|id, _| open.contains(id));
@@ -330,11 +330,10 @@ fn classify(pr: &PullRequest, me: &Me, memory: &mut VoteMemory, now: DateTime<Ut
         Role::Author => return Some(item(pr, ReviewState::Mine, false, false, now)),
         Role::Reviewer { mine, teams } => (mine, teams),
     };
-    let (vote, via_group) = match (mine, teams.first()) {
-        (Some(r), _) => (r.vote, false),
-        // A team's vote is the vote a teammate cast for it.
-        (None, Some(team)) => (team.vote, true),
-        (None, None) => return None,
+    let (vote, via_group) = match mine {
+        Some(r) => (r.vote, false),
+        // A team's vote is the vote a teammate cast for it; `role` saw at least one of my teams.
+        None => (teams[0].vote, true),
     };
     let required = mine.is_some_and(|r| r.is_required) || teams.iter().any(|g| g.is_required);
     let commit = pr.last_merge_source_commit.as_ref().map(|c| c.commit_id.clone()).unwrap_or_default();
@@ -475,7 +474,7 @@ pub(crate) mod tests {
 
     pub fn rank_one(p: PullRequest, memory: &mut VoteMemory) -> Option<ReviewItem> {
         let t = teams();
-        rank(&[p], &Me { id: ME, teams: &t }, memory, now()).into_iter().next()
+        classify_all(&[p], &Me { id: ME, teams: &t }, memory, now()).into_iter().next()
     }
 
     #[test]
@@ -638,7 +637,7 @@ pub(crate) mod tests {
         let mut required = pr(2, vec![reviewer(ME, 0, true, false)]);
         required.creation_date = now() - Duration::hours(1);
         let prs = [pr(1, vec![reviewer(ME, 0, false, false)]), required, pr(3, vec![reviewer(ME, 10, false, false)])];
-        let mut ranked = rank(&prs, &Me { id: ME, teams: &t }, &mut VoteMemory::new(), now());
+        let mut ranked = classify_all(&prs, &Me { id: ME, teams: &t }, &mut VoteMemory::new(), now());
         ranked.sort_by_key(|i| std::cmp::Reverse(i.score));
         let ids: Vec<i64> = ranked.iter().map(|i| i.id).collect();
         assert_eq!(ids, vec![2, 1, 3]);

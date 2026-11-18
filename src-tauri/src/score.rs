@@ -220,8 +220,7 @@ fn tier(state: ReviewState, score: i32) -> Tier {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::ado::tests::{ME, now, pr, rank_one, reviewer, teams};
-    use crate::ado::{Me, rank};
+    use crate::ado::tests::{ME, now, pr, rank_one, reviewer};
     use chrono::Duration;
 
     fn mine(id: i64, objections: u32) -> ReviewItem {
@@ -253,7 +252,7 @@ mod tests {
 
     #[test]
     fn attachThreads_reviewItem_keepsItsOwnActionability() {
-        let mut items = rank(&[pr(1, vec![reviewer(ME, 10, false, false)])], &Me { id: ME, teams: &teams() }, &mut VoteMemory::new(), now());
+        let mut items = vec![rank_one(pr(1, vec![reviewer(ME, 10, false, false)]), &mut VoteMemory::new()).unwrap()];
         attach_threads(&mut items, &HashMap::from([(1, threads(2, 2, None))]), &HashSet::new(), now());
         assert!(!items[0].actionable, "open threads on someone else's PR are not my work");
     }

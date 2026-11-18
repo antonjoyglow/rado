@@ -1174,6 +1174,29 @@ mod tests {
     }
 
     #[test]
+    fn applyPoll_listsAndQueuesByScore_notInTheOrderTheSourceAnswered() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("sorted");
+        let mut required = ado_pr(103, "feature/c", Some(0));
+        required.reviewers[0].is_required = true;
+        let answered = vec![ado_pr(101, "feature/a", Some(10)), ado_pr(102, "feature/b", Some(0)), required];
+        let applied = file(&mut s, ado(answered), Poll::Off);
+        assert_eq!(s.ws.items.iter().map(|i| i.id).collect::<Vec<_>>(), [103, 102, 101], "required, then to review, then approved");
+        let queued: Vec<i64> = applied.queue.expect("a queue").branches.iter().flat_map(|b| &b.prs).map(|p| p.pr_id).collect();
+        assert_eq!(queued, [103, 102]);
+    }
+
+    #[test]
+    fn applyPoll_staleAzureDevOpsPoll_leavesTheVoteMemoryAlone() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("stale-memory");
+        s.ws.memory.insert(101, score::VotedAt { vote: 10, commit: "sha0".into() });
+        let stale = s.generation + 1;
+        let outcome = s.apply_poll(stale, ado(vec![ado_pr(101, "feature/x", Some(0))]), Poll::Off, Utc::now());
+        assert!(outcome.fresh.is_empty());
+        assert!(s.ws.memory.contains_key(&101), "a vote reset to 0 in a stale answer must not forget the vote");
+        assert!(s.store.memory("a").is_empty(), "nor save anything");
+    }
+
+    #[test]
     fn applyPoll_bothSourcesFresh_announcesAzureDevOpsNewPrsThenGitHubs() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("both-fresh");
         s.store.save_pat("a", "pat").expect("saved");
