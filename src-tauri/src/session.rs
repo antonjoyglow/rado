@@ -72,6 +72,8 @@ impl Saved {
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     items: Vec<group::ReviewRow>,
+    /// The counter's numbers for `items`.
+    counts: group::Counts,
     last_refreshed: Option<DateTime<Utc>>,
     polling: bool,
     error: Option<String>,
@@ -188,8 +190,10 @@ impl Session {
 
     pub fn status(&self) -> Status {
         let saved = self.active_saved();
+        let items = self.rows();
         Status {
-            items: self.rows(),
+            counts: group::counts(&items),
+            items,
             last_refreshed: self.ws.last_refreshed,
             polling: self.polling,
             error: self.ws.error.clone(),
@@ -843,7 +847,7 @@ mod tests {
         let value = serde_json::to_value(s.status()).expect("serializes");
         let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["error", "hasGithubToken", "hasPat", "items", "lastRefreshed", "polling", "saved", "settings"]);
+        assert_eq!(keys, ["counts", "error", "hasGithubToken", "hasPat", "items", "lastRefreshed", "polling", "saved", "settings"]);
     }
 
     #[test]

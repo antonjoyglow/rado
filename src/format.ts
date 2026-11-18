@@ -20,13 +20,6 @@ export function ago(iso: string | null, now: Date): string {
   return `${Math.floor(minutes / 60)} h ago`;
 }
 
-/** The pill's two numbers: PRs waiting on your review, and your own PRs that need work. */
-export function pillCounts(items: ReviewItem[]): { reviews: number; mine: number } {
-  const actionable = items.filter(isActionable);
-  const mine = actionable.filter((i) => i.state === "mine").length;
-  return { reviews: actionable.length - mine, mine };
-}
-
 /** Count at and above which the pill's number is fully red. */
 export const HEAT_CAP = 10;
 
@@ -36,16 +29,12 @@ export function heat(count: number): string {
   return `hsl(${Math.round(225 * (1 - t))}, 100%, 58%)`;
 }
 
-export function isActionable(item: ReviewItem): boolean {
-  return !item.hidden && item.actionable;
-}
-
 /**
  * The review to open next: of the rows waiting on your review, the one you opened least recently,
  * never-opened rows first in rank order. `openedAt` maps a row key to when you last opened it.
  */
 export function nextReview(items: ReviewItem[], openedAt: ReadonlyMap<string, number>): ReviewItem | null {
-  const reviews = items.filter((i) => isActionable(i) && i.state !== "mine");
+  const reviews = items.filter((i) => i.actionable && i.state !== "mine");
   const opened = (i: ReviewItem) => openedAt.get(i.key) ?? 0;
   return reviews.reduce<ReviewItem | null>((best, i) => (best === null || opened(i) < opened(best) ? i : best), null);
 }
