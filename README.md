@@ -14,7 +14,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
    - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token and click **Save**. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
-   Tokens go to Windows Credential Manager. Other fields save when you leave them.
+   Tokens go to Windows Credential Manager; **Remove…** beside a saved one deletes it and turns that source off. Other fields save when you leave them.
 4. **Optional: link tickets.** Under **Tracker**, pick **Jira** and enter your site (`yourcompany.atlassian.net`), or **Linear** and enter your workspace (`yourteam`, as in `linear.app/yourteam`). Set **Team keys** (`ENG, OPS`) so only those keys become ticket chips.
 5. **Optional: more workspaces.** **+ Add workspace** adds another; switch with the chip in the list's header or **Ctrl+←** / **Ctrl+→**. Only the active workspace is polled and notifies.
 6. **Optional: the MCP server** for Claude review agents (Azure DevOps and GitHub PRs):

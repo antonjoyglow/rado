@@ -183,17 +183,39 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
         void save(n.name);
       },
     });
-    const secret = (label: string, placeholder: string, isSaved: boolean, target: HTMLElement, store: (value: string) => Promise<void>) => {
+    const secret = (
+      label: string, placeholder: string, isSaved: boolean, target: HTMLElement,
+      store: (value: string) => Promise<void>, remove: () => Promise<void>,
+    ) => {
       const input = h("input", { type: "password", autocomplete: "off", ariaLabel: label, placeholder: isSaved ? SAVED : placeholder });
+      const removeSlot = h("span", { class: "inline" });
+      const askRemove = (saved: boolean) => removeSlot.replaceChildren(...(saved
+        ? [h("button", { type: "button", onclick: confirmRemove }, "Remove…")]
+        : []));
+      const confirmRemove = () => removeSlot.replaceChildren(
+        `Remove the saved ${label}?`,
+        h("button", {
+          type: "button",
+          class: "danger",
+          onclick: () => remove().then(() => {
+            input.placeholder = placeholder;
+            askRemove(false);
+            ok(target, "Removed from Windows Credential Manager");
+          }, (e) => fail(target, e)),
+        }, "Remove"),
+        h("button", { type: "button", onclick: () => askRemove(true) }, "Cancel"),
+      );
+      askRemove(isSaved);
       const button = h("button", {
         type: "button",
         onclick: () => store(input.value).then(() => {
           input.value = "";
           input.placeholder = SAVED;
+          askRemove(true);
           ok(target, "Saved to Windows Credential Manager");
         }, (e) => fail(target, e)),
       }, "Save");
-      return h("span", { class: "inline" }, input, button);
+      return h("span", { class: "inline" }, input, button, removeSlot);
     };
     const org = h("input", {
       type: "text", ariaLabel: "Organization", value: workspace.azureDevOps.organization, placeholder: "yourorg, as in dev.azure.com/yourorg",
@@ -285,11 +307,13 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       h("label", {}, caption("Name", n.name), name),
       activeSlot,
       h("h2", {}, "Azure DevOps"),
-      h("label", {}, caption("PAT", n.pat), secret("PAT", "Paste a PAT (Code: Read)", saved.pat, n.pat, (v) => api.savePat(workspace.id, v))),
+      h("label", {}, caption("PAT", n.pat), secret("PAT", "Paste a PAT (Code: Read)", saved.pat, n.pat,
+        (v) => api.savePat(workspace.id, v), () => api.removePat(workspace.id))),
       h("label", {}, caption("Organization", n.org), org),
       h("label", {}, caption("My teams (comma-separated)", n.teams), teams),
       h("h2", {}, "GitHub"),
-      h("label", {}, caption("Token", n.token), secret("GitHub token", "Paste a token (repo, read:org)", saved.githubToken, n.token, (v) => api.saveGithubToken(workspace.id, v))),
+      h("label", {}, caption("Token", n.token), secret("GitHub token", "Paste a token (repo, read:org)", saved.githubToken, n.token,
+        (v) => api.saveGithubToken(workspace.id, v), () => api.removeGithubToken(workspace.id))),
       h("label", {}, caption("Watched repos (comma-separated)", n.repos), repos,
         h("span", { class: "hint" }, "Every open PR there counts as waiting on your review, except drafts and yours")),
       h("h2", {}, "Tracker"),
