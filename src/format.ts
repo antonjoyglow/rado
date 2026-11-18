@@ -39,6 +39,17 @@ export function nextReview(items: ReviewItem[], openedAt: ReadonlyMap<string, nu
   return reviews.reduce<ReviewItem | null>((best, i) => (best === null || opened(i) < opened(best) ? i : best), null);
 }
 
+/**
+ * The row's hide button. Hiding takes every PR of the row that involves you, so a row holding a PR of yours says
+ * "Hide" even when someone else's PR leads it; "Not mine" is only for rows of other people's PRs.
+ */
+export function hideButton(item: ReviewItem): { label: string; title: string } {
+  if (item.hidden) return { label: "Show", title: "Show again" };
+  return item.members.some((m) => m.state === "mine")
+    ? { label: "Hide", title: "Hide until it closes" }
+    : { label: "Not mine", title: "Not yours: leave the count until it closes" };
+}
+
 /** Rows ordered by their most recently opened PR, newest first. */
 export function newestFirst(items: ReviewItem[]): ReviewItem[] {
   return [...items].sort((a, b) => a.newestAgeHours - b.newestAgeHours);

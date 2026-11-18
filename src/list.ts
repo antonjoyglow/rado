@@ -1,7 +1,7 @@
 import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
 import { bird, glow, yawn } from "./bird";
@@ -329,9 +329,9 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         h("button", {
           class: "action",
           type: "button",
-          title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
+          title: hideButton(item).title,
           onclick: () => void api.setHidden(item.key, !item.hidden),
-        }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+        }, hideButton(item).label),
       ),
     ),
   );

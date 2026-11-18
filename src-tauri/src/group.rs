@@ -132,8 +132,12 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
     let mut rows: Vec<ReviewRow> = groups
         .into_iter()
         .map(|(provider, branch, mut mine)| {
+            // The lead names the row: its state picks the tab, its score places the row. A PR waiting on me leads, so a
+            // row that counts as waiting also shows as the work waiting, not as the approved PR beside it.
             let stale = |i: &ReviewItem| i.state == ReviewState::Stale;
-            mine.sort_by(|a, b| a.hidden.cmp(&b.hidden).then(stale(a).cmp(&stale(b))).then(b.score.cmp(&a.score)));
+            mine.sort_by(|a, b| {
+                a.hidden.cmp(&b.hidden).then(stale(a).cmp(&stale(b))).then(b.actionable.cmp(&a.actionable)).then(b.score.cmp(&a.score))
+            });
             let others: Vec<&Related> = related.iter().filter(|r| r.provider == provider && r.branch == branch).collect();
             let lead = mine[0];
             let comments = mine.iter().filter_map(|m| m.comments).reduce(|a, b| CommentStats {
@@ -310,11 +314,39 @@ mod tests {
     }
 
     #[test]
+    fn group_prWaitingOnMe_leadsItsRow_overAHigherScoredApprovedOne() {
+        let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(1, "Api", "feature/x", 70) };
+        let draft_review = ReviewItem { draft: true, ..item(2, "Web", "feature/x", 10) };
+        let rows = group(&[approved, draft_review], &[], &HashMap::new(), &Tracker::None);
+        let row = &rows[0];
+        assert_eq!((row.summary.id, row.summary.state, row.summary.score), (2, ReviewState::NeedsReview, 10), "the row is the review to do");
+        assert_eq!(row.members.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(counts(&rows), Counts { reviews: 1, mine: 0 });
+    }
+
+    #[test]
+    fn group_reviewOnTheBranchOfMyPrThatNeedsNothing_leadsAndCountsAsAReview() {
+        let my_pr = ReviewItem { state: ReviewState::Mine, actionable: false, ..item(1, "Api", "feature/x", 90) };
+        let rows = group(&[my_pr, item(2, "Web", "feature/x", 50)], &[], &HashMap::new(), &Tracker::None);
+        assert_eq!(rows[0].summary.state, ReviewState::NeedsReview);
+        assert_eq!(counts(&rows), Counts { reviews: 1, mine: 0 });
+    }
+
+    #[test]
+    fn group_twoPrsWaitingOnMe_theHigherScoreLeads() {
+        let my_pr_needing_work = ReviewItem { state: ReviewState::Mine, ..item(1, "Api", "feature/x", 90) };
+        let rows = group(&[item(2, "Web", "feature/x", 50), my_pr_needing_work], &[], &HashMap::new(), &Tracker::None);
+        assert_eq!(rows[0].summary.state, ReviewState::Mine);
+        assert_eq!(counts(&rows), Counts { reviews: 0, mine: 1 });
+    }
+
+    #[test]
     fn group_rowWhosePrWaitingOnMeIsHidden_isNotActionable() {
         let hidden_review = ReviewItem { hidden: true, ..item(1, "Api", "feature/x", 60) };
         let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(2, "Web", "feature/x", 10) };
         let rows = group(&[hidden_review.clone(), approved], &[], &HashMap::new(), &Tracker::None);
         assert!(!rows[0].summary.hidden && !rows[0].summary.actionable);
+        assert_eq!((rows[0].summary.id, rows[0].summary.state), (2, ReviewState::Approved), "a hidden PR never leads a visible row");
         assert_eq!(counts(&rows), Counts::default());
 
         let all_hidden = group(&[hidden_review], &[], &HashMap::new(), &Tracker::None);

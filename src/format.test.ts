@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, hideButton, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -175,4 +175,12 @@ describe("parseMinutes", () => {
     "%s -> %s",
     (text, value) => expect(parseMinutes(text)).toBe(value),
   );
+});
+
+describe("hideButton", () => {
+  it("rowOfOthersPrs_isNotMine", () =>
+    expect(hideButton(item({ members: [member({ state: "needsReview" })] })).label).toBe("Not mine"));
+  it("reviewLeadingABranchWithMyPr_isHide", () =>
+    expect(hideButton(item({ state: "needsReview", members: [member({ id: 2, state: "needsReview" }), member({ id: 1, state: "mine" })] })).label).toBe("Hide"));
+  it("hiddenRow_isShow", () => expect(hideButton(item({ hidden: true, actionable: false })).label).toBe("Show"));
 });
