@@ -659,6 +659,39 @@ mod tests {
     use crate::store::tests::{MemorySecrets, TempDir};
     use crate::workspace::github_key;
 
+    /// An Azure DevOps PR on `branch`, with me (`me-id`) as a reviewer who cast `vote`, or not a reviewer at all.
+    fn ado_pr(id: i64, branch: &str, my_vote: Option<i32>) -> ado::PullRequest {
+        let reviewers = my_vote
+            .map(|vote| ado::Reviewer { id: "me-id".into(), display_name: "Me".into(), vote, is_required: false, is_container: false, has_declined: false })
+            .into_iter()
+            .collect();
+        ado::PullRequest {
+            pull_request_id: id,
+            title: format!("PR {id}"),
+            created_by: ado::IdentityRef { id: "author-id".into(), display_name: "Author".into() },
+            creation_date: Utc::now() - chrono::Duration::hours(8),
+            repository: ado::Repository {
+                id: "repo-id".into(),
+                name: "Api".into(),
+                project: ado::Project { id: "project-id".into(), name: "Contoso".into() },
+            },
+            source_ref_name: format!("refs/heads/{branch}"),
+            target_ref_name: "refs/heads/dev".into(),
+            is_draft: false,
+            reviewers,
+            last_merge_source_commit: Some(ado::Commit { commit_id: "sha1".into() }),
+        }
+    }
+
+    fn ado(prs: Vec<ado::PullRequest>) -> Poll<AdoPoll> {
+        let urls = prs.iter().map(|pr| (pr.pull_request_id, format!("https://ado/{}", pr.pull_request_id))).collect();
+        Poll::Fresh(AdoPoll { prs, my_id: "me-id".into(), teams: HashSet::new(), threads: HashMap::new(), urls })
+    }
+
+    fn related_ids(s: &Session) -> Vec<i64> {
+        s.ws.related.iter().map(|r| r.id).collect()
+    }
+
     fn pr(id: i64, state: ReviewState) -> ReviewItem {
         let facts = PrFacts {
             id,
@@ -1114,6 +1147,69 @@ mod tests {
         assert_eq!(warning, None);
         assert_eq!(loaded.status().saved["b"], Saved { pat: true, github_token: true });
         assert_eq!(loaded.settings.active_workspace, "a");
+    }
+
+    // Filing an Azure DevOps poll.
+
+    #[test]
+    fn applyPoll_freshAzureDevOps_listsMine_relatesOthersOnTheBranch_andQueuesThem() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-fresh");
+        let prs = vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/x", None), ado_pr(103, "feature/y", None)];
+        let applied = file(&mut s, ado(prs), Poll::Off);
+        assert_eq!(listed(&s), ids(&[101]));
+        assert_eq!(related_ids(&s), [102], "same branch, not mine: related; another branch: left out");
+        let row = &s.rows()[0];
+        assert_eq!(row.members.iter().map(|m| (m.id, m.state.is_some())).collect::<Vec<_>>(), [(101, true), (102, false)]);
+        let queued = &applied.queue.expect("a queue").branches[0].prs[0];
+        assert_eq!(
+            (queued.provider.as_str(), queued.pr_id, queued.project.as_str(), queued.repo_id.as_str(), queued.source_commit.as_deref()),
+            (queue::AZURE_DEV_OPS, 101, "Contoso", "repo-id", Some("sha1"))
+        );
+        assert_eq!((queued.url.as_str(), queued.last_voted_commit.as_deref()), ("https://ado/101", None));
+    }
+
+    #[test]
+    fn applyPoll_freshAzureDevOps_pushSinceMyVote_isAReReviewAgainstTheVotedCommit_andSavesTheMemory() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-rereview");
+        s.ws.memory.insert(101, score::VotedAt { vote: 10, commit: "sha0".into() });
+        let generation = s.generation;
+        s.apply_poll(generation, ado(vec![ado_pr(101, "feature/x", Some(10))]), Poll::Off, Utc::now());
+        assert_eq!(s.ws.items[0].state, score::ReviewState::ReReview);
+        assert_eq!(s.store.memory("a").get(&101).map(|v| v.commit.as_str()), Some("sha0"), "the vote memory is saved");
+
+        let applied = file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(10))]), Poll::Off);
+        let queued = &applied.queue.expect("a queue").branches[0].prs[0];
+        assert_eq!(queued.last_voted_commit.as_deref(), Some("sha0"));
+    }
+
+    #[test]
+    fn applyPoll_relatedPrs_surviveAFailedAzureDevOpsPoll_andGoWhenItIsOff() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("ado-related");
+        file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/x", None)]), Poll::Off);
+        file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), github(&[7]));
+        assert_eq!(related_ids(&s), [102], "a fresh GitHub answer must not wipe them");
+        assert_eq!(listed(&s), ids(&[101, 7]));
+        file(&mut s, Poll::Off, github(&[7]));
+        assert_eq!(related_ids(&s), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn applyPoll_bothSources_errorsAndMissingSourcesAreInAzureDevOpsThenGitHubOrder() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("both-order");
+        let applied = file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), Poll::Fresh(github::tests::partial(&[7])));
+        assert_eq!(s.ws.error.as_deref(), Some("Azure DevOps: HTTP 503 · GitHub: over 100 PRs in a search; only the first 100 are listed"));
+        assert_eq!(applied.queue.expect("a queue").missing_sources, [queue::AZURE_DEV_OPS, queue::GITHUB]);
+    }
+
+    #[test]
+    fn applyPoll_bothSourcesFresh_announcesAzureDevOpsNewPrsThenGitHubs() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("both-fresh");
+        s.store.save_pat("a", "pat").expect("saved");
+        file(&mut s, ado(vec![ado_pr(101, "feature/x", Some(0))]), github(&[7]));
+        let generation = s.generation;
+        let outcome = s.apply_poll(generation, ado(vec![ado_pr(101, "feature/x", Some(0)), ado_pr(102, "feature/z", Some(0))]), github(&[7, 8]), Utc::now());
+        assert_eq!(outcome.fresh.iter().map(|i| i.id).collect::<Vec<_>>(), [102, 8]);
+        assert_eq!(listed(&s), ids(&[101, 102, 7, 8]));
     }
 
     // The pure rules.
