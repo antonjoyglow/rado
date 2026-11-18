@@ -540,7 +540,6 @@ pub(crate) mod tests {
         ]
         .concat();
         let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR, set in .cargo/config.toml");
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(std::path::Path::new(&dir).join("limits.ts"), text).unwrap();
     }
 

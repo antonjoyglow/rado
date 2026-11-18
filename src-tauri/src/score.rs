@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 
-/// Where a PR stands for me. `stale`: a review with no activity for three weeks, left out of the count.
+/// Where a PR stands for me. `mine`: a PR I opened, shown for its review progress and never counted as waiting on me.
+/// `stale`: a review with no activity for `STALE_AFTER_DAYS`, out of the count until something happens on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ReviewState {
@@ -12,9 +13,7 @@ pub enum ReviewState {
     ReReview,
     WaitingOnAuthor,
     Approved,
-    /// A PR I opened; shown for its review progress, never counted as waiting on me.
     Mine,
-    /// A review with no activity for `STALE_AFTER_DAYS`; out of the count until something happens on it.
     Stale,
 }
 

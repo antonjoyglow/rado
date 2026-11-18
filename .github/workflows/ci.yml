@@ -32,6 +32,6 @@ jobs:
           changed=$(git status --porcelain src/bindings)
           if [ -n "$changed" ]; then
             echo "$changed"; git diff src/bindings
-            echo "::error::src/bindings is out of date: run cargo test and commit the result"; exit 1
+            echo "::error::src/bindings is out of date: run cargo test, delete any file listed as D, and commit the result"; exit 1
           fi
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings

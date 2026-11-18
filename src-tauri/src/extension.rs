@@ -22,16 +22,15 @@ const FOLDER_NAMES: [&str; 2] = ["browser-extension", "edge-extension"];
 #[ts(rename = "ExtensionState")]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum Status {
-    /// Loaded and switched on; `from` names the folder when it isn't the bundled one.
     Loaded { from: Option<String> },
-    /// Loaded but switched off on the extensions page.
     Off,
-    /// Loaded from a folder that no longer exists, such as an old repo checkout.
     Gone { path: String },
     NotLoaded,
 }
 
-/// The extension's status in one browser, and the folder the installer put it in.
+/// The extension's status in one browser, and the folder the installer put it in. `loaded`: switched on, with `from`
+/// naming the folder when it isn't the bundled one; `off`: switched off on the extensions page; `gone`: loaded from a
+/// folder that no longer exists, such as an old repo checkout; `notLoaded`: not in the browser.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[ts(export, rename = "ExtensionStatus")]
 #[serde(rename_all = "camelCase")]

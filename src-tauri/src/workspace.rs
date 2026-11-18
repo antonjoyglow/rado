@@ -36,19 +36,17 @@ pub struct GithubSource {
 
 /// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
 /// only branch keys with one of them count. Jira's `site` is the host (`acme.atlassian.net`); Linear's `workspace`
-/// is the URL slug, `acme` in `linear.app/acme`.
+/// is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Tracker {
     #[default]
     None,
-    /// `site` is the host, such as `acme.atlassian.net`.
     Jira {
         site: String,
         #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
-    /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
     Linear {
         workspace: String,
         #[serde(default, deserialize_with = "lenient")]
