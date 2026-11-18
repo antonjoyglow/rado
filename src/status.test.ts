@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { glows, isStale, newReviewsText, refreshTitle, showStatus, statusLine } from "./status";
+import { glows, isStale, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine } from "./status";
 
 const now = new Date("2026-11-17T12:00:00Z");
 const minutesAgo = (m: number) => new Date(now.getTime() - m * 60_000).toISOString();
@@ -45,8 +45,20 @@ describe("statusLine", () => {
     expect(statusLine(polled({ polling: true, error: "Offline" }), now.getTime() - 1_000, now)).toEqual({ kind: "error", text: "Offline" });
   });
 
-  it("errorAndStale_showsTheError", () => {
-    expect(statusLine(polled({ error: "Offline", lastRefreshed: minutesAgo(30) }), null, now)?.kind).toBe("error");
+  it("errorAndStale_showsTheErrorAndWhenLastChecked", () => {
+    expect(statusLine(polled({ error: "Offline", lastRefreshed: minutesAgo(30) }), null, now)).toEqual({ kind: "error", text: "Offline · last checked 30 min ago" });
+  });
+
+  it("errorNeverRefreshed_showsJustTheError", () => {
+    expect(statusLine(polled({ error: "Offline", lastRefreshed: null }), null, now)).toEqual({ kind: "error", text: "Offline" });
+  });
+
+  it("errorDuringAPollOfFiveSeconds_isBusy", () => {
+    expect(statusLine(polled({ polling: true, error: "Offline" }), now.getTime() - 5_000, now)?.kind).toBe("busy");
+  });
+
+  it("pollingWithoutAStartTime_isNull", () => {
+    expect(statusLine(polled({ polling: true }), null, now)).toBeNull();
   });
 });
 
@@ -109,5 +121,40 @@ describe("glows", () => {
 describe("newReviewsText", () => {
   it.each([[1, "1 new review"], [3, "3 new reviews"]])("%i_is_%s", (n, text) => {
     expect(newReviewsText(n)).toBe(text);
+  });
+});
+
+describe("yawn", () => {
+  it("freshWhileFocused_playsAtOnce", () => {
+    expect(onFresh(0, 2, true)).toEqual({ held: 0, play: 2 });
+  });
+
+  it("freshWhileUnfocused_isHeld", () => {
+    expect(onFresh(2, 3, false)).toEqual({ held: 5, play: 0 });
+  });
+
+  it("focus_playsTheHeldCount", () => {
+    expect(onFocus(5)).toEqual({ held: 0, play: 5 });
+  });
+
+  it("focusWithNothingHeld_playsNothing", () => {
+    expect(onFocus(0)).toEqual({ held: 0, play: 0 });
+  });
+
+  it("workspaceSwitch_dropsTheHeldCount", () => {
+    expect(onSnapshot(5, "a", "b")).toBe(0);
+  });
+
+  it("sameWorkspace_keepsTheHeldCount", () => {
+    expect(onSnapshot(5, "a", "a")).toBe(5);
+  });
+
+  it("firstSnapshot_keepsTheHeldCount", () => {
+    expect(onSnapshot(5, null, "a")).toBe(5);
+  });
+
+  it("heldThenSwitchThenFocus_playsNothing", () => {
+    const held = onSnapshot(onFresh(0, 3, false).held, "a", "b");
+    expect(onFocus(held).play).toBe(0);
   });
 });

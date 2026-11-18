@@ -5,7 +5,7 @@ import {
 } from "./format";
 import { h } from "./dom";
 import { bird, glow, yawn } from "./bird";
-import { glows, newReviewsText, refreshTitle, showStatus, statusLine } from "./status";
+import { glows, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
 import { serialSaver } from "./save";
 import { extensionMessage } from "./extension";
@@ -99,7 +99,7 @@ export function mountList(root: HTMLElement): void {
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
   const logo = bird();
-  const refreshButton = h("button", { class: "icon refresh", type: "button", title: "Refresh now", onclick: () => void api.refresh() }, h("span", { class: "refresh-glyph" }, "↻"));
+  const refreshButton = h("button", { class: "icon refresh", type: "button", ariaLabel: "Refresh now", title: "Refresh now", onclick: () => void api.refresh() }, h("span", { class: "refresh-glyph" }, "↻"));
   const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
   const workspace = workspaceChip(() => showSettings(true, "workspaces"));
@@ -163,7 +163,7 @@ export function mountList(root: HTMLElement): void {
   let pollingSince: number | null = null;
 
   const renderStatus = () => {
-    if (!snapshot) return;
+    if (!snapshot || document.hidden) return;
     const now = new Date();
     const line = statusLine(snapshot, pollingSince, now);
     statusText.replaceChildren();
@@ -177,17 +177,18 @@ export function mountList(root: HTMLElement): void {
   };
 
   // A hidden list can't have focus (it hides when it loses it), so a yawn waits for the next focus.
-  let pendingYawn = 0;
+  let heldYawn = 0;
   let yawning: Animation | null = null;
-  const playYawn = (count: number) => {
+  const settleYawn = ({ held, play }: Yawn) => {
+    heldYawn = held;
+    if (play === 0) return;
+    // Cleared first so a screen reader announces a repeat of the same text.
+    announcer.textContent = "";
+    requestAnimationFrame(() => { announcer.textContent = newReviewsText(play); });
     if (yawning?.playState === "running") return;
     yawning = yawn(logo);
-    announcer.textContent = newReviewsText(count);
   };
-  void watchFresh((count) => {
-    if (document.hasFocus()) playYawn(count);
-    else pendingYawn += count;
-  });
+  void watchFresh((count) => settleYawn(onFresh(heldYawn, count, document.hasFocus())));
 
   const renderBody = () => {
     if (!snapshot) return;
@@ -224,6 +225,7 @@ export function mountList(root: HTMLElement): void {
     if (s.polling && !snapshot?.polling) pollingSince = Date.now();
     const rescaled = s.settings.textScale !== snapshot?.settings.textScale;
     const refreshed = glows(snapshot, s);
+    heldYawn = onSnapshot(heldYawn, snapshot?.settings.activeWorkspace ?? null, s.settings.activeWorkspace);
     snapshot = s;
     applyTheme(document.documentElement, s.settings.theme, s.settings.customTheme);
     document.body.style.setProperty("--text-scale", String(s.settings.textScale / 100));
@@ -237,11 +239,11 @@ export function mountList(root: HTMLElement): void {
     if (refreshed) glow(logo);
   });
   setInterval(renderStatus, 1000);
+  document.addEventListener("visibilitychange", renderStatus);
   window.addEventListener("focus", () => {
     // Rows opened since the last render change which review is next.
     renderBody();
-    if (pendingYawn > 0) playYawn(pendingYawn);
-    pendingYawn = 0;
+    settleYawn(onFocus(heldYawn));
   });
   window.addEventListener("keydown", (e) => {
     const step = workspaceStep(e);

@@ -18,8 +18,9 @@ export type StatusLine = { kind: "busy" | "error" | "stale"; text: string };
 export function statusLine(s: Polled, pollingSince: number | null, now: Date): StatusLine | null {
   const busyMs = s.polling && pollingSince !== null ? now.getTime() - pollingSince : 0;
   if (busyMs >= BUSY_AFTER_MS) return { kind: "busy", text: `Refreshing… usually 1–3 s (${Math.round(busyMs / 1000)} s)` };
-  if (s.error) return { kind: "error", text: s.error };
-  if (isStale(s.lastRefreshed, s.settings.pollMinutes, now)) return { kind: "stale", text: `Last checked ${ago(s.lastRefreshed, now)}` };
+  const stale = isStale(s.lastRefreshed, s.settings.pollMinutes, now);
+  if (s.error) return { kind: "error", text: stale ? `${s.error} · last checked ${ago(s.lastRefreshed, now)}` : s.error };
+  if (stale) return { kind: "stale", text: `Last checked ${ago(s.lastRefreshed, now)}` };
   return null;
 }
 
@@ -47,4 +48,20 @@ export function glows(prev: Polled | null, next: Polled): boolean {
 
 export function newReviewsText(count: number): string {
   return `${count} new review${count === 1 ? "" : "s"}`;
+}
+
+/** New reviews owed a yawn: `held` waits for the list's focus, `play` yawns now. */
+export type Yawn = { held: number; play: number };
+
+export function onFresh(held: number, count: number, focused: boolean): Yawn {
+  return focused ? { held: 0, play: held + count } : { held: held + count, play: 0 };
+}
+
+export function onFocus(held: number): Yawn {
+  return { held: 0, play: held };
+}
+
+/** A workspace switch drops the held yawn: its reviews belong to the workspace no longer shown. */
+export function onSnapshot(held: number, prevWorkspace: string | null, nextWorkspace: string): number {
+  return prevWorkspace !== null && prevWorkspace !== nextWorkspace ? 0 : held;
 }

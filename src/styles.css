@@ -116,12 +116,15 @@ body[data-view="pill"] #app { height: 100%; display: grid; place-items: center; 
 
 /* List */
 /* --text-scale is the text size setting (0.8–1.5), set on the list's body by list.ts; the counter never reads it. */
-body[data-view="list"] { background: var(--bg); border: 1px solid var(--line); font-size: calc(13px * var(--text-scale, 1)); }
+body[data-view="list"] {
+  background: var(--bg); border: 1px solid var(--line); font-size: calc(13px * var(--text-scale, 1));
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
 body[data-view="list"] #app { display: flex; flex-direction: column; height: 100%; container-type: inline-size; }
 
 header { display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 10px 8px 10px 14px; border-bottom: 1px solid var(--line); }
 header h1 {
-  flex: 1; min-width: 0; margin: 0; font-size: calc(18px * var(--text-scale, 1)); font-weight: 700;
+  flex: 1; min-width: 0; margin: 0; font-size: calc(18px * min(var(--text-scale, 1), 1.25)); font-weight: 700;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* Below 400 px the chip and icons need the title's room; it stays in the accessibility tree. */
@@ -170,12 +173,13 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 /* The bird's glow and yawn are skipped in list.ts for the same preference. */
 @media (prefers-reduced-motion: reduce) {
   .pill[data-polling="true"] .logo, .spinner, header .refresh[data-busy="true"] .refresh-glyph { animation: none; }
+  header .refresh[data-busy="true"] .refresh-glyph { opacity: .4; }
 }
 
-.body { flex: 1; overflow-y: auto; padding: 4px 0 10px; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+.body { flex: 1; overflow-y: auto; padding: 4px 0 10px; scrollbar-width: thin; }
 
 /* The list's tabs share the window's width and never shrink below their text, so the strip scrolls sideways below about 520 px. */
-.tabs { flex: none; display: flex; padding: 0 2px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; border-bottom: 1px solid var(--line); }
+.tabs { flex: none; display: flex; padding: 0 2px; overflow-x: auto; scrollbar-width: thin; border-bottom: 1px solid var(--line); }
 .tabs[hidden] { display: none; }
 .settings .tabs { gap: 8px; padding: 0 8px; }
 .tabs .tab {
@@ -229,7 +233,7 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 
 .settings { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .settings[hidden] { display: none; }
-.settings .tabpanel { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+.settings .tabpanel { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow-y: auto; scrollbar-width: thin; }
 .settings .tabpanel[hidden] { display: none; }
 .settings label, .settings .field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); }
 .settings label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--fg); font-size: calc(13px * var(--text-scale, 1)); }
