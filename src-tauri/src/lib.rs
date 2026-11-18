@@ -58,7 +58,7 @@ struct WorkspaceState {
     /// Per source, the PRs already waiting on me at its last good poll. A source with no entry yet records
     /// its PRs without notifying, so a new token, a recovered source or a first visit doesn't announce everything at once.
     known_actionable: HashMap<score::Provider, HashSet<i64>>,
-    /// The source of each hidden PR seen listed in this run, so a closed one is pruned only by its own source.
+    /// The source of each hidden PR, saved with it, so a closed one is pruned only by its own source.
     hidden_source: HashMap<i64, score::Provider>,
 }
 
@@ -155,7 +155,13 @@ impl Inner {
 }
 
 fn load_state(store: &Store, id: &str) -> WorkspaceState {
-    WorkspaceState { memory: store.memory(id), hidden: store.hidden(id), ..WorkspaceState::default() }
+    let hidden = store.hidden(id);
+    WorkspaceState {
+        memory: store.memory(id),
+        hidden: hidden.keys().copied().collect(),
+        hidden_source: hidden.into_iter().filter_map(|(id, source)| Some((id, source?))).collect(),
+        ..WorkspaceState::default()
+    }
 }
 
 fn update(app: &AppHandle, change: impl FnOnce(&mut Inner)) {
@@ -209,14 +215,18 @@ async fn poll_loop(app: AppHandle) {
     }
 }
 
+/// A token that couldn't be read counts as saved: its source then fails with the read error instead of turning off,
+/// which would ask for a token that exists and drop the source's hidden PRs.
+fn token_saved(read: &Result<Option<String>, String>) -> bool {
+    !matches!(read, Ok(None))
+}
+
 /// Polls one workspace, by the id read with `generation`: a switch while it runs drops the result rather than filing it
 /// under the workspace switched to.
 async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
     let shared = app.state::<Shared>();
-    // A token that couldn't be read is a failed source, not a missing one: treating it as off would drop that
-    // source's hidden PRs and ask for a token that is saved.
     let (pat, github_token) = (shared.store.read_pat(&workspace.id), shared.store.read_github_token(&workspace.id));
-    let saved = Saved { pat: !matches!(pat, Ok(None)), github_token: !matches!(github_token, Ok(None)) };
+    let saved = Saved { pat: token_saved(&pat), github_token: token_saved(&github_token) };
     let current = |s: &Inner| s.credentials_generation == generation;
     if matches!((&pat, &github_token), (Ok(None), Ok(None))) {
         update(app, |s| {
@@ -236,7 +246,7 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
     });
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT from Windows Credential Manager: {error}")),
+            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})")),
             Ok(None) => Poll::Off,
             Ok(Some(pat)) => match poll_ado(app, &workspace.azure_dev_ops, pat, generation, me).await {
                 Ok(poll) => Poll::Fresh(poll),
@@ -246,7 +256,7 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
     };
     let github = async {
         match github_token.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("GitHub: can't read the token from Windows Credential Manager: {error}")),
+            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})")),
             Ok(None) => Poll::Off,
             Ok(Some(token)) => match github::fetch(token, &workspace.github.repos).await {
                 Ok(fetched) => Poll::Fresh(fetched),
@@ -310,7 +320,7 @@ struct Applied {
     fresh: Vec<ReviewItem>,
     notify: bool,
     memory: Option<VoteMemory>,
-    hidden: Option<HashSet<i64>>,
+    hidden: Option<store::Hidden>,
     queue: Option<queue::Queue>,
 }
 
@@ -446,7 +456,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         return Some(applied);
     }
     if prune_hidden(ws, &complete) {
-        applied.hidden = Some(ws.hidden.clone());
+        applied.hidden = Some(hidden_file(ws));
     }
     mark_hidden(ws);
     for (source, partial) in fresh_sources {
@@ -478,11 +488,12 @@ fn next_known(known: Option<&HashSet<i64>>, listed: &[&ReviewItem], partial: boo
     (waiting, new)
 }
 
-/// Drops hidden PRs that closed: ones no longer listed, by a source in `complete`. A PR whose source this run hasn't
-/// seen waits until every source is complete. True when the set changed.
+/// Drops hidden PRs that closed: ones no longer listed, by a source in `complete`. A PR with no known source (hidden
+/// before sources were saved) waits until every source is complete. True when the saved file must change.
 fn prune_hidden(ws: &mut WorkspaceState, complete: &HashSet<score::Provider>) -> bool {
+    let mut changed = false;
     for item in ws.items.iter().filter(|i| ws.hidden.contains(&i.id)) {
-        ws.hidden_source.insert(item.id, item.provider);
+        changed |= ws.hidden_source.insert(item.id, item.provider) != Some(item.provider);
     }
     let every = [score::Provider::Ado, score::Provider::GitHub].iter().all(|p| complete.contains(p));
     let before = ws.hidden.len();
@@ -490,7 +501,11 @@ fn prune_hidden(ws: &mut WorkspaceState, complete: &HashSet<score::Provider>) ->
     ws.hidden.retain(|id| urls.contains_key(id) || !sources.get(id).map_or(every, |p| complete.contains(p)));
     let hidden = &ws.hidden;
     ws.hidden_source.retain(|id, _| hidden.contains(id));
-    ws.hidden.len() != before
+    changed || ws.hidden.len() != before
+}
+
+fn hidden_file(ws: &WorkspaceState) -> store::Hidden {
+    ws.hidden.iter().map(|id| (*id, ws.hidden_source.get(id).copied())).collect()
 }
 
 fn mark_hidden(ws: &mut WorkspaceState) {
@@ -686,8 +701,10 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
         for (id, provider) in ids {
             if hidden {
                 s.ws.hidden.insert(id);
+                s.ws.hidden_source.insert(id, provider);
             } else {
                 s.ws.hidden.remove(&id);
+                s.ws.hidden_source.remove(&id);
                 // Unhiding is not news: keep it out of the next poll's notification.
                 if let Some(known) = s.ws.known_actionable.get_mut(&provider) {
                     known.insert(id);
@@ -695,7 +712,7 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
             }
         }
         mark_hidden(&mut s.ws);
-        result = shared.store.save_hidden(&s.settings.active_workspace, &s.ws.hidden);
+        result = shared.store.save_hidden(&s.settings.active_workspace, &hidden_file(&s.ws));
     });
     result
 }
@@ -1052,10 +1069,9 @@ pub fn run() {
                 .settings
                 .workspaces
                 .iter()
-                // An entry that couldn't be read counts as saved; its poll reports the read error.
                 .map(|w| {
-                    let saved = |read: Result<Option<String>, String>| !matches!(read, Ok(None));
-                    (w.id.clone(), Saved { pat: saved(store.read_pat(&w.id)), github_token: saved(store.read_github_token(&w.id)) })
+                    let (pat, token) = (store.read_pat(&w.id), store.read_github_token(&w.id));
+                    (w.id.clone(), Saved { pat: token_saved(&pat), github_token: token_saved(&token) })
                 })
                 .collect();
             let ws = load_state(&store, &loaded.settings.active_workspace);
@@ -1215,6 +1231,22 @@ mod tests {
     }
 
     #[test]
+    fn tokenSaved_readErrorCountsAsSaved() {
+        assert!(token_saved(&Err("Credential Manager: locked".into())));
+        assert!(token_saved(&Ok(Some("t".into()))));
+        assert!(!token_saved(&Ok(None)));
+    }
+
+    #[test]
+    fn pruneHidden_learningASource_isSaved() {
+        let mut ws = hidden_state();
+        ws.urls.insert(1, "https://x/1".into());
+        assert!(prune_hidden(&mut ws, &complete(&[])), "1's source was learned, so the file changes");
+        assert_eq!(hidden_file(&ws), store::Hidden::from([(1, Some(Provider::Ado)), (2, Some(Provider::GitHub)), (3, None)]));
+        assert!(!prune_hidden(&mut ws, &complete(&[])));
+    }
+
+    #[test]
     fn pruneHidden_failedAzureDevOps_keepsItsHiddenPrs_andPrunesGitHubsClosedOnes() {
         let mut ws = hidden_state();
         assert!(prune_hidden(&mut ws, &complete(&[Provider::GitHub])));
@@ -1249,8 +1281,9 @@ mod tests {
         let generation = s.credentials_generation;
         let failed = Poll::Failed("Azure DevOps: can't read the PAT".into());
         let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
-        assert!(applied.hidden.is_none(), "nothing pruned while Azure DevOps is down");
-        assert_eq!(s.ws.hidden, ids(&[1, 5]));
+        assert_eq!(s.ws.hidden, ids(&[1, 5]), "nothing pruned while Azure DevOps is down");
+        let saved = applied.hidden.expect("1's source was learned");
+        assert_eq!((saved.get(&1), saved.get(&5)), (Some(&Some(Provider::Ado)), Some(&None)));
     }
 
     #[test]

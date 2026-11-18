@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::queue::{self, Queue};
-use crate::score::VoteMemory;
+use crate::score::{Provider, VoteMemory};
 use crate::workspace::{self, Legacy, Workspace};
 
 const KEYRING_SERVICE: &str = "review-bracket";
@@ -293,6 +293,8 @@ pub struct Loaded {
     pub warning: Option<String>,
 }
 
+pub type Hidden = HashMap<i64, Option<Provider>>;
+
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -437,11 +439,20 @@ impl Store {
         self.write_in(id, MEMORY_FILE, memory)
     }
 
-    pub fn hidden(&self, id: &str) -> HashSet<i64> {
-        queue::read_json(&self.workspace_dir(id).join(HIDDEN_FILE)).unwrap_or_default()
+    /// Hidden PR ids, each with the source it came from; a file from before sources were kept gives `None`.
+    pub fn hidden(&self, id: &str) -> Hidden {
+        // Not an untagged enum: serde can't read integer map keys through one.
+        let file: Option<Value> = queue::read_json(&self.workspace_dir(id).join(HIDDEN_FILE));
+        match file {
+            Some(value @ Value::Array(_)) => {
+                serde_json::from_value::<HashSet<i64>>(value).unwrap_or_default().into_iter().map(|id| (id, None)).collect()
+            }
+            Some(value) => serde_json::from_value(value).unwrap_or_default(),
+            None => Hidden::new(),
+        }
     }
 
-    pub fn save_hidden(&self, id: &str, hidden: &HashSet<i64>) -> Result<(), String> {
+    pub fn save_hidden(&self, id: &str, hidden: &Hidden) -> Result<(), String> {
         self.write_in(id, HIDDEN_FILE, hidden)
     }
 
@@ -573,7 +584,7 @@ pub(crate) mod tests {
         assert_eq!(secrets.keys(), { let mut k = vec![github_key(&ws.id), pat_key(&ws.id)]; k.sort(); k });
         assert_eq!((secrets.get(&pat_key(&ws.id)).as_deref(), secrets.get(&github_key(&ws.id)).as_deref()), (Some("pat"), Some("gh")));
         assert_eq!(std::fs::read_to_string(dir.0.join(BACKUP_FILE)).unwrap(), OLD_FILE);
-        assert_eq!(store(&dir, &secrets).hidden(&ws.id), HashSet::from([7]));
+        assert_eq!(store(&dir, &secrets).hidden(&ws.id), Hidden::from([(7, None)]));
         assert!(!dir.0.join("hidden.json").exists());
 
         let again = store(&dir, &secrets).load();
@@ -699,11 +710,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn hidden_roundTripsSources_andReadsTheOldIdOnlyFile() {
+        let dir = TempDir::new("hidden");
+        let secrets = MemorySecrets::with(&[]);
+        let store = store(&dir, &secrets);
+        let hidden = Hidden::from([(1, Some(Provider::Ado)), (2, Some(Provider::GitHub)), (3, None)]);
+        store.save_hidden("a1", &hidden).unwrap();
+        assert_eq!(store.hidden("a1"), hidden);
+
+        std::fs::write(queue::workspace_dir(&dir.0, "a1").join(HIDDEN_FILE), "[4, 5]").unwrap();
+        assert_eq!(store.hidden("a1"), Hidden::from([(4, None), (5, None)]));
+    }
+
+    #[test]
     fn forget_removesTheWorkspacesSecretsAndFolder() {
         let dir = TempDir::new("forget");
         let secrets = MemorySecrets::with(&[("ado-pat:a1", "p"), ("github-token:a1", "g"), ("ado-pat:b2", "q")]);
         let store = store(&dir, &secrets);
-        store.save_hidden("a1", &HashSet::from([1])).unwrap();
+        store.save_hidden("a1", &Hidden::from([(1, None)])).unwrap();
 
         store.forget("a1").unwrap();
 
