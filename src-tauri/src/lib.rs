@@ -58,6 +58,8 @@ struct WorkspaceState {
     /// Per source, the PRs already waiting on me at its last good poll. A source with no entry yet records
     /// its PRs without notifying, so a new token, a recovered source or a first visit doesn't announce everything at once.
     known_actionable: HashMap<score::Provider, HashSet<i64>>,
+    /// The source of each hidden PR, saved with it, so a closed one is pruned only by its own source.
+    hidden_source: HashMap<i64, score::Provider>,
 }
 
 /// Which secrets a workspace has saved; the values never leave the store.
@@ -153,7 +155,13 @@ impl Inner {
 }
 
 fn load_state(store: &Store, id: &str) -> WorkspaceState {
-    WorkspaceState { memory: store.memory(id), hidden: store.hidden(id), ..WorkspaceState::default() }
+    let hidden = store.hidden(id);
+    WorkspaceState {
+        memory: store.memory(id),
+        hidden: hidden.keys().copied().collect(),
+        hidden_source: hidden.into_iter().filter_map(|(id, source)| Some((id, source?))).collect(),
+        ..WorkspaceState::default()
+    }
 }
 
 fn update(app: &AppHandle, change: impl FnOnce(&mut Inner)) {
@@ -207,18 +215,30 @@ async fn poll_loop(app: AppHandle) {
     }
 }
 
+/// A token that couldn't be read counts as saved: its source then fails with the read error instead of turning off,
+/// which would ask for a token that exists and drop the source's hidden PRs.
+fn token_saved(read: &Result<Option<String>, String>) -> bool {
+    !matches!(read, Ok(None))
+}
+
 /// Polls one workspace, by the id read with `generation`: a switch while it runs drops the result rather than filing it
 /// under the workspace switched to.
 async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
     let shared = app.state::<Shared>();
-    let (pat, github_token) = (shared.store.pat(&workspace.id), shared.store.github_token(&workspace.id));
-    let saved = Saved { pat: pat.is_some(), github_token: github_token.is_some() };
+    let (pat, github_token) = (shared.store.read_pat(&workspace.id), shared.store.read_github_token(&workspace.id));
+    let saved = Saved { pat: token_saved(&pat), github_token: token_saved(&github_token) };
     let current = |s: &Inner| s.credentials_generation == generation;
-    if pat.is_none() && github_token.is_none() {
+    if matches!((&pat, &github_token), (Ok(None), Ok(None))) {
         update(app, |s| {
             if current(s) {
                 s.saved.insert(workspace.id.clone(), saved);
                 s.polling = false;
+                // After the last token is removed, its rows must not stay listed, nor queued for an agent, as if current.
+                s.ws.items.clear();
+                s.ws.urls.clear();
+                s.ws.related.clear();
+                // Without the file the MCP server says to add a token, rather than reporting an empty queue.
+                let _ = shared.store.remove_queue(&workspace.id);
                 s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
             }
         });
@@ -231,18 +251,20 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
         }
     });
     let ado = async {
-        match pat.as_deref() {
-            None => Poll::Off,
-            Some(pat) => match poll_ado(app, &workspace.azure_dev_ops, pat, generation, me).await {
+        match pat.as_ref().map(Option::as_deref) {
+            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})")),
+            Ok(None) => Poll::Off,
+            Ok(Some(pat)) => match poll_ado(app, &workspace.azure_dev_ops, pat, generation, me).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
             },
         }
     };
     let github = async {
-        match github_token.as_deref() {
-            None => Poll::Off,
-            Some(token) => match github::fetch(token, &workspace.github.repos).await {
+        match github_token.as_ref().map(Option::as_deref) {
+            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})")),
+            Ok(None) => Poll::Off,
+            Ok(Some(token)) => match github::fetch(token, &workspace.github.repos).await {
                 Ok(fetched) => Poll::Fresh(fetched),
                 Err(error) => Poll::Failed(format!("GitHub: {error}")),
             },
@@ -304,7 +326,7 @@ struct Applied {
     fresh: Vec<ReviewItem>,
     notify: bool,
     memory: Option<VoteMemory>,
-    hidden: Option<HashSet<i64>>,
+    hidden: Option<store::Hidden>,
     queue: Option<queue::Queue>,
 }
 
@@ -326,7 +348,11 @@ fn apply(app: &AppHandle, workspace_id: &str, generation: u64, ado: Poll<AdoPoll
         }
     });
     let Some(applied) = applied else { return };
-    if applied.notify && !applied.fresh.is_empty() {
+    if applied.fresh.is_empty() {
+        return;
+    }
+    let _ = app.emit("fresh", applied.fresh.len());
+    if applied.notify {
         let title = match applied.fresh.len() {
             1 => "A PR needs you".to_string(),
             n => format!("{n} PRs need you"),
@@ -351,8 +377,9 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     let mut urls = HashMap::new();
     let mut errors = Vec::new();
     let mut fresh_sources = Vec::new();
-    // Pruning hidden PRs needs every source's full list; a failed or partial poll would drop its hidden ones.
-    let mut complete = true;
+    // Sources whose full list is in hand (fresh without a warning), and sources with no token saved.
+    let mut answered: HashSet<score::Provider> = HashSet::new();
+    let mut off: HashSet<score::Provider> = HashSet::new();
     let mut ado_prs = None;
     let mut github_refs = None;
     let mut missing = Vec::new();
@@ -368,15 +395,16 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         Poll::Off => {
             ws.related.clear();
             ws.known_actionable.remove(&score::Provider::Ado);
+            off.insert(score::Provider::Ado);
         }
         Poll::Failed(error) => {
             errors.push(error);
-            complete = false;
             missing.push(queue::AZURE_DEV_OPS.to_string());
             keep(score::Provider::Ado, &mut items, &mut urls);
         }
         Poll::Fresh(poll) => {
             fresh_sources.push((score::Provider::Ado, false));
+            answered.insert(score::Provider::Ado);
             let me = score::Me { id: &poll.my_id, teams: &poll.teams };
             let mut ranked = score::rank(&poll.prs, &me, &mut ws.memory, now);
             score::attach_threads(&mut ranked, &poll.threads, &was_stale, now);
@@ -404,18 +432,20 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     match github {
         Poll::Off => {
             ws.known_actionable.remove(&score::Provider::GitHub);
+            off.insert(score::Provider::GitHub);
         }
         Poll::Failed(error) => {
             errors.push(error);
-            complete = false;
             missing.push(queue::GITHUB.to_string());
             keep(score::Provider::GitHub, &mut items, &mut urls);
         }
         Poll::Fresh(fetched) => {
             fresh_sources.push((score::Provider::GitHub, fetched.warning.is_some()));
-            if let Some(warning) = &fetched.warning {
-                errors.push(format!("GitHub: {warning}"));
-                complete = false;
+            match &fetched.warning {
+                Some(warning) => errors.push(format!("GitHub: {warning}")),
+                None => {
+                    answered.insert(score::Provider::GitHub);
+                }
             }
             if fetched.partial {
                 missing.push(queue::GITHUB.to_string());
@@ -435,13 +465,8 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     if fresh_sources.is_empty() {
         return Some(applied);
     }
-    if complete {
-        let open = ws.urls.keys().copied().collect::<HashSet<_>>();
-        let before = ws.hidden.len();
-        ws.hidden.retain(|id| open.contains(id));
-        if ws.hidden.len() != before {
-            applied.hidden = Some(ws.hidden.clone());
-        }
+    if prune_hidden(ws, &answered, &off) {
+        applied.hidden = Some(hidden_file(ws));
     }
     mark_hidden(ws);
     for (source, partial) in fresh_sources {
@@ -471,6 +496,27 @@ fn next_known(known: Option<&HashSet<i64>>, listed: &[&ReviewItem], partial: boo
         waiting.extend(known.iter().filter(|id| !present.contains(id)));
     }
     (waiting, new)
+}
+
+/// Drops hidden PRs that closed: ones no longer listed by their source's full answer. A source that is off never
+/// answered, so its hidden PRs wait for it. A PR with no known source (hidden before sources were saved) goes once
+/// every source either answered or is off. True when the saved files must change.
+fn prune_hidden(ws: &mut WorkspaceState, answered: &HashSet<score::Provider>, off: &HashSet<score::Provider>) -> bool {
+    let mut changed = false;
+    for item in ws.items.iter().filter(|i| ws.hidden.contains(&i.id)) {
+        changed |= ws.hidden_source.insert(item.id, item.provider) != Some(item.provider);
+    }
+    let every = [score::Provider::Ado, score::Provider::GitHub].iter().all(|p| answered.contains(p) || off.contains(p));
+    let before = ws.hidden.len();
+    let (urls, sources) = (&ws.urls, &ws.hidden_source);
+    ws.hidden.retain(|id| urls.contains_key(id) || !sources.get(id).map_or(every, |p| answered.contains(p)));
+    let hidden = &ws.hidden;
+    ws.hidden_source.retain(|id, _| hidden.contains(id));
+    changed || ws.hidden.len() != before
+}
+
+fn hidden_file(ws: &WorkspaceState) -> store::Hidden {
+    ws.hidden.iter().map(|id| (*id, ws.hidden_source.get(id).copied())).collect()
 }
 
 fn mark_hidden(ws: &mut WorkspaceState) {
@@ -666,8 +712,10 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
         for (id, provider) in ids {
             if hidden {
                 s.ws.hidden.insert(id);
+                s.ws.hidden_source.insert(id, provider);
             } else {
                 s.ws.hidden.remove(&id);
+                s.ws.hidden_source.remove(&id);
                 // Unhiding is not news: keep it out of the next poll's notification.
                 if let Some(known) = s.ws.known_actionable.get_mut(&provider) {
                     known.insert(id);
@@ -675,20 +723,20 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
             }
         }
         mark_hidden(&mut s.ws);
-        result = shared.store.save_hidden(&s.settings.active_workspace, &s.ws.hidden);
+        result = shared.store.save_hidden(&s.settings.active_workspace, &hidden_file(&s.ws));
     });
     result
 }
 
-/// After a new secret for `id`: a poll for it running now is stale, and its next good poll is a baseline.
-fn secret_saved(app: &AppHandle, id: &str, provider: score::Provider) {
+/// After a secret for `id` is saved or removed: a poll for it running now is stale, and its next good poll is a baseline.
+fn secret_changed(app: &AppHandle, id: &str, provider: score::Provider, now_saved: bool) {
     let shared = app.state::<Shared>();
     let mut active = false;
     update(app, |s| {
         let saved = s.saved.entry(id.to_string()).or_default();
         match provider {
-            score::Provider::Ado => saved.pat = true,
-            score::Provider::GitHub => saved.github_token = true,
+            score::Provider::Ado => saved.pat = now_saved,
+            score::Provider::GitHub => saved.github_token = now_saved,
         }
         active = id == s.settings.active_workspace;
         if active {
@@ -718,7 +766,24 @@ fn save_pat(app: AppHandle, workspace: String, pat: String) -> Result<(), String
     }
     known_workspace(&app, &workspace)?;
     app.state::<Shared>().store.save_pat(&workspace, pat)?;
-    secret_saved(&app, &workspace, score::Provider::Ado);
+    secret_changed(&app, &workspace, score::Provider::Ado, true);
+    Ok(())
+}
+
+/// Turns the workspace's Azure DevOps source off; its rows leave at the next poll.
+#[tauri::command]
+fn remove_pat(app: AppHandle, workspace: String) -> Result<(), String> {
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.remove_pat(&workspace)?;
+    secret_changed(&app, &workspace, score::Provider::Ado, false);
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_github_token(app: AppHandle, workspace: String) -> Result<(), String> {
+    known_workspace(&app, &workspace)?;
+    app.state::<Shared>().store.remove_github_token(&workspace)?;
+    secret_changed(&app, &workspace, score::Provider::GitHub, false);
     Ok(())
 }
 
@@ -730,7 +795,7 @@ fn save_github_token(app: AppHandle, workspace: String, token: String) -> Result
     }
     known_workspace(&app, &workspace)?;
     app.state::<Shared>().store.save_github_token(&workspace, token)?;
-    secret_saved(&app, &workspace, score::Provider::GitHub);
+    secret_changed(&app, &workspace, score::Provider::GitHub, true);
     Ok(())
 }
 
@@ -1032,7 +1097,10 @@ pub fn run() {
                 .settings
                 .workspaces
                 .iter()
-                .map(|w| (w.id.clone(), Saved { pat: store.pat(&w.id).is_some(), github_token: store.github_token(&w.id).is_some() }))
+                .map(|w| {
+                    let (pat, token) = (store.read_pat(&w.id), store.read_github_token(&w.id));
+                    (w.id.clone(), Saved { pat: token_saved(&pat), github_token: token_saved(&token) })
+                })
                 .collect();
             let ws = load_state(&store, &loaded.settings.active_workspace);
             let inner = Inner { settings: loaded.settings, ws, saved, load_warning: loaded.warning, ..Default::default() };
@@ -1073,6 +1141,8 @@ pub fn run() {
             set_hidden,
             save_pat,
             save_github_token,
+            remove_pat,
+            remove_github_token,
             save_settings,
             add_workspace,
             save_workspace,
@@ -1176,6 +1246,95 @@ mod tests {
 
     fn listed(s: &Inner) -> HashSet<i64> {
         s.ws.items.iter().map(|i| i.id).collect()
+    }
+
+    fn complete(sources: &[Provider]) -> HashSet<Provider> {
+        sources.iter().copied().collect()
+    }
+
+    /// Hidden 1 (Azure DevOps, still listed by a failed source), 2 (GitHub, closed) and 3 (source never seen, closed).
+    fn hidden_state() -> WorkspaceState {
+        let ado = ReviewItem { provider: Provider::Ado, ..pr(1, ReviewState::NeedsReview) };
+        let mut ws = WorkspaceState { items: vec![ado], hidden: ids(&[1, 2, 3]), ..WorkspaceState::default() };
+        ws.hidden_source.insert(2, Provider::GitHub);
+        ws
+    }
+
+    #[test]
+    fn tokenSaved_readErrorCountsAsSaved() {
+        assert!(token_saved(&Err("Credential Manager: locked".into())));
+        assert!(token_saved(&Ok(Some("t".into()))));
+        assert!(!token_saved(&Ok(None)));
+    }
+
+    #[test]
+    fn pruneHidden_learningASource_isSaved() {
+        let mut ws = hidden_state();
+        ws.urls.insert(1, "https://x/1".into());
+        assert!(prune_hidden(&mut ws, &complete(&[]), &complete(&[])), "1's source was learned, so the file changes");
+        assert_eq!(hidden_file(&ws), store::Hidden::from([(1, Some(Provider::Ado)), (2, Some(Provider::GitHub)), (3, None)]));
+        assert!(!prune_hidden(&mut ws, &complete(&[]), &complete(&[])));
+    }
+
+    #[test]
+    fn pruneHidden_failedAzureDevOps_keepsItsHiddenPrs_andPrunesGitHubsClosedOnes() {
+        let mut ws = hidden_state();
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::GitHub]), &complete(&[])));
+        assert_eq!(ws.hidden, ids(&[1, 3]), "1 is Azure DevOps's, 3 has no known source while Azure DevOps failed");
+        assert_eq!(ws.hidden_source.get(&1), Some(&Provider::Ado));
+    }
+
+    #[test]
+    fn pruneHidden_partialGitHub_stillPrunesAzureDevOpsClosedOnes() {
+        let mut ws = hidden_state();
+        ws.items.clear();
+        ws.hidden_source.insert(1, Provider::Ado);
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado]), &complete(&[])));
+        assert_eq!(ws.hidden, ids(&[2, 3]));
+    }
+
+    #[test]
+    fn pruneHidden_everySourceComplete_prunesWhatClosed_andKeepsWhatIsOpen() {
+        let mut ws = hidden_state();
+        ws.urls.insert(1, "https://x/1".into());
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado, Provider::GitHub]), &complete(&[])));
+        assert_eq!(ws.hidden, ids(&[1]));
+        assert_eq!(ws.hidden_source.keys().copied().collect::<HashSet<_>>(), ids(&[1]));
+    }
+
+    #[test]
+    fn pruneHidden_sourceTurnedOff_keepsItsHiddenPrs_butAnUnknownOneGoes() {
+        let mut ws = hidden_state();
+        ws.items.clear();
+        assert!(prune_hidden(&mut ws, &complete(&[Provider::Ado]), &complete(&[Provider::GitHub])));
+        assert_eq!(ws.hidden, ids(&[2]), "2 is GitHub's, which is off; 1 closed on Azure DevOps; 3 has no source");
+    }
+
+    #[test]
+    fn applyPoll_gitHubOnly_prunesClosedPrs_andDoesntRewriteTheFileEachPoll() {
+        let mut s = two_workspaces();
+        s.ws.hidden = ids(&[7, 8]);
+        let poll = |s: &mut Inner| {
+            let generation = s.credentials_generation;
+            apply_poll(s, generation, Poll::Off, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll")
+        };
+        let first = poll(&mut s).hidden.expect("8 closed; 7's source learned");
+        assert_eq!(first, store::Hidden::from([(7, Some(Provider::GitHub))]));
+        assert!(poll(&mut s).hidden.is_none(), "nothing changed");
+    }
+
+    #[test]
+    fn applyPoll_gitHubFreshAndAzureDevOpsFailed_keepsAzureDevOpsHiddenPrs() {
+        let mut s = two_workspaces();
+        s.ws.items = vec![ReviewItem { provider: Provider::Ado, ..pr(1, ReviewState::NeedsReview) }];
+        s.ws.urls.insert(1, "https://x/1".into());
+        s.ws.hidden = ids(&[1, 5]);
+        let generation = s.credentials_generation;
+        let failed = Poll::Failed("Azure DevOps: can't read the PAT".into());
+        let applied = apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert_eq!(s.ws.hidden, ids(&[1, 5]), "nothing pruned while Azure DevOps is down");
+        let saved = applied.hidden.expect("1's source was learned");
+        assert_eq!((saved.get(&1), saved.get(&5)), (Some(&Some(Provider::Ado)), Some(&None)));
     }
 
     #[test]
