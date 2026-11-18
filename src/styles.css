@@ -238,16 +238,16 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .row .side { display: grid; }
 .row .side > * { grid-area: 1 / 1; }
 .row .age { display: flex; flex-direction: column; align-items: flex-end; color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); margin-top: 1px; white-space: nowrap; }
-.row .actions { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-/* Hidden actions stay in the Tab order. :focus-within would keep them shown after a mouse click on a chip. */
-@media (hover: hover) {
-  .row .actions { opacity: 0; pointer-events: none; }
-  .row:hover .actions, .row:has(:focus-visible) .actions, .row:has([data-flash]) .actions { opacity: 1; pointer-events: auto; }
-  .row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; }
-}
-@media (hover: none) {
-  .row .side { column-gap: 8px; }
-  .row .actions { grid-area: 1 / 2; }
+.row .actions { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; cursor: default; }
+/* Hidden actions stay in the Tab order. :focus-within would keep them shown after a mouse click on a chip.
+   Any touch screen keeps them shown: a tap can't hover, even on a laptop whose main pointer is a mouse. */
+.row .actions { opacity: 0; pointer-events: none; }
+.row:hover .actions, .row:has(:focus-visible) .actions, .row:has([data-flash]) .actions { opacity: 1; pointer-events: auto; }
+.row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; }
+@media (any-pointer: coarse) {
+  .row .side { row-gap: 6px; }
+  .row .actions { grid-area: 2 / 1; flex-direction: row; opacity: 1; pointer-events: auto; }
+  .row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 1; }
 }
 
 .settings { flex: 1; min-height: 0; display: flex; flex-direction: column; }

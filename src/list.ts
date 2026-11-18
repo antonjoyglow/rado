@@ -297,14 +297,11 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
     class: "action",
     type: "button",
     title: aggregate ? "Copy all links, one 'repo: link' per line" : "Copy the link",
-    onclick: (e: MouseEvent) => {
-      e.stopPropagation();
-      api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed"));
-    },
+    onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
   const tier = item.hidden ? "low" : item.tier;
   // The title button is the keyboard target for opening the row: its click bubbles to the row, as does a click
-  // anywhere else on it. The chips, Copy and Not mine are buttons of their own and stop their clicks here.
+  // anywhere else on it. The chips stop their clicks, and the actions cell stops its own.
   return h("div", {
     class: "row",
     data: { tier, next: String(isNext) },
@@ -332,10 +329,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
           class: "action",
           type: "button",
           title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
-          onclick: (e: MouseEvent) => {
-            e.stopPropagation();
-            void api.setHidden(item.key, !item.hidden);
-          },
+          onclick: () => void api.setHidden(item.key, !item.hidden),
         }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
       ),
     ),
