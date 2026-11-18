@@ -1,14 +1,19 @@
 //! The review queue that Rado exports for its MCP server (`src/bin/rado-mcp.rs`). This file uses only serde,
-//! serde_json and chrono, so the server can include it without Tauri.
+//! serde_json, chrono and indexmap, so the server can include it without Tauri.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 pub const QUEUE_FILE: &str = "queue.json";
 pub const DRAFTS_FILE: &str = "agent-drafts.json";
+/// Held while a draft is recorded, so two agents marking at once don't drop each other's mark.
+pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
+/// The drafts file keeps the newest marks only, so it stays small.
+pub const MAX_DRAFTS: usize = 500;
 pub const SETTINGS_FILE: &str = "settings.json";
 
 /// Letters, digits and dashes only, so an id read from a hand-edited file can't point outside the data folder.
@@ -37,7 +42,7 @@ pub struct Queue {
     pub organization: String,
     pub poll_minutes: u32,
     /// Sources whose last poll failed or came back partial (`azureDevOps`, `gitHub`): some of their PRs may be missing
-    /// from `branches`, so their drafts are not pruned.
+    /// from `branches`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_sources: Vec<String>,
     /// Best-ranked first. One branch is one change, even when it spans several repos.
@@ -93,14 +98,9 @@ fn azure_dev_ops() -> String {
     AZURE_DEV_OPS.into()
 }
 
-/// The source commit at which the agent last drafted a review, keyed by PR id.
-pub type Drafts = HashMap<i64, String>;
-
-impl Queue {
-    pub fn contains(&self, pr_id: i64) -> bool {
-        self.branches.iter().flat_map(|b| &b.prs).any(|p| p.pr_id == pr_id)
-    }
-}
+/// The source commit at which the agent last drafted a review, keyed by PR id, oldest mark first. Still a plain JSON
+/// object, so older `rado-mcp` copies read it.
+pub type Drafts = IndexMap<i64, String>;
 
 /// How old the queue may be before an agent must not trust it: three missed polls, and never less than 30 minutes.
 pub fn stale_after_minutes(poll_minutes: u32) -> i64 {
@@ -123,21 +123,29 @@ fn is_drafted(pr: &QueuedPr, drafts: &Drafts) -> bool {
     pr.source_commit.as_ref().is_some_and(|c| drafts.get(&pr.pr_id) == Some(c))
 }
 
-/// Forgets drafts for PRs that have left the queue.
-pub fn prune(drafts: &mut Drafts, queue: &Queue) {
-    drafts.retain(|id, _| queue.contains(*id));
+/// Records a draft as the newest mark and forgets the oldest past `MAX_DRAFTS`. A PR that leaves the queue keeps its
+/// draft, so it isn't drafted again when it comes back at the same commit.
+pub fn record_draft(drafts: &mut Drafts, pr_id: i64, commit: &str) {
+    drafts.shift_remove(&pr_id);
+    drafts.insert(pr_id, commit.to_string());
+    let excess = drafts.len().saturating_sub(MAX_DRAFTS);
+    drafts.drain(..excess);
 }
 
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Writes to a temporary file and renames it over the target, so a reader never sees half a file.
+/// Writes to a temporary file and renames it over the target, so a reader never sees half a file. The temporary name
+/// is unique to this write, so writers in other processes or threads don't collide on it.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
-    std::fs::rename(&temp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let temp = path.with_extension(format!("json.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path)).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("{}: {e}", path.display())
+    })
 }
 
 #[cfg(test)]
@@ -206,25 +214,32 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn prune_prLeftTheQueue_isForgotten() {
-        let q = queue(vec![branch("a", vec![pr(1, "c1")])]);
-        let mut drafts = Drafts::from([(1, "c1".to_string()), (9, "c9".to_string())]);
+    fn recordDraft_pastTheCap_forgetsTheOldestMark() {
+        let mut drafts: Drafts = (0..MAX_DRAFTS as i64).map(|id| (id, "c".to_string())).collect();
+        record_draft(&mut drafts, 0, "new");
 
-        prune(&mut drafts, &q);
+        record_draft(&mut drafts, 9999, "c9999");
 
-        assert_eq!(drafts, Drafts::from([(1, "c1".to_string())]));
+        assert_eq!(drafts.len(), MAX_DRAFTS);
+        assert!(!drafts.contains_key(&1), "1 is now the oldest mark");
+        assert_eq!(drafts.get(&0).map(String::as_str), Some("new"), "marking again made 0 the newest, not the oldest");
+        assert_eq!(drafts.last(), Some((&9999, &"c9999".to_string())));
+    }
+
+    #[test]
+    fn drafts_roundTripInOrder_andStayReadableAsAPlainMap() {
+        let drafts = Drafts::from([(42, "abc".to_string()), (7, "def".to_string())]);
+        let json = serde_json::to_string(&drafts).unwrap();
+
+        assert_eq!(json, r#"{"42":"abc","7":"def"}"#);
+        assert_eq!(serde_json::from_str::<Drafts>(&json).unwrap(), drafts);
+        let old = serde_json::from_str::<std::collections::HashMap<i64, String>>(&json).unwrap();
+        assert_eq!(old, std::collections::HashMap::from([(42, "abc".to_string()), (7, "def".to_string())]));
     }
 
     #[test]
     fn staleAfterMinutes_isThreePollsWithA30MinuteFloor() {
         assert_eq!(stale_after_minutes(3), 30);
         assert_eq!(stale_after_minutes(20), 60);
-    }
-
-    #[test]
-    fn drafts_roundTripThroughJson() {
-        let drafts = Drafts::from([(42, "abc".to_string())]);
-        let json = serde_json::to_string(&drafts).unwrap();
-        assert_eq!(serde_json::from_str::<Drafts>(&json).unwrap(), drafts);
     }
 }
