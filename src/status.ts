@@ -29,9 +29,18 @@ export function showStatus(line: StatusLine | null, warning: string | null, newe
   return line !== null || Boolean(warning) || Boolean(newerRelease);
 }
 
+export function checkedText(lastRefreshed: string | null, now: Date): string {
+  return lastRefreshed ? `checked ${ago(lastRefreshed, now)}` : "not checked yet";
+}
+
 export function refreshTitle(lastRefreshed: string | null, pollMinutes: number, now: Date): string {
-  const checked = lastRefreshed ? `checked ${ago(lastRefreshed, now)}` : "not checked yet";
-  return `Refresh now · ${checked} · every ${pollMinutes} min`;
+  return `Refresh now · ${checkedText(lastRefreshed, now)} · every ${pollMinutes} min`;
+}
+
+/** The counter's `!`: no token, or an error while the data never loaded or is stale. */
+export function counterProblem(s: Pick<Snapshot, "hasPat" | "hasGithubToken" | "error" | "lastRefreshed">, pollMinutes: number, now: Date): boolean {
+  if (!s.hasPat && !s.hasGithubToken) return true;
+  return s.error !== null && (!s.lastRefreshed || isStale(s.lastRefreshed, pollMinutes, now));
 }
 
 /**
