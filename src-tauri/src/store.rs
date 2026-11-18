@@ -479,6 +479,14 @@ impl Store {
         self.secrets.set(&workspace::github_key(id), token)
     }
 
+    pub fn remove_queue(&self, id: &str) -> Result<(), String> {
+        let path = self.workspace_dir(id).join(queue::QUEUE_FILE);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{}: {e}", path.display())),
+            _ => Ok(()),
+        }
+    }
+
     pub fn remove_pat(&self, id: &str) -> Result<(), String> {
         self.secrets.delete(&workspace::pat_key(id))
     }
@@ -734,6 +742,19 @@ pub(crate) mod tests {
         std::fs::write(folder.join(HIDDEN_SOURCES_FILE), r#"{"4":"ado","5":"someday","x":"gitHub"}"#).unwrap();
         std::fs::write(folder.join(HIDDEN_FILE), "[4, 5, 6]").unwrap();
         assert_eq!(store.hidden("a1"), Hidden::from([(4, Some(Provider::Ado)), (5, None), (6, None)]));
+    }
+
+    #[test]
+    fn removeQueue_deletesTheFile_andAMissingOneIsFine() {
+        let dir = TempDir::new("remove-queue");
+        let secrets = MemorySecrets::with(&[]);
+        let store = store(&dir, &secrets);
+        store.save_queue("a1", &queue::tests::queue(vec![])).unwrap();
+
+        store.remove_queue("a1").unwrap();
+        store.remove_queue("a1").unwrap();
+
+        assert!(!queue::workspace_dir(&dir.0, "a1").join(queue::QUEUE_FILE).exists());
     }
 
     #[test]

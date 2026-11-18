@@ -237,14 +237,8 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
                 s.ws.items.clear();
                 s.ws.urls.clear();
                 s.ws.related.clear();
-                let empty = queue::Queue {
-                    refreshed: Utc::now(),
-                    organization: workspace.azure_dev_ops.organization.clone(),
-                    poll_minutes: s.settings.poll_minutes,
-                    missing_sources: Vec::new(),
-                    branches: Vec::new(),
-                };
-                let _ = shared.store.save_queue(&workspace.id, &empty);
+                // Without the file the MCP server says to add a token, rather than reporting an empty queue.
+                let _ = shared.store.remove_queue(&workspace.id);
                 s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
             }
         });
