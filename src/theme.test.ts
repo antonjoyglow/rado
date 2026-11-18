@@ -26,7 +26,7 @@ describe("contrast", () => {
 describe("customPalette", () => {
   it("setsEveryListVariable", () => {
     expect(Object.keys(customPalette(DARK)).sort()).toEqual(
-      ["--accent", "--bg", "--clear", "--fg", "--hover", "--line", "--muted", "--normal", "--on-accent", "--urgent"],
+      ["--accent", "--bg", "--clear", "--fg", "--hover", "--line", "--muted", "--next-bg", "--normal", "--on-accent", "--urgent"],
     );
   });
 
@@ -64,6 +64,27 @@ describe("customPalette", () => {
     expect(contrast(p["--fg"], p["--hover"])).toBeGreaterThanOrEqual(READABLE);
     // 7% of #e8eaee over #1f2125: lighter, toward the text.
     expect(customPalette(DARK)["--hover"]).toBe("#2d2f33");
+  });
+
+  it("text_readsOnTheReviewNextTint", () => {
+    for (const picks of [
+      DARK,
+      PAPER,
+      { background: "#2e7d32", text: "#ffffff", accent: "#ffd60a" },
+      { background: "#3a3a3a", text: "#c0c0c0", accent: "#ffcc00" },
+      { background: "#d38b86", text: "#383211", accent: "#2561c8" },
+      { background: "#000000", text: "#767676", accent: "#ffffff" },
+    ]) {
+      const p = customPalette(picks);
+      for (const name of ["--fg", "--muted", "--urgent", "--normal", "--clear"]) {
+        expect(contrast(p[name], p["--next-bg"]), `${name} on ${JSON.stringify(picks)}`).toBeGreaterThanOrEqual(READABLE);
+      }
+    }
+  });
+
+  it("reviewNextTint_is6PercentAccent_orNoneWhereTheTextWouldNotRead", () => {
+    expect(customPalette(PAPER)["--next-bg"]).toBe("#f0f0e2");
+    expect(customPalette({ background: "#000000", text: "#767676", accent: "#ffffff" })["--next-bg"]).toBe("#000000");
   });
 
   it("textThatBarelyReads_isUsedForMutedToo", () => {
