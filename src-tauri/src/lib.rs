@@ -239,6 +239,8 @@ async fn poll_workspace(app: &AppHandle, workspace: &Workspace, generation: u64,
                 s.ws.items.clear();
                 s.ws.urls.clear();
                 s.ws.related.clear();
+                s.ws.source_refreshed.clear();
+                s.ws.last_refreshed = None;
                 // Without the file the MCP server says to add a token, rather than reporting an empty queue.
                 let _ = shared.store.remove_queue(&workspace.id);
                 s.ws.error = Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings".into());
@@ -467,6 +469,7 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     for (source, _) in &fresh_sources {
         ws.source_refreshed.insert(*source, now);
     }
+    // A token removed and saved again must not bring back the time of its old answer.
     ws.source_refreshed.retain(|source, _| !off.contains(source));
     ws.last_refreshed = oldest_refresh(&ws.source_refreshed, &off);
     if fresh_sources.is_empty() {
@@ -1364,6 +1367,20 @@ mod tests {
         let github_only = HashMap::from([(Provider::GitHub, late)]);
         assert_eq!(oldest_refresh(&github_only, &complete(&[])), None, "Azure DevOps has a token but never answered");
         assert_eq!(oldest_refresh(&HashMap::new(), &complete(&[Provider::Ado, Provider::GitHub])), None);
+    }
+
+    #[test]
+    fn applyPoll_azureDevOpsNeverAnswered_listsGitHubWithNoAge_andOffForgetsItsTime() {
+        let mut s = two_workspaces();
+        let generation = s.credentials_generation;
+        let failed = Poll::Failed("Azure DevOps: HTTP 401".into());
+        apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert_eq!((listed(&s), s.ws.last_refreshed), (ids(&[7]), None));
+
+        s.ws.source_refreshed.insert(Provider::Ado, Utc::now());
+        apply_poll(&mut s, generation, Poll::Off, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert!(!s.ws.source_refreshed.contains_key(&Provider::Ado));
+        assert!(s.ws.last_refreshed.is_some());
     }
 
     #[test]

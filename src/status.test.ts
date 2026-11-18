@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { glows, isStale, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine } from "./status";
+import { counterProblem, glows, isStale, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine } from "./status";
 
 const now = new Date("2026-11-17T12:00:00Z");
 const minutesAgo = (m: number) => new Date(now.getTime() - m * 60_000).toISOString();
@@ -156,5 +156,29 @@ describe("yawn", () => {
   it("heldThenSwitchThenFocus_playsNothing", () => {
     const held = onSnapshot(onFresh(0, 3, false).held, "a", "b");
     expect(onFocus(held).play).toBe(0);
+  });
+});
+
+describe("counterProblem", () => {
+  const now = new Date("2026-11-18T12:00:00Z");
+  const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
+  const state = (over: Partial<{ hasPat: boolean; hasGithubToken: boolean; error: string | null; lastRefreshed: string | null }> = {}) =>
+    ({ hasPat: true, hasGithubToken: false, error: null, lastRefreshed: at(1), ...over });
+
+  it("flags no token at all", () => {
+    expect(counterProblem(state({ hasPat: false }), 3, now)).toBe(true);
+  });
+
+  it("stays quiet on one failed poll while the data is recent", () => {
+    expect(counterProblem(state({ error: "HTTP 503", lastRefreshed: at(4) }), 3, now)).toBe(false);
+  });
+
+  it("flags an error once the data is older than two polls, or never loaded", () => {
+    expect(counterProblem(state({ error: "HTTP 503", lastRefreshed: at(8) }), 3, now)).toBe(true);
+    expect(counterProblem(state({ error: "HTTP 503", lastRefreshed: null }), 3, now)).toBe(true);
+  });
+
+  it("stays quiet on stale data without an error", () => {
+    expect(counterProblem(state({ lastRefreshed: at(60) }), 3, now)).toBe(false);
   });
 });

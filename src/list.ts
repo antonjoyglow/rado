@@ -197,7 +197,8 @@ export function mountList(root: HTMLElement): void {
       if (settingsPanel.hidden) showSettings(true, "workspaces");
       return;
     }
-    if (!snapshot.lastRefreshed) {
+    // One source can have rows while another has a token but never answered, which leaves lastRefreshed unset.
+    if (!snapshot.lastRefreshed && snapshot.items.length === 0) {
       body.append(h("p", { class: "empty" }, snapshot.error ? "Nothing loaded yet." : "Loading your reviews…"));
       return;
     }
