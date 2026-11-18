@@ -346,6 +346,7 @@ mod tests {
         let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(2, "Web", "feature/x", 10) };
         let rows = group(&[hidden_review.clone(), approved], &[], &HashMap::new(), &Tracker::None);
         assert!(!rows[0].summary.hidden && !rows[0].summary.actionable);
+        assert_eq!((rows[0].summary.id, rows[0].summary.state), (2, ReviewState::Approved), "a hidden PR never leads a visible row");
         assert_eq!(counts(&rows), Counts::default());
 
         let all_hidden = group(&[hidden_review], &[], &HashMap::new(), &Tracker::None);
