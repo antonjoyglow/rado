@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, watchSnapshot, type Snapshot } from "./api";
 import { ago, pillCounts } from "./format";
+import { isStale } from "./status";
 import { counterElement, paintCounter } from "./counter";
 import { activeWorkspace } from "./workspaces";
 
@@ -16,13 +17,16 @@ export function mountPill(root: HTMLElement): void {
   const render = () => {
     if (!snapshot) return;
     const counts = pillCounts(snapshot.items);
-    const problem = !(snapshot.hasPat || snapshot.hasGithubToken) || (snapshot.error && !snapshot.lastRefreshed);
+    const now = new Date();
+    const stale = isStale(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
+    const problem = !(snapshot.hasPat || snapshot.hasGithubToken) || (snapshot.error && (!snapshot.lastRefreshed || stale));
     paintCounter(parts, counts, snapshot.settings.counter, snapshot.settings.pillScale, Boolean(problem));
     pill.dataset.polling = String(snapshot.polling);
     const name = activeWorkspace(snapshot.settings)?.name ?? "";
+    const checked = snapshot.lastRefreshed ? `last checked ${ago(snapshot.lastRefreshed, now)}` : "not checked yet";
     pill.title = `${name}: ` + (snapshot.warning ? `${snapshot.warning} · ` : "") + (snapshot.error
-      ? snapshot.error
-      : `${counts.reviews} to review · ${counts.mine} of your PR rows need work (a rejection, waiting for author, or an open thread) · refreshed ${ago(snapshot.lastRefreshed, new Date())}`);
+      ? `${snapshot.error} · ${checked}`
+      : `${counts.reviews} to review · ${counts.mine} of your PR rows need work (a rejection, waiting for author, or an open thread) · refreshed ${ago(snapshot.lastRefreshed, now)}`);
   };
   void watchSnapshot((s) => {
     snapshot = s;

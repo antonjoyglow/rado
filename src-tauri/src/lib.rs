@@ -60,6 +60,8 @@ struct WorkspaceState {
     known_actionable: HashMap<score::Provider, HashSet<i64>>,
     /// The source of each hidden PR, saved with it, so a closed one is pruned only by its own source.
     hidden_source: HashMap<i64, score::Provider>,
+    /// Each source's last good poll in this run.
+    source_refreshed: HashMap<score::Provider, DateTime<Utc>>,
 }
 
 /// Which secrets a workspace has saved; the values never leave the store.
@@ -462,6 +464,11 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
     ws.urls = urls;
     s.polling = false;
     ws.error = (!errors.is_empty()).then(|| errors.join(" · "));
+    for (source, _) in &fresh_sources {
+        ws.source_refreshed.insert(*source, now);
+    }
+    ws.source_refreshed.retain(|source, _| !off.contains(source));
+    ws.last_refreshed = oldest_refresh(&ws.source_refreshed, &off);
     if fresh_sources.is_empty() {
         return Some(applied);
     }
@@ -475,7 +482,6 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
         applied.fresh.extend(listed.into_iter().filter(|i| new.contains(&i.id)).cloned());
         ws.known_actionable.insert(source, known);
     }
-    ws.last_refreshed = Some(now);
     applied.notify = s.settings.notify;
     // At least one source is fresh here; a failed one is named in the queue so an agent knows its PRs are missing.
     let ctx = export::Context { organization: &organization, poll_minutes: s.settings.poll_minutes, now };
@@ -517,6 +523,18 @@ fn prune_hidden(ws: &mut WorkspaceState, answered: &HashSet<score::Provider>, of
 
 fn hidden_file(ws: &WorkspaceState) -> store::Hidden {
     ws.hidden.iter().map(|id| (*id, ws.hidden_source.get(id).copied())).collect()
+}
+
+/// How old the listed data is: the oldest last good poll among sources with a token, so one failing source isn't
+/// hidden by another's fresh answer. None while such a source has never answered in this run.
+fn oldest_refresh(refreshed: &HashMap<score::Provider, DateTime<Utc>>, off: &HashSet<score::Provider>) -> Option<DateTime<Utc>> {
+    [score::Provider::Ado, score::Provider::GitHub]
+        .iter()
+        .filter(|p| !off.contains(p))
+        .map(|p| refreshed.get(p).copied())
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min()
 }
 
 fn mark_hidden(ws: &mut WorkspaceState) {
@@ -1335,6 +1353,28 @@ mod tests {
         assert_eq!(s.ws.hidden, ids(&[1, 5]), "nothing pruned while Azure DevOps is down");
         let saved = applied.hidden.expect("1's source was learned");
         assert_eq!((saved.get(&1), saved.get(&5)), (Some(&Some(Provider::Ado)), Some(&None)));
+    }
+
+    #[test]
+    fn oldestRefresh_isTheOldestSourceWithAToken_orNoneWhileOneNeverAnswered() {
+        let (early, late): (DateTime<Utc>, DateTime<Utc>) = ("2026-11-18T08:00:00Z".parse().unwrap(), "2026-11-18T09:00:00Z".parse().unwrap());
+        let both = HashMap::from([(Provider::Ado, early), (Provider::GitHub, late)]);
+        assert_eq!(oldest_refresh(&both, &complete(&[])), Some(early));
+        assert_eq!(oldest_refresh(&both, &complete(&[Provider::Ado])), Some(late), "a source with no token doesn't count");
+        let github_only = HashMap::from([(Provider::GitHub, late)]);
+        assert_eq!(oldest_refresh(&github_only, &complete(&[])), None, "Azure DevOps has a token but never answered");
+        assert_eq!(oldest_refresh(&HashMap::new(), &complete(&[Provider::Ado, Provider::GitHub])), None);
+    }
+
+    #[test]
+    fn applyPoll_failingAzureDevOps_keepsTheListsAgeAtItsLastGoodPoll() {
+        let mut s = two_workspaces();
+        let ado_answered: DateTime<Utc> = "2026-11-18T08:00:00Z".parse().unwrap();
+        s.ws.source_refreshed.insert(Provider::Ado, ado_answered);
+        let generation = s.credentials_generation;
+        let failed = Poll::Failed("Azure DevOps: HTTP 503".into());
+        apply_poll(&mut s, generation, failed, Poll::Fresh(github::tests::requested(&[7])), Utc::now()).expect("current poll");
+        assert_eq!(s.ws.last_refreshed, Some(ado_answered), "GitHub's fresh answer must not make the list look current");
     }
 
     #[test]
