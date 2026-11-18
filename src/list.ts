@@ -1,7 +1,7 @@
 import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { h } from "./dom";
 import { bird, glow, yawn } from "./bird";
@@ -265,17 +265,15 @@ const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", l
 
 function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   const aggregate = item.members.length > 1;
-  // Plain text, so the outlined chips are exactly the things that open something.
-  const facts = [
-    h("span", {}, aggregate ? `${item.members.length} PRs · ${item.branch} · ${item.author}` : item.author),
-    item.required && h("span", { class: "required" }, "required"),
-    item.approvals > 0 && h("span", { class: "approved", title: `${item.approvals} approved` }, `✓ ${item.approvals}`),
-    item.objections > 0 && h("span", { class: "objected", title: `${item.objections} rejected or waiting for author` }, `✗ ${item.objections}`),
-    item.comments && item.comments.total > 0 && h("span", {}, `${item.comments.total} comment${item.comments.total === 1 ? "" : "s"}${item.comments.openThreads > 0 ? ` (${item.comments.openThreads} open)` : ""}`),
-    item.draft && h("span", {}, "draft"),
-    item.releaseTarget && h("span", { title: `Merges into ${item.target}` }, `→ ${item.target}`),
-  ].filter((f): f is HTMLSpanElement => Boolean(f));
-  const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" · ", f]));
+  // Plain text, so the outlined chips are exactly the things that open something. The separating dots are
+  // drawn by the stylesheet inside each phrase, so a line never starts with one.
+  const facts = rowFacts(item).map(({ text, kind, title }) => {
+    const fact = h("span", { class: kind }, text);
+    if (title) fact.title = title;
+    return fact;
+  });
+  if (isNext) facts.unshift(h("span", { class: "next-label" }, "Review next"));
+  const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" ", f]));
   const members = item.members.map((m) => h("button", {
       class: "member",
       type: "button",
@@ -288,7 +286,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
       },
     }, prLabel(m)));
   const ticket = item.ticket && h("button", {
-    class: "member ticket",
+    class: "member",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
     onclick: (e: MouseEvent) => {
@@ -303,53 +301,56 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
     onclick: () => api.copyRow(item.key).then(() => flash(copy, "Copied"), () => flash(copy, "Failed")),
   }, "Copy");
   const tier = item.hidden ? "low" : item.tier;
-  // The title button is the keyboard target for opening the row: its click bubbles to this div, as does a click
-  // anywhere else on the row. The chips are buttons of their own beside it and stop their clicks here.
-  return h("div", { class: "row", data: { tier, next: String(isNext) } },
-    h("div", {
-      class: "open",
-      onclick: () => {
-        opened(item.key);
-        void api.openRow(item.key);
-      },
+  // The title button is the keyboard target for opening the row: its click bubbles to the row, as does a click
+  // anywhere else on it. The chips stop their clicks, and the actions cell stops its own.
+  return h("div", {
+    class: "row",
+    data: { tier, next: String(isNext) },
+    onclick: () => {
+      opened(item.key);
+      void api.openRow(item.key);
     },
-      h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
-      h("div", { class: "main" },
-        isNext && h("span", { class: "next-label" }, "Review next"),
-        h("button", {
-          class: "title",
-          type: "button",
-          title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
-        }, item.title),
-        h("span", { class: "meta" }, ...meta),
-        h("span", { class: "members" }, ticket, ...members),
-      ),
-      ageCell(item),
-    ),
-    h("span", { class: "actions" },
-      copy,
+  },
+    h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
+    h("div", { class: "main" },
       h("button", {
-        class: "action",
+        class: "title",
         type: "button",
-        title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
-        onclick: () => void api.setHidden(item.key, !item.hidden),
-      }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+        title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
+      }, item.title),
+      h("span", { class: "meta", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) }, ...meta),
+      h("span", { class: "members" }, ticket, ...members),
+    ),
+    h("div", { class: "side" },
+      ageCell(item),
+      // A click between or beside the buttons must not open the row.
+      h("span", { class: "actions", onclick: (e: Event) => e.stopPropagation() },
+        copy,
+        h("button", {
+          class: "action",
+          type: "button",
+          title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
+          onclick: () => void api.setHidden(item.key, !item.hidden),
+        }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+      ),
     ),
   );
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
-/** When the row's earliest PR opened, then its last activity. Hover shows each PR's exact times. */
+/** When the row's earliest PR opened, then its last activity. */
 function ageCell(item: ReviewItem): HTMLElement {
   const { opened, active } = ageColumn(item.createdAt, item.updatedAt, new Date());
-  return h("span", { class: "age", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) },
+  return h("span", { class: "age" },
     h("span", {}, opened),
     active && h("span", {}, active),
   );
 }
 
 function flash(button: HTMLButtonElement, text: string): void {
+  // A second click during the note would save the note as the label and end the note early.
+  if (button.dataset.flash) return;
   const label = button.textContent;
   button.textContent = text;
   button.dataset.flash = "true";
