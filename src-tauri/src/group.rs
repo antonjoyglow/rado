@@ -203,6 +203,25 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
     rows
 }
 
+/// The counter's two numbers, counted in rows: rows waiting on my review, and rows of mine that need work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Counts {
+    pub reviews: u32,
+    pub mine: u32,
+}
+
+/// A hidden row is never actionable, so the rows counted are the ones that are.
+pub fn counts(rows: &[ReviewRow]) -> Counts {
+    let mut counts = Counts::default();
+    for row in rows.iter().filter(|r| r.summary.actionable) {
+        match row.summary.state {
+            ReviewState::Mine => counts.mine += 1,
+            _ => counts.reviews += 1,
+        }
+    }
+    counts
+}
+
 /// Text for sharing: a lone PR is its link; an aggregate is one `repo: link` line per PR.
 pub fn share_text(members: &[Member]) -> String {
     match members {
@@ -251,6 +270,61 @@ mod tests {
             comments: None,
             actionable: true,
         }
+    }
+
+    fn counted(items: &[ReviewItem]) -> Counts {
+        counts(&group(items, &[], &HashMap::new(), &Tracker::None))
+    }
+
+    /// One PR on its own branch, in `state`, waiting on me when `actionable`.
+    fn alone(id: i64, state: ReviewState, actionable: bool, hidden: bool) -> ReviewItem {
+        ReviewItem { state, actionable, hidden, ..item(id, "Api", &format!("b{id}"), 50) }
+    }
+
+    #[test]
+    fn counts_noRows_isZeroZero() {
+        assert_eq!(counted(&[]), Counts::default());
+    }
+
+    #[test]
+    fn counts_approvedOrWaitingOnAuthor_isNotCounted() {
+        let rows = [alone(1, ReviewState::Approved, false, false), alone(2, ReviewState::WaitingOnAuthor, false, false)];
+        assert_eq!(counted(&rows), Counts::default());
+    }
+
+    #[test]
+    fn counts_reviewsToDo_countAsReviews_andMyPrsNeedingWorkAsMine() {
+        let rows = [
+            alone(1, ReviewState::NeedsReview, true, false),
+            alone(2, ReviewState::ReReview, true, false),
+            alone(3, ReviewState::Mine, true, false),
+            alone(4, ReviewState::Mine, false, false),
+        ];
+        assert_eq!(counted(&rows), Counts { reviews: 2, mine: 1 });
+    }
+
+    #[test]
+    fn counts_hiddenRows_areNotCounted() {
+        let rows = [alone(1, ReviewState::NeedsReview, true, true), alone(2, ReviewState::Mine, true, true)];
+        assert_eq!(counted(&rows), Counts::default());
+    }
+
+    #[test]
+    fn group_rowWhosePrWaitingOnMeIsHidden_isNotActionable() {
+        let hidden_review = ReviewItem { hidden: true, ..item(1, "Api", "feature/x", 60) };
+        let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(2, "Web", "feature/x", 10) };
+        let rows = group(&[hidden_review.clone(), approved], &[], &HashMap::new(), &Tracker::None);
+        assert!(!rows[0].summary.hidden && !rows[0].summary.actionable);
+        assert_eq!(counts(&rows), Counts::default());
+
+        let all_hidden = group(&[hidden_review], &[], &HashMap::new(), &Tracker::None);
+        assert!(all_hidden[0].summary.hidden && !all_hidden[0].summary.actionable, "the list's next review relies on this");
+    }
+
+    #[test]
+    fn counts_aBranchRowWithTwoReviews_countsOnce() {
+        let rows = [item(1, "Api", "feature/x", 60), item(2, "Web", "feature/x", 50)];
+        assert_eq!(counted(&rows), Counts { reviews: 1, mine: 0 });
     }
 
     /// A time `hours` from a fixed noon; negative is earlier.

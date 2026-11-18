@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -13,7 +13,8 @@ const item = (over: Partial<ReviewItem>): ReviewItem => ({
 describe("nextReview", () => {
   const rows = [
     item({ key: "mine", state: "mine", actionable: true }),
-    item({ key: "hidden", hidden: true }),
+    // Rust never marks a hidden row actionable.
+    item({ key: "hidden", hidden: true, actionable: false }),
     item({ key: "stale", state: "stale" }),
     item({ key: "first" }),
     item({ key: "second", state: "reReview" }),
@@ -64,19 +65,6 @@ describe("ago", () => {
   ])("%s -> %s", (iso, text) => {
     expect(ago(iso, now)).toBe(text);
   });
-});
-
-describe("pillCounts", () => {
-  it("noItems_isZeroZero", () => expect(pillCounts([])).toEqual({ reviews: 0, mine: 0 }));
-  it("onlyApprovedOrWaiting_isZeroZero", () =>
-    expect(pillCounts([item({ state: "approved" }), item({ state: "waitingOnAuthor" })])).toEqual({ reviews: 0, mine: 0 }));
-  it("reviewsToDo_countLeft", () =>
-    expect(pillCounts([item({ state: "needsReview" }), item({ state: "reReview" })])).toEqual({ reviews: 2, mine: 0 }));
-  it("myPrNeedingWork_countsRight", () =>
-    expect(pillCounts([item({ state: "mine", actionable: true }), item({ state: "needsReview" })])).toEqual({ reviews: 1, mine: 1 }));
-  it("myPrNotNeedingWork_isNotCounted", () => expect(pillCounts([item({ state: "mine" })])).toEqual({ reviews: 0, mine: 0 }));
-  it("hiddenRows_areNotCounted", () =>
-    expect(pillCounts([item({ hidden: true }), item({ state: "mine", actionable: true, hidden: true })])).toEqual({ reviews: 0, mine: 0 }));
 });
 
 describe("heat", () => {

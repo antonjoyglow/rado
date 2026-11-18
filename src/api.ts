@@ -54,7 +54,7 @@ export interface ReviewItem extends PrRef {
   approvals: number;
   objections: number;
   comments: { total: number; openThreads: number } | null;
-  /** Waiting on you: a review to do, or your own PR with rejections or unresolved threads. */
+  /** Waiting on you: a review to do, or your own PR with rejections or unresolved threads. Never true for a hidden row. */
   actionable: boolean;
 }
 
@@ -133,6 +133,8 @@ export interface CounterStyle {
 
 export interface Snapshot {
   items: ReviewItem[];
+  /** The counter's numbers, in rows: waiting on your review, and your own rows that need work. */
+  counts: { reviews: number; mine: number };
   lastRefreshed: string | null;
   polling: boolean;
   error: string | null;
