@@ -29,26 +29,23 @@ export function serialSaver<T>(initial: T, send: (value: T) => Promise<void>, re
   };
 }
 
-/** A serialSaver that outlives one view: a later view starts from `latest` while saves are pending, and sets `revert`. */
+/** A serialSaver that outlives one view: a later view starts from `latest` and sets `revert`. */
 export interface LastingSaver<T> {
   save: (current: T) => Promise<void>;
-  /** Saves queued or running. */
-  pending: number;
   /** The value of the last save queued, or the last saved value after a failure. */
   latest: T;
   revert: (saved: T) => void;
 }
 
 export function lastingSaver<T>(initial: T, send: (value: T) => Promise<void>): LastingSaver<T> {
-  const saver: LastingSaver<T> = { pending: 0, latest: structuredClone(initial), revert: () => {}, save: () => Promise.resolve() };
+  const saver: LastingSaver<T> = { latest: structuredClone(initial), revert: () => {}, save: () => Promise.resolve() };
   const queue = serialSaver(initial, send, (saved) => {
     saver.latest = structuredClone(saved);
     saver.revert(saved);
   });
   saver.save = (current) => {
-    saver.pending++;
     saver.latest = structuredClone(current);
-    return queue(current).finally(() => saver.pending--);
+    return queue(current);
   };
   return saver;
 }

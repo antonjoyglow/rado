@@ -344,8 +344,8 @@ function renderSettings(
   onSelect: (key: SettingsTab) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
   const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
-  // The snapshot lags a save still running; start from what that save sends.
-  const settings = { ...(saver.pending > 0 ? saver.latest : snapshot.settings) };
+  // This saver is the only writer of these settings, and the snapshot can lag a save just made.
+  const settings = { ...saver.latest };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
   // <label>s, so every input carries an explicit ariaLabel to keep the note out of its accessible name.
   const note = () => h("span", { class: "note", role: "status" });
@@ -359,18 +359,18 @@ function renderSettings(
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
   const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
   // General and Counter share `settings` and save it whole. A failed save puts both tabs back to the last saved
-  // values in place, leaving the field being typed in alone.
+  // values in place; a General field that has focus is put back when it loses it.
   saver.revert = (saved) => {
     Object.assign(settings, saved);
     generalShows.forEach((show) => show());
     counter.redraw();
   };
-  const queueSave = (current: Settings) => saver.save(current);
-  const save = (n: HTMLElement) => queueSave(settings).then(() => ok(n), (e) => fail(n, e));
+  const save = (n: HTMLElement) => saver.save(settings).then(() => ok(n), (e) => fail(n, e));
   const generalShows: (() => void)[] = [];
-  /** Re-shows `input` from `settings` after a rollback, unless the user is typing in it. */
+  /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
   const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => {
-    if (document.activeElement !== input) show();
+    if (document.activeElement === input) input.addEventListener("blur", show, { once: true });
+    else show();
   });
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
@@ -516,7 +516,7 @@ function renderSettings(
       shown(typed, () => (picker.value = typed.value = settings.customTheme[key]));
       const set = (value: string) => {
         fill(value);
-        queueSave(settings).then(() => {
+        saver.save(settings).then(() => {
           const hard = unreadable(settings.customTheme);
           if (hard.length > 0) show(n.custom, "error", `Saved, but hard to read: ${hard.join(", ")}`);
           else ok(n.custom);

@@ -88,7 +88,6 @@ describe("lastingSaver", () => {
     const running = saver.save(first);
     await tick();
 
-    expect(saver.pending).toBe(1);
     const second = { ...saver.latest };
     expect(second).toEqual({ a: 1, b: 0 });
     second.b = 2;
@@ -102,20 +101,21 @@ describe("lastingSaver", () => {
     calls[1].ok();
     await queued;
     expect(calls.map((c) => c.value)).toEqual([{ a: 1, b: 0 }, { a: 1, b: 2 }]);
-    expect(saver.pending).toBe(0);
   });
 
   it("on a failure calls the latest view's revert and resets latest to the saved value", async () => {
     const { calls, send, tick } = backend();
     const saver = lastingSaver<S>({ a: 0, b: 0 }, send);
-    const reverts: string[] = [];
-    saver.revert = () => reverts.push("old view");
-    saver.revert = (saved) => reverts.push(`new view ${saved.a}`);
+    const reverts: S[] = [];
+    saver.revert = (saved) => reverts.push(saved);
     const failing = saver.save({ a: 5, b: 0 });
+    const dropped = saver.save({ a: 5, b: 6 });
     await tick();
     calls[0].fail("locked");
     await expect(failing).rejects.toThrow("locked");
-    expect(reverts).toEqual(["new view 0"]);
+    await expect(dropped).rejects.toBe(DROPPED);
+    expect(reverts).toEqual([{ a: 0, b: 0 }]);
+    // The next view starts from the saved value, not the dropped one.
     expect(saver.latest).toEqual({ a: 0, b: 0 });
   });
 });
