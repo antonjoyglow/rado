@@ -416,6 +416,8 @@ fn apply_poll(s: &mut Inner, generation: u64, ado: Poll<AdoPoll>, github: Poll<g
             if let Some(warning) = &fetched.warning {
                 errors.push(format!("GitHub: {warning}"));
                 complete = false;
+            }
+            if fetched.partial {
                 missing.push(queue::GITHUB.to_string());
             }
             let (mut ranked, gh_urls, threads) = github::items(&fetched, now);

@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use queue::{DRAFTS_FILE, Drafts, QUEUE_FILE, Queue};
 
 const PROTOCOL: &str = "2025-06-18";
+const MAX_DRAFTS_WHILE_MISSING: usize = 500;
 
 fn main() {
     let dir = data_dir();
@@ -117,7 +118,7 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Value {
 
 fn read_queue(dir: &Path) -> Result<Queue, String> {
     queue::read_json(&dir.join(QUEUE_FILE)).ok_or_else(|| {
-        format!("Rado has not written a review queue to {}. Start Rado, add its PAT, and wait for one refresh.", dir.display())
+        format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
     })
 }
 
@@ -144,17 +145,20 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     let pr_id = args["prId"].as_i64().ok_or("prId (an integer) is required")?;
     let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
     let queue = read_queue(dir)?;
-    // Matching the commit too keeps a PR id from another workspace's organization from being marked here.
+    // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
+    // source is missing, a PR listed before it dropped out is accepted: a draft hides a PR only at this id and commit.
     let queued = queue.branches.iter().flat_map(|b| &b.prs).any(|p| p.pr_id == pr_id && p.source_commit.as_deref() == Some(commit));
-    if !queued {
+    if !queued && queue.missing_sources.is_empty() {
         return Err(format!("PR {pr_id} at {commit} is not in Rado's review queue; list it again"));
     }
     let path = dir.join(DRAFTS_FILE);
     let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
     drafts.insert(pr_id, commit.to_string());
-    // A source that failed or answered in part is missing PRs; their drafts must survive until it answers in full.
-    if queue.missing_sources.is_empty() {
+    // A source that failed or answered in part is missing PRs, so their drafts survive until it answers in full, up
+    // to a cap for a source that stays missing.
+    if queue.missing_sources.is_empty() || drafts.len() > MAX_DRAFTS_WHILE_MISSING {
         queue::prune(&mut drafts, &queue);
+        drafts.insert(pr_id, commit.to_string());
     }
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
@@ -296,6 +300,33 @@ mod tests {
 
         let drafts: Drafts = queue::read_json(&path.join(DRAFTS_FILE)).unwrap();
         assert_eq!(drafts, Drafts::from([(1, "c1".to_string()), (99, "c99".to_string())]));
+    }
+
+    #[test]
+    fn markDrafted_prThatDroppedOutWithItsSource_isStillRecorded() {
+        let dir = with_queue("dropped");
+        let path = queue::workspace_dir(&dir.0, "w1");
+        let q = Queue { missing_sources: vec![queue::AZURE_DEV_OPS.into()], ..make_queue(vec![]) };
+        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 5, "commit": "c5" })).get("isError"), None);
+
+        assert_eq!(queue::read_json::<Drafts>(&path.join(DRAFTS_FILE)).unwrap(), Drafts::from([(5, "c5".to_string())]));
+    }
+
+    #[test]
+    fn markDrafted_sourceMissingForLong_prunesPastTheCap() {
+        let dir = with_queue("cap");
+        let path = queue::workspace_dir(&dir.0, "w1");
+        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
+        q.missing_sources = vec![queue::GITHUB.into()];
+        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+        let old: Drafts = (1000..1000 + MAX_DRAFTS_WHILE_MISSING as i64).map(|id| (id, "c".to_string())).collect();
+        write_json_atomic(&path.join(DRAFTS_FILE), &old).unwrap();
+
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+
+        assert_eq!(queue::read_json::<Drafts>(&path.join(DRAFTS_FILE)).unwrap(), Drafts::from([(1, "c1".to_string())]));
     }
 
     #[test]

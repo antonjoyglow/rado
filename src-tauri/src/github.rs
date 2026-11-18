@@ -121,13 +121,8 @@ pub struct PullRequest {
     review_threads: Nodes<Thread>,
     comments: Count,
     /// Only for the agent flag, so a missing or null list must not drop the PR.
-    #[serde(default, deserialize_with = "labels_or_none")]
-    labels: Vec<Label>,
-}
-
-fn labels_or_none<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Label>, D::Error> {
-    let nodes = Option::<Nodes<Option<Label>>>::deserialize(deserializer)?;
-    Ok(nodes.map(|n| n.nodes.into_iter().flatten().collect()).unwrap_or_default())
+    #[serde(default)]
+    labels: Option<Nodes<Option<Label>>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,6 +186,8 @@ pub struct Fetched {
     prs: Vec<(PullRequest, Found)>,
     /// GitHub's errors for a response that still had data; some PRs may be missing.
     pub warning: Option<String>,
+    /// Reviews waiting on me may be missing: an error, or a review search over 100 results.
+    pub partial: bool,
 }
 
 pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, String> {
@@ -236,6 +233,8 @@ fn parse(body: &[u8]) -> Result<Fetched, String> {
         Some(Some(search)) => Some(search),
     };
     let truncated = [Some(&requested), Some(&reviewed), Some(&mine), watched.as_ref()].iter().flatten().any(|s| s.issue_count > 100);
+    // My own PRs never reach the review queue, so only errors or the other searches running over make it partial.
+    let partial = !messages.is_empty() || [Some(&requested), Some(&reviewed), watched.as_ref()].iter().flatten().any(|s| s.issue_count > 100);
     let mut prs: Vec<(PullRequest, Found)> = Vec::new();
     let searches = [
         (Some(requested), Found { requested: true, watched: false }),
@@ -258,7 +257,7 @@ fn parse(body: &[u8]) -> Result<Fetched, String> {
         (false, false) => Some(messages),
         (false, true) => Some(format!("{messages}; over 100 PRs in a search")),
     };
-    Ok(Fetched { viewer: data.viewer.login, prs, warning })
+    Ok(Fetched { viewer: data.viewer.login, prs, warning, partial })
 }
 
 /// Ranked items, links and thread stats (comments and last activity) for the fetched PRs.
@@ -286,7 +285,7 @@ pub fn queue_refs(fetched: &Fetched) -> HashMap<i64, GitHubRef> {
         .iter()
         .map(|(pr, _)| {
             let agent = pr.author.as_ref().is_some_and(|a| a.kind.as_deref() == Some("Bot"))
-                || pr.labels.iter().any(|l| AGENT_LABELS.iter().any(|a| a.eq_ignore_ascii_case(l.name.trim())));
+                || pr.labels.iter().flat_map(|n| &n.nodes).flatten().any(|l| AGENT_LABELS.iter().any(|a| a.eq_ignore_ascii_case(l.name.trim())));
             let reference = GitHubRef {
                 owner: pr.repository.owner.login.clone(),
                 head: pr.head_ref_oid.clone(),
@@ -617,6 +616,15 @@ pub(crate) mod tests {
         let fetched = parse(&body(vec![none, null_node], vec![], vec![])).unwrap();
         assert_eq!(fetched.prs.len(), 2);
         assert!(queue_refs(&fetched)[&2].agent);
+    }
+
+    #[test]
+    fn manyOfMyOwnPrs_warnButDontMakeTheReviewsPartial() {
+        let mut json: serde_json::Value = serde_json::from_slice(&body(vec![], vec![], vec![node(1, "me", &[], &[])])).unwrap();
+        json["data"]["mine"]["issueCount"] = 140.into();
+        let fetched = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(fetched.warning.is_some() && !fetched.partial);
+        assert!(partial(&[1]).partial);
     }
 
     /// A poll whose PRs all request my review directly, from a search over 100 results.

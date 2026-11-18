@@ -71,8 +71,9 @@ pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls:
             last_voted_commit: last_voted.filter(|v| re_review && Some(v) != source_commit.as_ref()),
             source_commit,
         };
-        // The same branch name on two providers is two changes.
-        match branches.iter_mut().find(|b| b.branch == item.branch && b.prs[0].provider == provider) {
+        // The same branch name on two providers is two changes, and on GitHub under two owners too (`patch-1`).
+        let same_change = |first: &QueuedPr| first.provider == provider && (provider == AZURE_DEV_OPS || first.project == entry.project);
+        match branches.iter_mut().find(|b| b.branch == item.branch && same_change(&b.prs[0])) {
             Some(b) => b.prs.push(entry),
             None => branches.push(Branch { branch: item.branch.clone(), prs: vec![entry] }),
         }
@@ -215,6 +216,15 @@ mod tests {
         let q = queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
 
         assert_eq!(q.branches.len(), 2);
+    }
+
+    #[test]
+    fn queue_gitHubSameBranchUnderTwoOwners_isTwoBranches() {
+        let refs = HashMap::from([(9_000_001, github_ref(false)), (9_000_002, GitHubRef { owner: "other".into(), ..github_ref(false) })]);
+        let items = vec![on_github(9_000_001, "patch-1", ReviewState::NeedsReview), on_github(9_000_002, "patch-1", ReviewState::NeedsReview)];
+        let sources = Sources { ado: None, github: Some(&refs), missing: vec![] };
+
+        assert_eq!(queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx()).branches.len(), 2);
     }
 
     #[test]
