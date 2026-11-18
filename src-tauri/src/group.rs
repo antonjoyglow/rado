@@ -25,6 +25,7 @@ pub struct Member {
 /// An active PR on the same source branch as one of mine, where I am not a reviewer.
 #[derive(Debug, Clone)]
 pub struct Related {
+    pub provider: Provider,
     pub id: i64,
     pub repo: String,
     pub title: String,
@@ -133,7 +134,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
         .map(|(provider, branch, mut mine)| {
             let stale = |i: &ReviewItem| i.state == ReviewState::Stale;
             mine.sort_by(|a, b| a.hidden.cmp(&b.hidden).then(stale(a).cmp(&stale(b))).then(b.score.cmp(&a.score)));
-            let others: Vec<&Related> = related.iter().filter(|r| provider == Provider::Ado && r.branch == branch).collect();
+            let others: Vec<&Related> = related.iter().filter(|r| r.provider == provider && r.branch == branch).collect();
             let lead = mine[0];
             let comments = mine.iter().filter_map(|m| m.comments).reduce(|a, b| CommentStats {
                 total: a.total + b.total,
@@ -178,7 +179,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                 })
                 .chain(others.iter().map(|r| Member {
                     id: r.id,
-                    provider: Provider::Ado,
+                    provider: r.provider,
                     number: r.id,
                     repo: r.repo.clone(),
                     title: r.title.clone(),
@@ -315,8 +316,8 @@ mod tests {
     #[test]
     fn group_relatedPrOnMyBranch_joinsAsUnreviewedMember() {
         let related = [
-            Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) },
-            Related { id: 8, repo: "WebApp".into(), title: "other".into(), branch: "feature/z".into(), url: "https://x/8".into(), created_at: at(-8) },
+            Related { provider: Provider::Ado, id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) },
+            Related { provider: Provider::Ado, id: 8, repo: "WebApp".into(), title: "other".into(), branch: "feature/z".into(), url: "https://x/8".into(), created_at: at(-8) },
         ];
         let rows = group(&[item(1, "Api", "feature/x", 60)], &related, &urls(&[1]), &Tracker::None);
         assert_eq!(rows.len(), 1);
@@ -370,7 +371,7 @@ mod tests {
     fn group_sameBranchOnGitHubAndAzureDevOps_isTwoRows() {
         let mut github = item(500, "rado", "feature/x", 70);
         (github.provider, github.number) = (Provider::GitHub, 4);
-        let related = [Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) }];
+        let related = [Related { provider: Provider::Ado, id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) }];
         let rows = group(&[github, item(1, "Api", "feature/x", 60)], &related, &urls(&[1, 500]), &Tracker::None);
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].key.as_str(), rows[0].members.len(), rows[0].members[0].number), ("pr:500", 1, 4));

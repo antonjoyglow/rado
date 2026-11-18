@@ -6,9 +6,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::ado::PrThreads;
-use crate::export::GitHubRef;
-use crate::score::{self, CommentStats, PrFacts, Provider, ReviewItem, ReviewState};
+use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState};
+use crate::source::{QueueRef, SourcePoll};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
@@ -260,8 +259,22 @@ fn parse(body: &[u8]) -> Result<Fetched, String> {
     Ok(Fetched { viewer: data.viewer.login, prs, warning, partial })
 }
 
+/// The fetched PRs as a source poll. GitHub lists no related PRs.
+pub fn digest(fetched: Fetched, now: DateTime<Utc>) -> SourcePoll {
+    let (items, urls, threads) = items(&fetched, now);
+    SourcePoll {
+        items,
+        urls,
+        threads,
+        related: Vec::new(),
+        queue_refs: queue_refs(&fetched),
+        warning: fetched.warning.map(|w| format!("GitHub: {w}")),
+        queue_partial: fetched.partial,
+    }
+}
+
 /// Ranked items, links and thread stats (comments and last activity) for the fetched PRs.
-pub fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap<i64, String>, HashMap<i64, PrThreads>) {
+fn items(fetched: &Fetched, now: DateTime<Utc>) -> (Vec<ReviewItem>, HashMap<i64, String>, HashMap<i64, PrThreads>) {
     let mut items = Vec::new();
     let mut urls = HashMap::new();
     let mut threads = HashMap::new();
@@ -279,18 +292,20 @@ const AGENT_LABELS: [&str; 4] = ["agent", "ai", "ai-generated", "ai-assisted"];
 
 /// What the MCP queue needs for each fetched PR, by id: the owner, head commit, my last vote's commit and whether
 /// an agent wrote it.
-pub fn queue_refs(fetched: &Fetched) -> HashMap<i64, GitHubRef> {
+fn queue_refs(fetched: &Fetched) -> HashMap<i64, QueueRef> {
     fetched
         .prs
         .iter()
         .map(|(pr, _)| {
             let agent = pr.author.as_ref().is_some_and(|a| a.kind.as_deref() == Some("Bot"))
                 || pr.labels.iter().flat_map(|n| &n.nodes).flatten().any(|l| AGENT_LABELS.iter().any(|a| a.eq_ignore_ascii_case(l.name.trim())));
-            let reference = GitHubRef {
-                owner: pr.repository.owner.login.clone(),
-                head: pr.head_ref_oid.clone(),
-                last_voted: my_last_vote(pr, &fetched.viewer).and_then(|r| r.commit.as_ref()).map(|c| c.oid.clone()),
+            let owner = &pr.repository.owner.login;
+            let reference = QueueRef {
+                project: owner.clone(),
+                repo_id: format!("{owner}/{}", pr.repository.name),
                 agent,
+                source_commit: Some(pr.head_ref_oid.clone()),
+                last_voted: my_last_vote(pr, &fetched.viewer).and_then(|r| r.commit.as_ref()).map(|c| c.oid.clone()),
             };
             (pr.database_id, reference)
         })
@@ -592,7 +607,8 @@ pub(crate) mod tests {
         let reviews = [("me", "APPROVED", "old"), ("me", "COMMENTED", "head")];
         let refs = queue_refs(&parse(&body(vec![], vec![node(1, "a", &[], &reviews)], vec![])).unwrap());
         let r = &refs[&1];
-        assert_eq!((r.owner.as_str(), r.head.as_str(), r.last_voted.as_deref(), r.agent), ("o", "head", Some("old"), false));
+        assert_eq!((r.project.as_str(), r.repo_id.as_str(), r.source_commit.as_deref()), ("o", "o/repo", Some("head")));
+        assert_eq!((r.last_voted.as_deref(), r.agent), (Some("old"), false));
     }
 
     #[test]

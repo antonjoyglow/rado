@@ -9,6 +9,7 @@ mod queue;
 mod score;
 mod releases;
 mod session;
+mod source;
 mod store;
 mod workspace;
 
@@ -28,8 +29,8 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use tokio::sync::{Notify, watch};
 
-use score::{Provider, VoteMemory};
-use session::{AdoPoll, Outcome, Poll, Session, Ticket};
+use score::{PrThreads, Provider};
+use session::{Outcome, Poll, Session, Ticket};
 use store::{Keyring, Settings, Store};
 use workspace::Workspace;
 
@@ -114,12 +115,12 @@ async fn poll_loop(app: AppHandle) {
 /// Polls one workspace for its ticket: a switch while it runs drops the result rather than filing it under the
 /// workspace switched to.
 async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
-    let Ticket { workspace, generation, pat, github_token, memory } = ticket;
+    let Ticket { workspace, generation, pat, github_token } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
             Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})")),
             Ok(None) => Poll::Off,
-            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &memory).await {
+            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
             },
@@ -143,10 +144,8 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
 }
 
 /// Comment counts and last activity for the PRs in my list only; a PR whose threads fail to load just shows neither.
-async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &score::Me<'_>, memory: &VoteMemory) -> HashMap<i64, ado::PrThreads> {
-    let mut scratch = memory.clone();
-    let mine: HashSet<i64> = score::rank(prs, me, &mut scratch, Utc::now()).iter().map(|i| i.id).collect();
-    let requests = prs.iter().filter(|pr| mine.contains(&pr.pull_request_id)).map(|pr| async move {
+async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &ado::Me<'_>) -> HashMap<i64, PrThreads> {
+    let requests = prs.iter().filter(|pr| ado::involves(pr, me)).map(|pr| async move {
         let stats = client.threads(&pr.repository.project.id, &pr.repository.id, pr.pull_request_id).await;
         (pr.pull_request_id, stats)
     });
@@ -162,8 +161,7 @@ async fn poll_ado(
     pat: &str,
     generation: u64,
     me: &mut Option<(u64, String)>,
-    memory: &VoteMemory,
-) -> Result<AdoPoll, String> {
+) -> Result<ado::Fetched, String> {
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
     }
@@ -174,12 +172,12 @@ async fn poll_ado(
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
     let prs = client.active_pull_requests().await?;
     let teams: HashSet<String> = source.teams.iter().map(|t| t.trim().to_lowercase()).collect();
-    let threads = fetch_threads(&client, &prs, &score::Me { id: &my_id, teams: &teams }, memory).await;
+    let threads = fetch_threads(&client, &prs, &ado::Me { id: &my_id, teams: &teams }).await;
     let urls = prs.iter().map(|pr| (pr.pull_request_id, client.pr_url(pr))).collect();
-    Ok(AdoPoll { prs, my_id, teams, threads, urls })
+    Ok(ado::Fetched { prs, my_id, teams, threads, urls })
 }
 
-fn apply(app: &AppHandle, generation: u64, ado: Poll<AdoPoll>, github: Poll<github::Fetched>) {
+fn apply(app: &AppHandle, generation: u64, ado: Poll<ado::Fetched>, github: Poll<github::Fetched>) {
     let Outcome { fresh, notify } = session(app, |s| s.apply_poll(generation, ado, github, Utc::now()));
     if fresh.is_empty() {
         return;
