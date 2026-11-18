@@ -142,8 +142,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     let temp = path.with_extension(format!("json.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
-    std::fs::write(&temp, bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
-    std::fs::rename(&temp, path).map_err(|e| {
+    std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path)).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!("{}: {e}", path.display())
     })

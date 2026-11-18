@@ -163,7 +163,13 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     }
     let _lock = lock_drafts(dir)?;
     let path = dir.join(DRAFTS_FILE);
-    let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
+    // A file that exists but can't be read now (held by another program) must not be replaced by one with this mark
+    // only; an unparsable one has nothing left to keep.
+    let mut drafts: Drafts = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Drafts::default(),
+        Err(e) => return Err(format!("{}: {e}; mark it again", path.display())),
+    };
     queue::record_draft(&mut drafts, pr_id, commit);
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
@@ -328,6 +334,16 @@ mod tests {
 
         let drafts: Drafts = queue::read_json(&workspace.join(DRAFTS_FILE)).unwrap();
         assert_eq!(drafts.len() as i64, AGENTS * MARKS_EACH);
+    }
+
+    #[test]
+    fn markDrafted_draftsFileUnreadable_isAnError() {
+        let dir = with_queue("unreadable");
+        std::fs::create_dir(queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE)).unwrap();
+
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(result["isError"], true);
     }
 
     #[test]
