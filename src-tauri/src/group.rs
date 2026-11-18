@@ -210,9 +210,10 @@ pub struct Counts {
     pub mine: u32,
 }
 
+/// A hidden row is never actionable, so the rows counted are the ones that are.
 pub fn counts(rows: &[ReviewRow]) -> Counts {
     let mut counts = Counts::default();
-    for row in rows.iter().filter(|r| r.summary.actionable && !r.summary.hidden) {
+    for row in rows.iter().filter(|r| r.summary.actionable) {
         match row.summary.state {
             ReviewState::Mine => counts.mine += 1,
             _ => counts.reviews += 1,
@@ -306,6 +307,18 @@ mod tests {
     fn counts_hiddenRows_areNotCounted() {
         let rows = [alone(1, ReviewState::NeedsReview, true, true), alone(2, ReviewState::Mine, true, true)];
         assert_eq!(counted(&rows), Counts::default());
+    }
+
+    #[test]
+    fn group_rowWhosePrWaitingOnMeIsHidden_isNotActionable() {
+        let hidden_review = ReviewItem { hidden: true, ..item(1, "Api", "feature/x", 60) };
+        let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(2, "Web", "feature/x", 10) };
+        let rows = group(&[hidden_review.clone(), approved], &[], &HashMap::new(), &Tracker::None);
+        assert!(!rows[0].summary.hidden && !rows[0].summary.actionable);
+        assert_eq!(counts(&rows), Counts::default());
+
+        let all_hidden = group(&[hidden_review], &[], &HashMap::new(), &Tracker::None);
+        assert!(all_hidden[0].summary.hidden && !all_hidden[0].summary.actionable, "the list's next review relies on this");
     }
 
     #[test]
