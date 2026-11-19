@@ -135,7 +135,20 @@ To install, click **Set up**: it copies `edge://extensions` (or `chrome://extens
 
 ### MCP server
 
-`rado-mcp.exe` is a stdio MCP server that lets a scheduled Claude agent review your queue. It reads `queue.json`, which Rado writes after each poll in which at least one source answered, from the active workspace (looked up on every call, so it follows a switch), or from the one a tool's optional `workspace` argument names by id or by name (ignoring case). Every reply names the `workspace` and `workspaceId` it used, and so does every error once the workspace is found. To keep a scheduled agent on one workspace whichever is active, name its `workspaceId` in the agent's prompt (a `list_review_queue` reply shows it, and so does `settings.json`): unlike the name, it survives a rename. Rado polls only the active workspace, so another one's queue goes stale soon after you switch away from it. The server never reads your tokens, and refuses an argument a tool doesn't take rather than ignore it. The agent reviews through the Azure DevOps or GitHub MCP server and only drafts; it never posts or votes.
+`rado-mcp.exe` is a stdio MCP server that hands your review queue to a scheduled Claude agent and records what it drafted.
+
+```mermaid
+flowchart LR
+  rado["Rado polls Azure DevOps and GitHub"] -->|"writes after each poll"| queue["queue.json, one per workspace"]
+  queue --> mcp["rado-mcp.exe"]
+  mcp -->|"list_review_queue"| agent["Review agent"]
+  agent -->|"reads the PR, saves a draft review"| provider["Azure DevOps or GitHub MCP server"]
+  agent -->|"mark_drafted"| mcp
+  mcp --> drafts["agent-drafts.json and agent-draft-links.json"]
+  drafts -->|"read at Rado's next poll"| row["Draft ready on the PR's row"]
+```
+
+Rado writes `queue.json` after each poll in which at least one source answered. The server reads it from the active workspace (looked up on every call, so it follows a switch), or from the one a tool's optional `workspace` argument names by id or by name (ignoring case). Every reply names the `workspace` and `workspaceId` it used, and so does every error once the workspace is found. To keep a scheduled agent on one workspace whichever is active, name its `workspaceId` in the agent's prompt (a `list_review_queue` reply shows it, and so does `settings.json`): unlike the name, it survives a rename. Rado polls only the active workspace, so another one's queue goes stale soon after you switch away from it. The server never reads your tokens, and refuses an argument a tool doesn't take rather than ignore it. It changes nothing on Azure DevOps or GitHub; what the agent does there is up to its prompt.
 
 - `list_review_queue(workspace?)`: reviews waiting on you on both providers, best-ranked first, grouped by branch. Each PR has `provider` (`azureDevOps` or `gitHub`), `project` (the GitHub owner), `repo`, `repoId` (`owner/repo` on GitHub), `number`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. `agentAuthored` is true when a bot opened the PR or it carries an `agent`, `ai`, `ai-generated` or `ai-assisted` label (GitHub only for now). `missingSources` names a provider whose last poll failed or came back partial, so some of its PRs may be absent rather than done. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach either provider. Not mine, Hide and Show take effect at the next poll.
 - `mark_drafted(prId, commit, draftUrl?, workspace?)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. Pass the `prId` (not the GitHub PR number) and the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. Also pass the `workspaceId` the list returned, so a switch in Rado between the two calls doesn't matter. While `missingSources` is set, a PR that is no longer queued is still recorded, unless the id is a queued PR's GitHub number at that commit. Two agents marking at once wait for each other on `agent-drafts.lock`, so neither mark is lost. A draft is kept while its PR is out of the queue, so a PR that was hidden or quiet for a while isn't drafted again at the same commit; the file keeps the newest 500 marks. `draftUrl`, an http or https link where you can read the draft (its summary, risks and suggested comments; at most 2048 characters, with no spaces, quotes, backslashes or non-ASCII characters, and no `@` before the host), goes in `agent-draft-links.json` with the commit, and makes *Draft ready* on the row a button that opens it (see [List](#list)); marking again without it removes the link. Nothing changes on Azure DevOps or GitHub. A `rado-mcp` from 0.10.0 ignores `draftUrl`: if a `mark_drafted` reply has no `draftUrl` field, the Claude session still runs that server, and the row shows *Draft ready* without a link. Restart the session.
@@ -145,6 +158,92 @@ To install, click **Set up**: it copies `edge://extensions` (or `chrome://extens
 A missing `queue.json` or active workspace, a file that can't be read now (another program holds it: try again) and a damaged file (`queue.json`, `settings.json`, `agent-drafts.json` or `agent-draft-links.json`) each get their own error, naming the file or folder and what to do. A damaged `agent-drafts.json` is never replaced: every tool refuses until it is fixed or deleted. A damaged `agent-draft-links.json` is kept too: `mark_drafted` refuses a `draftUrl` until it is fixed or deleted, marks and unmarks without one still work, and the list shows *Draft ready* without links. `queue.json` carries a `schemaVersion`; a server older than the file refuses it and names its own exe. Restart the Claude session to start the server installed with the newer Rado. If it still refuses, the exe it names isn't the newer one: run the installer from Explorer with no Claude session open, or register the installed `rado-mcp.exe` (a source build needs `npm run mcp:build`). Servers from before 0.11.0 ignore the field. The server logs its version, data folder and active workspace at start, and one line per failed call, to stderr; Claude Code keeps it in its `mcp-logs-rado` logs as `Server stderr` entries, the start line included. The server reads `%APPDATA%\dev.antonis.rado`; `RADO_DATA_DIR` points it elsewhere.
 
 Register the installed server with the command in [Quick setup](#quick-setup), or a source build with `npm run mcp:build` and `claude mcp add --scope user rado -- "<repo>\src-tauri\target\release\rado-mcp.exe"`. A Claude session holding the server locks the exe; close it before you rebuild.
+
+#### Example: an hourly GitHub review agent
+
+The agent below drafts each queued GitHub PR as a pending review, which only you see until you submit it. Not verified end to end: no scheduled run has drafted a real PR yet. The tool replies are real `rado-mcp` output for a sample queue.
+
+1. Register Rado's server ([Quick setup](#quick-setup)) and GitHub's, with a classic token that has `repo` (from GitHub's [Claude install guide](https://github.com/github/github-mcp-server/blob/main/docs/installation-guides/install-claude.md)):
+
+   ```
+   claude mcp add --scope user --transport http github https://api.githubcopilot.com/mcp -H "Authorization: Bearer YOUR_GITHUB_PAT"
+   ```
+
+2. Save the prompt as `%USERPROFILE%\rado-review.md`, with your own `workspaceId`:
+
+   ```
+   Draft reviews for the PRs Rado queues for me, in Rado workspace 1879a2c4e5f60b3d.
+   1. Call list_review_queue with workspace 1879a2c4e5f60b3d. If it fails, stop and report the error.
+   2. For each PR with provider gitHub, at most 3 per run: read it with the github tools. For a reReview PR
+      with lastVotedCommit, review only the changes since that commit.
+   3. Create a pending review with pull_request_review_write (method create, commitID = sourceCommit,
+      no event), add line comments with add_comment_to_pending_review, and put a summary and the risks
+      in the review body. Never submit the review, approve, request changes or comment anywhere else.
+   4. Call mark_drafted with the PR's prId, commit = sourceCommit, workspace 1879a2c4e5f60b3d and
+      draftUrl = the PR's url followed by /files.
+   ```
+
+3. Run it every hour with Task Scheduler (from cmd). `claude -p` reads the prompt from stdin, and `--allowedTools` lets the two servers' tools run without asking:
+
+   ```
+   schtasks /create /tn "Rado review agent" /sc hourly /tr "cmd /c cd /d %USERPROFILE% && claude -p --allowedTools mcp__rado,mcp__github < rado-review.md >> rado-review.log 2>&1"
+   ```
+
+   Don't schedule it from the Claude desktop app: a program it starts writes to the app's private copy of `%APPDATA%`, so Rado never sees the marks.
+
+A run's `list_review_queue` reply:
+
+```json
+{
+  "branches": [
+    {
+      "branch": "feature/ENG-42-login-rate-limit",
+      "prs": [
+        {
+          "ageHours": 26,
+          "agentAuthored": false,
+          "author": "dana",
+          "draft": false,
+          "lastVotedCommit": null,
+          "number": 88,
+          "prId": 2154873390,
+          "project": "acme",
+          "provider": "gitHub",
+          "repo": "webapp",
+          "repoId": "acme/webapp",
+          "required": false,
+          "score": 71,
+          "sourceCommit": "9c1f2e4b7a3d58e0b6f1c2d3a4e5f60718293a4b",
+          "state": "needsReview",
+          "target": "main",
+          "tier": "normal",
+          "title": "Add login rate limiting",
+          "url": "https://github.com/acme/webapp/pull/88"
+        }
+      ]
+    }
+  ],
+  "missingSources": [],
+  "organization": "",
+  "refreshedMinutesAgo": 2,
+  "workspace": "Work",
+  "workspaceId": "1879a2c4e5f60b3d"
+}
+```
+
+Its `mark_drafted` reply, after which the next `list_review_queue` has no branches and `list_drafted` lists PR #88:
+
+```json
+{
+  "commit": "9c1f2e4b7a3d58e0b6f1c2d3a4e5f60718293a4b",
+  "draftUrl": "https://github.com/acme/webapp/pull/88/files",
+  "prId": 2154873390,
+  "workspace": "Work",
+  "workspaceId": "1879a2c4e5f60b3d"
+}
+```
+
+After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens the pending review.
 
 ### Storage
 
