@@ -1,6 +1,7 @@
 //! The review queue that Rado exports for its MCP server (`src/bin/rado-mcp.rs`). This file uses only serde,
 //! serde_json, chrono and indexmap, so the server can include it without Tauri.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,8 +13,11 @@ pub const QUEUE_FILE: &str = "queue.json";
 pub const DRAFTS_FILE: &str = "agent-drafts.json";
 /// Held while a draft is recorded, so two agents marking at once don't drop each other's mark.
 pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
+/// Where each draft can be read, beside `DRAFTS_FILE` rather than in it, so an older `rado-mcp` still reads the marks.
+pub const DRAFT_LINKS_FILE: &str = "agent-draft-links.json";
 /// The drafts file keeps the newest marks only, so it stays small.
 pub const MAX_DRAFTS: usize = 500;
+const MAX_DRAFT_URL: usize = 2048;
 pub const SETTINGS_FILE: &str = "settings.json";
 /// The queue file's schema. Bump it only for a change an older `rado-mcp` would misread: readers ignore fields they
 /// don't know, so an added field needs no bump.
@@ -142,6 +146,38 @@ pub fn record_draft(drafts: &mut Drafts, pr_id: i64, commit: &str) {
     drafts.insert(pr_id, commit.to_string());
     let excess = drafts.len().saturating_sub(MAX_DRAFTS);
     drafts.drain(..excess);
+}
+
+/// Where the agent saved the draft it marked at `commit`, by PR id.
+pub type DraftLinks = IndexMap<i64, DraftLink>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftLink {
+    pub commit: String,
+    pub url: String,
+}
+
+/// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file.
+pub fn is_draft_url(url: &str) -> bool {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|rest| !rest.is_empty()) && url.len() <= MAX_DRAFT_URL && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Keeps the links whose PR is still marked at the link's commit, which also bounds them by `MAX_DRAFTS`.
+pub fn prune_links(links: &mut DraftLinks, drafts: &Drafts) {
+    links.retain(|id, link| drafts.get(id) == Some(&link.commit));
+}
+
+/// The PRs drafted at the commit `commits` gives them, with the draft's link when it has a valid one.
+pub fn agent_drafts(commits: &HashMap<i64, String>, drafts: &Drafts, links: &DraftLinks) -> HashMap<i64, Option<String>> {
+    commits
+        .iter()
+        .filter(|(id, commit)| drafts.get(*id) == Some(*commit))
+        .map(|(id, commit)| {
+            let url = links.get(id).filter(|l| &l.commit == commit && is_draft_url(&l.url)).map(|l| l.url.clone());
+            (*id, url)
+        })
+        .collect()
 }
 
 /// The file's contents, or None when it is missing, unreadable or not valid.
@@ -298,6 +334,42 @@ pub(crate) mod tests {
         assert_eq!(serde_json::from_str::<Drafts>(&json).unwrap(), drafts);
         let old = serde_json::from_str::<std::collections::HashMap<i64, String>>(&json).unwrap();
         assert_eq!(old, std::collections::HashMap::from([(42, "abc".to_string()), (7, "def".to_string())]));
+    }
+
+    fn link(commit: &str, url: &str) -> DraftLink {
+        DraftLink { commit: commit.into(), url: url.into() }
+    }
+
+    #[test]
+    fn isDraftUrl_takesHttpLinksOnly() {
+        for good in ["https://github.com/o/r/pull/1#pullrequestreview-9", "http://localhost:8080/drafts/1"] {
+            assert!(is_draft_url(good), "{good}");
+        }
+        let long = format!("https://x/{}", "a".repeat(MAX_DRAFT_URL));
+        for bad in ["https://", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\n", "HTTPS://x", &long] {
+            assert!(!is_draft_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn agentDrafts_onlyAtTheCurrentCommit_andALinkOnlyFromThatCommit() {
+        let commits = HashMap::from([(1, "c1".to_string()), (2, "c2".to_string()), (3, "c3".to_string()), (4, "c4".to_string())]);
+        let drafts = Drafts::from([(1, "c1".to_string()), (2, "c2".to_string()), (3, "old".to_string()), (4, "c4".to_string())]);
+        let links = DraftLinks::from([(1, link("c1", "https://d/1")), (2, link("old", "https://d/2")), (4, link("c4", "file:///x"))]);
+
+        let found = agent_drafts(&commits, &drafts, &links);
+
+        assert_eq!(found, HashMap::from([(1, Some("https://d/1".to_string())), (2, None), (4, None)]));
+    }
+
+    #[test]
+    fn pruneLinks_dropsLinksWhoseMarkMovedOrWent() {
+        let drafts = Drafts::from([(1, "c1".to_string()), (2, "new".to_string())]);
+        let mut links = DraftLinks::from([(1, link("c1", "https://d/1")), (2, link("old", "https://d/2")), (3, link("c3", "https://d/3"))]);
+
+        prune_links(&mut links, &drafts);
+
+        assert_eq!(links, DraftLinks::from([(1, link("c1", "https://d/1"))]));
     }
 
     #[test]

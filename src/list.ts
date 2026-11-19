@@ -1,7 +1,7 @@
 import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, datesTooltip, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, draftMarker, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { POLL_MINUTES } from "./bindings/limits";
 import { h, whenBlurred } from "./dom";
@@ -286,6 +286,21 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         void api.openPr(m.id);
       },
     }, prLabel(m)));
+  const drafts = item.members.flatMap((m) => {
+    const marker = draftMarker(m, aggregate);
+    if (!marker) return [];
+    if (!marker.linked) return [h("span", { class: "agent-draft", title: marker.title }, marker.text)];
+    const open: HTMLButtonElement = h("button", {
+      class: "member agent-draft",
+      type: "button",
+      title: marker.title,
+      onclick: (e: MouseEvent) => {
+        e.stopPropagation();
+        api.openDraft(m.id).catch(() => flash(open, "Gone, refresh"));
+      },
+    }, marker.text);
+    return [open];
+  });
   const ticket = item.ticket && h("button", {
     class: "member",
     type: "button",
@@ -320,7 +335,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
       }, item.title),
       h("span", { class: "meta", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) }, ...meta),
-      h("span", { class: "members" }, ticket, ...members),
+      h("span", { class: "members" }, ticket, ...members, ...drafts),
     ),
     h("div", { class: "side" },
       ageCell(item),

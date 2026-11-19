@@ -21,6 +21,18 @@ pub struct Member {
     pub created_at: DateTime<Utc>,
     /// `None` for a related PR (its threads aren't fetched) or when its threads failed to load.
     pub updated_at: Option<DateTime<Utc>>,
+    /// Set by the session from `rado-mcp`'s marks.
+    pub agent_draft: Option<AgentDraft>,
+}
+
+/// A review draft an agent marked through `rado-mcp` at the PR's head commit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentDraft {
+    /// `open_draft` opens its link.
+    Linked,
+    /// Marked without a link.
+    Unlinked,
 }
 
 /// An active PR on the same source branch as one of mine, where I am not a reviewer.
@@ -184,6 +196,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                     state: Some(m.state),
                     created_at: m.created_at,
                     updated_at: m.updated_at,
+                    agent_draft: None,
                 })
                 .chain(others.iter().map(|r| Member {
                     id: r.id,
@@ -195,6 +208,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                     state: None,
                     created_at: r.created_at,
                     updated_at: None,
+                    agent_draft: None,
                 }))
                 .collect::<Vec<_>>();
             let key = if members.len() > 1 { format!("branch:{provider:?}:{branch}") } else { format!("pr:{}", lead.id) };

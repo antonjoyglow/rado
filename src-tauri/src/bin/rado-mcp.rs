@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
+use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLinks, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
 
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
@@ -123,12 +123,18 @@ fn tools() -> Value {
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
                 out of the queue is still accepted, unless the id is a queued PR's GitHub number at that commit. A queued PR at another \
                 commit is refused: list again. Pass the workspaceId list_review_queue returned as workspace, so a switch \
-                in Rado between the two calls can't send the mark elsewhere. Changes nothing on Azure DevOps or GitHub.",
+                in Rado between the two calls can't send the mark elsewhere. Pass draftUrl so the PR's row in Rado's list \
+                gets a Draft ready button that opens the draft; marking again without it removes the link. Changes \
+                nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prId": { "type": "integer", "description": "The prId from list_review_queue." },
                     "commit": { "type": "string", "description": "The sourceCommit the draft reviewed." },
+                    "draftUrl": {
+                        "type": "string",
+                        "description": "An http or https link where the user can read the draft: its summary, risks and suggested comments.",
+                    },
                     "workspace": workspace_argument(),
                 },
                 "required": ["prId", "commit"],
@@ -363,8 +369,25 @@ fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
     Ok((pr_id, commit))
 }
 
+/// Like `read_drafts`: replacing a damaged file would drop every link in it.
+fn read_links(path: &Path) -> Result<DraftLinks, String> {
+    queue::read_json_file(path)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links."))
+}
+
+/// Writes the links only when they changed, so an agent that never passes `draftUrl` never creates the file.
+fn save_links(path: &Path, links: &DraftLinks, before: &DraftLinks) -> Result<(), String> {
+    if links == before { Ok(()) } else { queue::write_json_atomic(path, links) }
+}
+
 fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let (pr_id, commit) = pr_and_commit(args)?;
+    let url = match args.get("draftUrl") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
+        Some(other) => return Err(format!("draftUrl must be an http or https link without spaces, not {other}")),
+    };
     let queue = read_queue(ws)?;
     let dir = &ws.dir;
     // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
@@ -382,11 +405,19 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
         return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
     let _lock = lock_drafts(dir)?;
-    let path = dir.join(DRAFTS_FILE);
+    let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
     let mut drafts = read_drafts(&path)?;
+    let before = read_links(&links_path)?;
     queue::record_draft(&mut drafts, pr_id, commit);
+    let mut links = before.clone();
+    links.shift_remove(&pr_id);
+    if let Some(url) = &url {
+        links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() });
+    }
+    queue::prune_links(&mut links, &drafts);
     queue::write_json_atomic(&path, &drafts)?;
-    Ok(json!({ "prId": pr_id, "commit": commit }))
+    save_links(&links_path, &links, &before)?;
+    Ok(json!({ "prId": pr_id, "commit": commit, "draftUrl": url }))
 }
 
 /// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR, and the
@@ -399,12 +430,17 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
         return Err(unmarked());
     }
     let _lock = lock_drafts(&ws.dir)?;
+    let links_path = ws.dir.join(DRAFT_LINKS_FILE);
     let mut drafts = read_drafts(&path)?;
+    let before = read_links(&links_path)?;
     if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
         return Err(unmarked());
     }
     drafts.shift_remove(&pr_id);
+    let mut links = before.clone();
+    queue::prune_links(&mut links, &drafts);
     queue::write_json_atomic(&path, &drafts)?;
+    save_links(&links_path, &links, &before)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
@@ -574,6 +610,69 @@ mod tests {
         let text = error_text(&call_tool(&root.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "c3" })));
 
         assert!(text.ends_with("PR 1 has no draft mark at c; pass the prId and commit list_drafted shows"), "{text}");
+    }
+
+    fn links_at(dir: &TempDir) -> PathBuf {
+        queue::workspace_dir(&dir.0, "w1").join(DRAFT_LINKS_FILE)
+    }
+
+    #[test]
+    fn markDrafted_withoutADraftUrl_writesNoLinksFile() {
+        let dir = with_queue("no-links");
+        let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })));
+
+        assert_eq!(marked["draftUrl"], Value::Null);
+        assert!(!links_at(&dir).exists());
+    }
+
+    #[test]
+    fn markDrafted_draftUrl_isRecordedBesideAPlainDraftsFile_andMarkingAgainWithoutItRemovesIt() {
+        let dir = with_queue("links");
+        let url = "https://github.com/o/r/pull/1#pullrequestreview-9";
+
+        let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
+        assert_eq!(marked["draftUrl"], url);
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::from([(1, DraftLink { commit: "c1".into(), url: url.into() })]));
+        let drafts = std::fs::read_to_string(queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&drafts).unwrap(), json!({ "1": "c1" }), "an older rado-mcp still reads the marks");
+
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::new());
+    }
+
+    #[test]
+    fn unmarkDrafted_removesTheLink() {
+        let dir = with_queue("unmark-link");
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" }));
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2", "draftUrl": "https://d/2" }));
+
+        call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::from([(2, DraftLink { commit: "c2".into(), url: "https://d/2".into() })]));
+    }
+
+    #[test]
+    fn markDrafted_draftUrlNotAnHttpLink_isAnErrorAndRecordsNothing() {
+        let dir = with_queue("bad-url");
+        for url in [json!("file:///C:/drafts/1.md"), json!("C:\\drafts\\1.md"), json!("https://x/a b"), json!(7)] {
+            let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
+            assert!(error.contains("draftUrl must be an http or https link"), "{error}");
+        }
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+        assert!(!links_at(&dir).exists());
+    }
+
+    #[test]
+    fn markDrafted_invalidLinksFile_isAnError_andNeitherFileIsWritten() {
+        let dir = with_queue("bad-links");
+        std::fs::write(links_at(&dir), "[").unwrap();
+
+        let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" })));
+
+        assert!(error.contains("is not valid") && error.contains("Delete it"), "{error}");
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+        assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
     }
 
     #[test]
@@ -882,7 +981,7 @@ mod tests {
         let marked = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspaceId": "b2" })));
 
         assert_eq!(listed, r#"list_review_queue takes no argument "workspaceId"; it takes workspace"#);
-        assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, prId, workspace"#);
+        assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, draftUrl, prId, workspace"#);
         assert!(!a.join(DRAFTS_FILE).exists());
 
         let not_an_object = send(&root.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue", "arguments": "b2" } }));

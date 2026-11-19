@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, hideButton, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, draftMarker, HEAT_CAP, hideButton, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -127,7 +127,22 @@ describe("parseWhole", () => {
 });
 
 const member = (over: Partial<Member>): Member => ({
-  id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", ...over,
+  id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", agentDraft: null, ...over,
+});
+
+describe("draftMarker", () => {
+  it("isNull_withoutADraft", () => expect(draftMarker(member({}), false)).toBeNull());
+
+  it("linked_opensTheDraft_andNamesThePrOnlyInAnAggregate", () => {
+    expect(draftMarker(member({ agentDraft: "linked" }), false)).toEqual({ text: "Draft ready", title: "Open the agent's draft review of WebApp !1", linked: true });
+    expect(draftMarker(member({ agentDraft: "linked" }), true)?.text).toBe("Draft ready WebApp !1");
+  });
+
+  it("unlinked_saysThereIsNoLink", () => {
+    const marker = draftMarker(member({ agentDraft: "unlinked" }), false);
+    expect(marker?.linked).toBe(false);
+    expect(marker?.title).toContain("no link");
+  });
 });
 
 describe("rowFacts", () => {

@@ -20,6 +20,10 @@ use crate::{ado, export, github, group, queue};
 struct WorkspaceState {
     items: Vec<ReviewItem>,
     urls: HashMap<i64, String>,
+    /// Each listed PR's head commit, which a draft mark must match.
+    commits: HashMap<i64, String>,
+    /// The listed PRs an agent drafted at their head commit, with the draft's link; read at each poll.
+    agent_drafts: HashMap<i64, Option<String>>,
     memory: VoteMemory,
     hidden: HashSet<i64>,
     related: Vec<group::Related>,
@@ -207,7 +211,14 @@ impl Session {
 
     fn rows(&self) -> Vec<group::ReviewRow> {
         let tracker = self.settings.active().map(|w| &w.tracker).unwrap_or(&Tracker::None);
-        group::group(&self.ws.items, &self.ws.related, &self.ws.urls, tracker)
+        let mut rows = group::group(&self.ws.items, &self.ws.related, &self.ws.urls, tracker);
+        for member in rows.iter_mut().flat_map(|r| &mut r.members) {
+            member.agent_draft = self.ws.agent_drafts.get(&member.id).map(|url| match url {
+                Some(_) => group::AgentDraft::Linked,
+                None => group::AgentDraft::Unlinked,
+            });
+        }
+        rows
     }
 
     pub fn row(&self, key: &str) -> Result<group::ReviewRow, String> {
@@ -216,6 +227,10 @@ impl Session {
 
     pub fn url(&self, id: i64) -> Option<String> {
         self.ws.urls.get(&id).cloned()
+    }
+
+    pub fn draft_url(&self, id: i64) -> Result<String, String> {
+        self.ws.agent_drafts.get(&id).cloned().flatten().ok_or_else(|| "That PR has no linked draft now; refresh the list".to_string())
     }
 
     /// The tracker link for the ticket a row's branch names.
@@ -271,6 +286,8 @@ impl Session {
             let ws = &mut self.ws;
             ws.items.clear();
             ws.urls.clear();
+            ws.commits.clear();
+            ws.agent_drafts.clear();
             ws.related.clear();
             ws.source_refreshed.clear();
             ws.last_refreshed = None;
@@ -309,9 +326,10 @@ impl Session {
         let organization = self.settings.active().map(|w| w.azure_dev_ops.organization.clone()).unwrap_or_default();
         let ws = &mut self.ws;
         let was_stale: HashSet<i64> = ws.items.iter().filter(|i| i.state == score::ReviewState::Stale).map(|i| i.id).collect();
-        let (old_items, old_urls) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls));
+        let (old_items, old_urls, old_commits) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls), std::mem::take(&mut ws.commits));
         let mut items = Vec::new();
         let mut urls = HashMap::new();
+        let mut commits = HashMap::new();
         let mut errors = Vec::new();
         let mut fresh_sources = Vec::new();
         // Sources whose full list is in hand (fresh without a warning), and sources with no token saved.
@@ -339,6 +357,9 @@ impl Session {
                         if let Some(url) = old_urls.get(&item.id) {
                             urls.insert(item.id, url.clone());
                         }
+                        if let Some(commit) = old_commits.get(&item.id) {
+                            commits.insert(item.id, commit.clone());
+                        }
                         items.push(item.clone());
                     }
                 }
@@ -362,6 +383,7 @@ impl Session {
                     ws.related.extend(poll.related);
                     urls.extend(poll.urls);
                     items.extend(poll.items);
+                    commits.extend(poll.queue_refs.iter().filter_map(|(id, r)| Some((*id, r.source_commit.clone()?))));
                     refs.insert(provider, poll.queue_refs);
                 }
             }
@@ -369,6 +391,8 @@ impl Session {
         items.sort_by(|a, b| b.score.cmp(&a.score).then(b.age_hours.cmp(&a.age_hours)));
         ws.items = items;
         ws.urls = urls;
+        ws.agent_drafts = self.store.agent_drafts(&self.settings.active_workspace, &commits);
+        ws.commits = commits;
         self.polling = false;
         ws.error = (!errors.is_empty()).then(|| errors.join(" · "));
         for (source, _) in &fresh_sources {
@@ -747,6 +771,61 @@ mod tests {
         let mut ws = WorkspaceState { items: vec![ado], hidden: ids(&[1, 2, 3]), ..WorkspaceState::default() };
         ws.hidden_source.insert(2, Provider::GitHub);
         ws
+    }
+
+    // Agent drafts.
+
+    /// Writes `agent-drafts.json` and `agent-draft-links.json` for workspace `a` by hand, as `rado-mcp` would.
+    fn agent_files(dir: &TempDir, drafts: &[(i64, &str)], links: &[(i64, &str, &str)]) {
+        let folder = queue::workspace_dir(&dir.0, "a");
+        std::fs::create_dir_all(&folder).unwrap();
+        let drafts: queue::Drafts = drafts.iter().map(|(id, commit)| (*id, commit.to_string())).collect();
+        let links: queue::DraftLinks =
+            links.iter().map(|(id, commit, url)| (*id, queue::DraftLink { commit: commit.to_string(), url: url.to_string() })).collect();
+        queue::write_json_atomic(&folder.join(queue::DRAFTS_FILE), &drafts).unwrap();
+        queue::write_json_atomic(&folder.join(queue::DRAFT_LINKS_FILE), &links).unwrap();
+    }
+
+    fn agent_draft(s: &Session, id: i64) -> Option<group::AgentDraft> {
+        s.rows().iter().flat_map(|r| &r.members).find(|m| m.id == id).expect("listed").agent_draft
+    }
+
+    #[test]
+    fn agentDrafts_markedAtTheHeadCommit_showOnTheirRowsAfterAPoll() {
+        let Fixture { mut s, dir, .. } = two_workspaces("agent-drafts");
+        poll(&mut s, &[1, 2, 3]);
+        agent_files(&dir, &[(1, "head"), (2, "head"), (3, "older")], &[(1, "head", "https://d/1"), (3, "older", "https://d/3")]);
+        assert_eq!(agent_draft(&s, 1), None, "read at the next poll");
+
+        poll(&mut s, &[1, 2, 3]);
+
+        let drafts: Vec<_> = [1, 2, 3].iter().map(|id| agent_draft(&s, *id)).collect();
+        assert_eq!(drafts, [Some(group::AgentDraft::Linked), Some(group::AgentDraft::Unlinked), None]);
+        assert_eq!(s.draft_url(1), Ok("https://d/1".into()));
+        assert!(s.draft_url(2).is_err() && s.draft_url(3).is_err());
+    }
+
+    #[test]
+    fn agentDrafts_sourceFailing_keepItsPrsMarkers() {
+        let Fixture { mut s, dir, .. } = two_workspaces("agent-drafts-failed");
+        agent_files(&dir, &[(5, "sha1")], &[(5, "sha1", "https://d/5")]);
+        file(&mut s, ado(vec![ado_pr(5, "feature/x", Some(0))]), github(&[7]));
+        assert_eq!(agent_draft(&s, 5), Some(group::AgentDraft::Linked));
+
+        file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), github(&[7]));
+
+        assert_eq!(s.draft_url(5), Ok("https://d/5".into()));
+    }
+
+    #[test]
+    fn agentDrafts_damagedFile_showsNoMarkerAndNoError() {
+        let Fixture { mut s, dir, .. } = two_workspaces("agent-drafts-damaged");
+        agent_files(&dir, &[], &[]);
+        std::fs::write(queue::workspace_dir(&dir.0, "a").join(queue::DRAFTS_FILE), "{").unwrap();
+
+        poll(&mut s, &[1]);
+
+        assert_eq!((agent_draft(&s, 1), s.ws.error.as_deref()), (None, None));
     }
 
     // Saving and removing secrets.
