@@ -30,7 +30,7 @@ pub fn workspace_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 /// The active workspace's folder, named by `activeWorkspace` in the settings file; None before the first one exists.
-pub fn active_workspace_dir(root: &Path) -> Result<Option<PathBuf>, String> {
+pub fn active_workspace_dir(root: &Path) -> Result<Option<PathBuf>, ReadError> {
     let settings: Option<serde_json::Value> = read_json_file(&root.join(SETTINGS_FILE))?;
     let id = settings.as_ref().and_then(|s| s["activeWorkspace"].as_str()).filter(|id| is_workspace_id(id));
     Ok(id.map(|id| workspace_dir(root, id)))
@@ -147,15 +147,30 @@ pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     read_json_file(path).ok().flatten()
 }
 
-/// The file's contents; None when it doesn't exist, and an error naming the file when it can't be read (held by
-/// another program) or isn't valid.
-pub fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
+/// Why a file that exists couldn't be used; each message names the file.
+#[derive(Debug, PartialEq)]
+pub enum ReadError {
+    /// Held by another program, most likely for a moment.
+    Unreadable(String),
+    /// Damaged, or not the expected shape.
+    Invalid(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let (Self::Unreadable(message) | Self::Invalid(message)) = self;
+        f.write_str(message)
+    }
+}
+
+/// The file's contents, or None when it doesn't exist.
+pub fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, ReadError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        Err(e) => return Err(ReadError::Unreadable(format!("Cannot read {}: {e}", path.display()))),
     };
-    serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("{} is not valid: {e}", path.display()))
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| ReadError::Invalid(format!("{} is not valid: {e}", path.display())))
 }
 
 /// Writes to a temporary file and renames it over the target, so a reader never sees half a file. The temporary name

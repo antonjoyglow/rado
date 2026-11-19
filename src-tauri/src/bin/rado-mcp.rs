@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue};
+use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError};
 
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
@@ -147,8 +147,16 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
     })
 }
 
+/// The error with what to do about it: a file another program holds needs only a retry, a damaged one `repair`.
+fn advise(error: ReadError, repair: &str) -> String {
+    match error {
+        ReadError::Unreadable(message) => format!("{message}. Try again."),
+        ReadError::Invalid(message) => format!("{message}. {repair}"),
+    }
+}
+
 fn active_workspace(root: &Path) -> Result<PathBuf, String> {
-    queue::active_workspace_dir(root).map_err(|e| format!("{e}. Start Rado to repair it."))?.ok_or_else(|| {
+    queue::active_workspace_dir(root).map_err(|e| advise(e, "Start Rado to repair it."))?.ok_or_else(|| {
         format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
     })
 }
@@ -156,12 +164,12 @@ fn active_workspace(root: &Path) -> Result<PathBuf, String> {
 /// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
 fn read_queue(dir: &Path) -> Result<Queue, String> {
     let path = dir.join(QUEUE_FILE);
-    let retry = |e: String| format!("{e}. Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running.");
-    let file: Value = queue::read_json_file(&path).map_err(retry)?.ok_or_else(|| {
+    let rewrite = |e| advise(e, "Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running.");
+    let file: Value = queue::read_json_file(&path).map_err(rewrite)?.ok_or_else(|| {
         format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
     })?;
-    let schema = file.get("schemaVersion").map_or(Some(1), Value::as_u64).unwrap_or(u64::MAX);
-    if schema > u64::from(QUEUE_SCHEMA) {
+    let schema = file.get("schemaVersion").cloned().unwrap_or(json!(1));
+    if schema.as_u64().is_none_or(|v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
             "{} has schema {schema}, but this rado-mcp {} reads up to {QUEUE_SCHEMA}. Restart this Claude session to start \
              the rado-mcp installed with the newer Rado.",
@@ -169,7 +177,7 @@ fn read_queue(dir: &Path) -> Result<Queue, String> {
             env!("CARGO_PKG_VERSION"),
         ));
     }
-    serde_json::from_value(file).map_err(|e| retry(format!("{} is not valid: {e}", path.display())))
+    serde_json::from_value(file).map_err(|e| rewrite(ReadError::Invalid(format!("{} is not valid: {e}", path.display()))))
 }
 
 /// An unreadable or invalid file is an error, not an empty one: listing would bring every drafted PR back, and
@@ -177,7 +185,7 @@ fn read_queue(dir: &Path) -> Result<Queue, String> {
 fn read_drafts(path: &Path) -> Result<Drafts, String> {
     queue::read_json_file(path)
         .map(Option::unwrap_or_default)
-        .map_err(|e| format!("{e}. Try again; if the file is damaged, delete it, and drafted PRs will be listed again."))
+        .map_err(|e| advise(e, "Delete it to start over; the PRs drafted so far will then be listed again."))
 }
 
 fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
@@ -403,7 +411,7 @@ mod tests {
     fn listReviewQueue_newerSchema_isRefusedAsNewerEvenWhenItsShapeChanged() {
         let dir = with_queue("newer");
         let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
-        for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), u64::MAX.to_string())] {
+        for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), r#""2""#.to_string())] {
             std::fs::write(&path, json!({ "schemaVersion": schema, "queue": [] }).to_string()).unwrap();
 
             for tool in ["list_review_queue", "mark_drafted"] {
@@ -483,7 +491,8 @@ mod tests {
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
         drop(held);
 
-        assert!(result["content"][0]["text"].as_str().unwrap().starts_with("Cannot read"), "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Cannot read") && text.ends_with("Try again."), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
