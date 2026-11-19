@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -173,18 +173,17 @@ async fn fetch_threads(
             (pr.pull_request_id, stats)
         })
         .collect();
-    let answers: Vec<_> = futures_util::stream::iter(requests).buffer_unordered(THREAD_REQUESTS).collect().await;
-    let mut threads = HashMap::new();
-    for (id, stats) in answers {
-        match stats {
-            Ok(stats) => {
-                threads.insert(id, stats);
-            }
-            Err(error) if matches!(error.kind, source::FailureKind::RateLimited { .. }) => return Err(error),
-            Err(_) => {}
-        }
-    }
-    Ok(threads)
+    // The first throttled answer ends the stream, dropping the requests not yet answered.
+    let answers: Vec<_> = futures_util::stream::iter(requests)
+        .buffer_unordered(THREAD_REQUESTS)
+        .map(|(id, stats)| match stats {
+            Ok(stats) => Ok(Some((id, stats))),
+            Err(error) if matches!(error.kind, source::FailureKind::RateLimited { .. }) => Err(error),
+            Err(_) => Ok(None),
+        })
+        .try_collect()
+        .await?;
+    Ok(answers.into_iter().flatten().collect())
 }
 
 async fn poll_ado(

@@ -60,22 +60,25 @@ impl Backoff {
     /// poll interval); otherwise one interval, doubled for each failure before it, up to an hour.
     fn after(failures: u32, error: SourceError, interval_minutes: u32, now: DateTime<Utc>) -> Self {
         let interval = chrono::Duration::minutes(i64::from(interval_minutes));
-        let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(MAX_BACKOFF_MINUTES));
+        let cap = MAX_BACKOFF_MINUTES.max(i64::from(interval_minutes));
+        let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(cap));
         let (until, rate_limited, error) = match error.kind {
             FailureKind::RateLimited { until: asked } => {
                 let until = asked.map_or(doubled, |at| at.max(now + interval));
-                (until, true, format!("{} until {}", error.message, clock(until)))
+                (until, true, format!("{} until {}", error.message, clock(until, now)))
             }
-            FailureKind::Other if failures > 1 => (doubled, false, format!("{} · next try {}", error.message, clock(doubled))),
+            FailureKind::Other if failures > 1 => (doubled, false, format!("{} · next try {}", error.message, clock(doubled, now))),
             FailureKind::Other => (doubled, false, error.message),
         };
         Self { failures, until, rate_limited, error }
     }
 }
 
-/// `at` as the user's local `hh:mm`.
-fn clock(at: DateTime<Utc>) -> String {
-    at.with_timezone(&chrono::Local).format("%H:%M").to_string()
+/// `at` as the user's local `hh:mm`, with "tomorrow" when it isn't today (a wait is at most a day).
+fn clock(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let (at, now) = (at.with_timezone(&chrono::Local), now.with_timezone(&chrono::Local));
+    let time = at.format("%H:%M");
+    if at.date_naive() == now.date_naive() { time.to_string() } else { format!("tomorrow {time}") }
 }
 
 impl WorkspaceState {
@@ -1072,20 +1075,56 @@ mod tests {
         let waits: Vec<i64> = (1..=7).map(|n| (Backoff::after(n, "GitHub: HTTP 502".into(), 3, t0()).until - t0()).num_minutes()).collect();
         assert_eq!(waits, [3, 6, 12, 24, 48, 60, 60]);
         assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 3, t0()).error, "GitHub: HTTP 502");
-        assert_eq!(Backoff::after(2, "GitHub: HTTP 502".into(), 3, t0()).error, format!("GitHub: HTTP 502 · next try {}", clock(t0() + minutes(6))));
+        assert_eq!(Backoff::after(2, "GitHub: HTTP 502".into(), 3, t0()).error, format!("GitHub: HTTP 502 · next try {}", clock(t0() + minutes(6), t0())));
     }
 
     #[test]
     fn backoff_rateLimited_waitsAtLeastAsAsked_andSaysUntilWhen() {
         let asked = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(90))).named("GitHub"), 3, t0());
         assert_eq!((asked.until, asked.rate_limited), (t0() + minutes(90), true));
-        assert_eq!(asked.error, format!("GitHub: rate limited until {}", clock(t0() + minutes(90))));
+        assert_eq!(asked.error, format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
         let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
         let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(after_failures.until, t0() + minutes(3), "a named time replaces the doubling");
         let unnamed = Backoff::after(3, SourceError::rate_limited(None).named("GitHub"), 3, t0());
         assert_eq!(unnamed.until, t0() + minutes(12));
+    }
+
+    #[test]
+    fn backoff_intervalOverAnHour_neverTriesSoonerThanTheInterval() {
+        assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 120, t0()).until, t0() + minutes(120));
+    }
+
+    #[test]
+    fn clock_aWaitIntoTheNextDay_saysTomorrow() {
+        let now = chrono::Local::now().with_timezone(&Utc);
+        assert!(!clock(now, now).starts_with("tomorrow"));
+        assert!(clock(now + chrono::Duration::days(1), now).starts_with("tomorrow "));
+    }
+
+    #[test]
+    fn nextTry_isTheEarliestFutureTryOfAnySource() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("next-try");
+        let generation = s.generation;
+        s.file_poll(generation, Poll::Failed("Azure DevOps: HTTP 502".into()), Poll::Failed(SourceError::rate_limited(Some(t0() + minutes(30))).named("GitHub")), t0())
+            .expect("current poll");
+        assert_eq!(s.next_try(t0()), Some(t0() + minutes(3)));
+        assert_eq!(s.next_try(t0() + minutes(3)), Some(t0() + minutes(30)), "a past try is not waited for");
+    }
+
+    #[test]
+    fn backoff_endsWhenTheSourceTurnsOffOrItsSettingsChange() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-off");
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        file_github(&mut s, Poll::Off, t0());
+        assert!(s.ws.backoff.is_empty());
+
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.github.repos = vec!["o/repo".into()];
+        s.save_workspace(changed).expect("saved");
+        assert!(s.ws.backoff.is_empty());
     }
 
     #[test]
@@ -1100,7 +1139,7 @@ mod tests {
         assert_eq!(s.begin_poll(t0() + minutes(5)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
         file_github(&mut s, Poll::Held, t0() + minutes(5));
         assert_eq!(listed(&s), ids(&[1]));
-        assert_eq!(s.ws.error, Some(format!("GitHub: HTTP 502 · next try {}", clock(until))));
+        assert_eq!(s.ws.error, Some(format!("GitHub: HTTP 502 · next try {}", clock(until, t0()))));
         assert_eq!(s.ws.backoff[&Provider::GitHub].failures, 2, "a held poll is not another failure");
 
         assert!(s.begin_poll(until).expect("a ticket").held.is_empty());
