@@ -633,9 +633,13 @@ impl Session {
             return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
         }
         let typed_tracker = workspace.tracker != Tracker::None;
+        let typed_org = workspace.azure_dev_ops.organization.trim().to_string();
         let mut workspace = workspace.clamped();
         if typed_tracker && workspace.tracker == Tracker::None {
             return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
+        }
+        if !typed_org.is_empty() && workspace.azure_dev_ops.organization.is_empty() {
+            return Err(format!("Not saved: “{typed_org}” isn't an Azure DevOps organization (yourorg, or a dev.azure.com link)"));
         }
         let mut settings = self.settings.clone();
         let slot = settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("Not saved: that workspace is gone")?;
@@ -1262,6 +1266,20 @@ mod tests {
         changed.github.repos = vec!["not a repo".into()];
         s.save_workspace(changed).expect_err("refused");
         assert!(s.settings.workspaces[0].github.repos.is_empty());
+    }
+
+    #[test]
+    fn saveWorkspace_organization_keepsTheOrgOfALinkAndRefusesOtherCharacters() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-org-link");
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.azure_dev_ops.organization = "https://dev.azure.com/acme/Project/_git/web".into();
+        s.save_workspace(changed.clone()).expect("saved");
+        assert_eq!(s.settings.workspaces[0].azure_dev_ops.organization, "acme");
+
+        changed.azure_dev_ops.organization = "my org".into();
+        let error = s.save_workspace(changed).expect_err("refused");
+        assert!(error.contains("“my org” isn't an Azure DevOps organization"), "{error}");
+        assert_eq!(s.settings.workspaces[0].azure_dev_ops.organization, "acme");
     }
 
     #[test]

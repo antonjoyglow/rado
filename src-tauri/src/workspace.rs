@@ -110,7 +110,7 @@ impl Workspace {
         }
         Self {
             name: self.name.trim().to_string(),
-            azure_dev_ops: AdoSource { organization: self.azure_dev_ops.organization.trim().to_string(), teams },
+            azure_dev_ops: AdoSource { organization: ado_org(&self.azure_dev_ops.organization), teams },
             github: GithubSource { repos },
             tracker: self.tracker.clamped(),
             ..self
@@ -162,6 +162,25 @@ fn linear_slug(typed: &str) -> String {
     if slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') { slug.to_ascii_lowercase() } else { String::new() }
 }
 
+/// The organization in a typed name or a pasted link: `https://dev.azure.com/Acme/Web/_git/api` gives `Acme`,
+/// `acme.visualstudio.com/DefaultCollection` gives `acme`. Empty when it holds anything but letters, digits and
+/// `-`, since it goes into a URL.
+fn ado_org(typed: &str) -> String {
+    let typed = typed.trim();
+    let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
+    let mut segments = without_scheme.split(['/', '?', '#', '\\']);
+    // Clone links carry a user: `https://acme@dev.azure.com/acme/...`.
+    let host = segments.next().unwrap_or_default().rsplit('@').next().unwrap_or_default();
+    let org = if host.eq_ignore_ascii_case("dev.azure.com") {
+        segments.next().unwrap_or_default()
+    } else if host.to_ascii_lowercase().ends_with(".visualstudio.com") {
+        &host[..host.len() - ".visualstudio.com".len()]
+    } else {
+        host
+    };
+    if org.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { org.to_string() } else { String::new() }
+}
+
 /// The settings of the single Azure DevOps org from before workspaces, read from the same file.
 #[derive(Debug, Default)]
 pub struct Legacy {
@@ -182,7 +201,7 @@ impl Legacy {
 
     /// The first workspace: named after the org, else "GitHub" when only a GitHub token was saved, else "Default".
     pub fn into_workspace(self, id: String, has_github_token: bool) -> Workspace {
-        let name = match self.organization.trim() {
+        let name = match ado_org(&self.organization).as_str() {
             "" if has_github_token => "GitHub".to_string(),
             "" => "Default".to_string(),
             org => org.to_string(),
@@ -285,6 +304,28 @@ mod tests {
             ("  ", Tracker::None),
         ] {
             assert_eq!(linear(typed).clamped(), expected, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn adoOrg_keepsTheOrgOfANameOrLinkAndEmptiesAnythingElse() {
+        for (typed, expected) in [
+            (" acme ", "acme"),
+            ("Acme-Labs", "Acme-Labs"),
+            ("https://dev.azure.com/acme", "acme"),
+            ("HTTPS://Dev.Azure.com/acme/Project/_git/web?path=/x#y", "acme"),
+            ("dev.azure.com/acme/", "acme"),
+            ("https://acme@dev.azure.com/acme/Project/_git/web", "acme"),
+            ("https://acme.visualstudio.com/DefaultCollection", "acme"),
+            ("acme.VisualStudio.com", "acme"),
+            ("https://dev.azure.com/", ""),
+            (".visualstudio.com", ""),
+            ("my org", ""),
+            ("acme.example.com", ""),
+            ("my%20org", ""),
+            ("", ""),
+        ] {
+            assert_eq!(ado_org(typed), expected, "{typed:?}");
         }
     }
 
