@@ -156,7 +156,7 @@ fn advise(error: ReadError, repair: &str) -> String {
 }
 
 fn active_workspace(root: &Path) -> Result<PathBuf, String> {
-    queue::active_workspace_dir(root).map_err(|e| advise(e, "Fix it, or change any setting in Rado while it runs."))?.ok_or_else(|| {
+    queue::active_workspace_dir(root).map_err(|e| advise(e, "Fix it, or change any setting in Rado while it runs. Starting Rado on a damaged file sets it aside as settings.unreadable-*.json and starts over with one empty workspace."))?.ok_or_else(|| {
         format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
     })
 }
@@ -171,10 +171,11 @@ fn read_queue(dir: &Path) -> Result<Queue, String> {
     let schema = file.get("schemaVersion").cloned().unwrap_or(json!(1));
     if schema.as_u64().is_none_or(|v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
-            "{} has schema {schema}, but this rado-mcp {} reads up to {QUEUE_SCHEMA}. Restart this Claude session to start \
-             the rado-mcp installed with the newer Rado.",
+            "{} has schema {schema}, but this rado-mcp {} ({}) reads up to {QUEUE_SCHEMA}. Restart this Claude session; if \
+             it still refuses, run the Rado installer again with no Claude session open (a source build: npm run mcp:build).",
             path.display(),
             env!("CARGO_PKG_VERSION"),
+            std::env::current_exe().unwrap_or_default().display(),
         ));
     }
     serde_json::from_value(file).map_err(|e| rewrite(ReadError::Invalid(format!("{} is not valid: {e}", path.display()))))
@@ -610,7 +611,7 @@ mod tests {
         let dir = TempDir::new("bad-settings");
         std::fs::write(dir.0.join(queue::SETTINGS_FILE), "{").unwrap();
         let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
-        assert!(text.contains("settings.json is not valid") && text.ends_with("change any setting in Rado while it runs."), "{text}");
+        assert!(text.contains("settings.json is not valid") && text.contains("change any setting in Rado while it runs."), "{text}");
     }
 
     #[test]
