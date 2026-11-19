@@ -245,7 +245,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
    Any touch screen keeps them shown: a tap can't hover, even on a laptop whose main pointer is a mouse. */
 .row .actions { opacity: 0; pointer-events: none; }
 .row:hover .actions, .row:has(:focus-visible) .actions, .row:has([data-flash]) .actions { opacity: 1; pointer-events: auto; }
-.row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; }
+/* At opacity 0 the times paint above the actions (their own stacking context) and would take the actions' clicks. */
+.row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; pointer-events: none; }
 @media (any-pointer: coarse) {
   .row .side { row-gap: 6px; }
   .row .actions { grid-area: 2 / 1; flex-direction: row; opacity: 1; pointer-events: auto; }
