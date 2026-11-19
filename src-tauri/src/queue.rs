@@ -164,7 +164,7 @@ pub struct DraftLink {
 
 /// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file. A
 /// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags.
-/// Printable ASCII only, with no `\` and no `@` in the host, so the host the list shows is the one the browser opens.
+/// Printable ASCII only, with no `\` anywhere and no `@` in the host, so the host the list shows is the one the browser opens.
 pub fn is_draft_url(url: &str) -> bool {
     let authority = url_authority(url);
     !authority.is_empty()

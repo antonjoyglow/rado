@@ -373,23 +373,14 @@ fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
 
 /// The links, or None when the file is damaged and no link is being written. A damaged file is never replaced, as
 /// that would drop every link in it; but Rado's list ignores it, so it blocks only a mark that writes a link, rather
-/// than have the agent draft a PR again because its mark was refused.
+/// than have the agent draft a PR again because its mark was refused. A file held by another program is an error even
+/// then: skipping it would leave an unmarked PR's old link for this mark to bring back.
 fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, String> {
     match queue::read_json_file(path) {
         Ok(links) => Ok(Some(links.unwrap_or_default())),
         Err(ReadError::Invalid(_)) if !writing_a_link => Ok(None),
         Err(e) => Err(advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links.")),
     }
-}
-
-/// Applies `change`, keeps only links whose mark still matches, and writes the file only when it changed, so an agent
-/// that never passes `draftUrl` never creates it.
-fn update_links(path: &Path, read: Option<DraftLinks>, drafts: &Drafts, change: impl FnOnce(&mut DraftLinks)) -> Result<(), String> {
-    let Some(before) = read else { return Ok(()) };
-    let mut links = before.clone();
-    change(&mut links);
-    queue::prune_links(&mut links, drafts);
-    if links == before { Ok(()) } else { queue::write_json_atomic(path, &links) }
 }
 
 fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
@@ -420,16 +411,22 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let _lock = lock_drafts(dir)?;
     let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
     let mut drafts = read_drafts(&path)?;
-    let links = read_links(&links_path, url.is_some())?;
+    let read = read_links(&links_path, url.is_some())?;
     queue::record_draft(&mut drafts, pr_id, commit);
     // Links first: Rado reads both files without the lock, and a link whose commit isn't marked yet shows nothing,
-    // while a new mark read with the old link would show as having none.
-    update_links(&links_path, links, &drafts, |links| {
+    // while a new mark read with the old link could open the wrong draft.
+    if let Some(before) = read {
+        let mut links = before.clone();
         match &url {
             Some(url) => links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() }),
             None => links.shift_remove(&pr_id),
         };
-    })?;
+        queue::prune_links(&mut links, &drafts);
+        // Only when changed, so an agent that never passes draftUrl never creates the file.
+        if links != before {
+            queue::write_json_atomic(&links_path, &links)?;
+        }
+    }
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit, "draftUrl": url }))
 }
@@ -675,17 +672,26 @@ mod tests {
     }
 
     #[test]
-    fn invalidLinksFile_marksWithoutALinkAndUnmarksStillWork_andTheFileIsKept() {
+    fn invalidLinksFile_markWithoutALinkIsRecorded_andTheFileIsKept() {
         let dir = with_queue("bad-links-no-url");
         std::fs::write(links_at(&dir), "[").unwrap();
-        let drafts = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
 
         assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
-        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::from([(1, "c1".to_string())]));
-        assert_eq!(call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
 
-        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::new());
+        let drafts = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::from([(1, "c1".to_string())]));
         assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
+    }
+
+    #[test]
+    fn unmarkThenMarkAgainWithoutADraftUrl_dropsTheOldLink() {
+        let dir = with_queue("unmark-remark");
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" }));
+        call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::new());
     }
 
     #[test]
