@@ -12,7 +12,7 @@ import { DROPPED, lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
 import { activeWorkspace, isTyping, stepWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
-  defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
+  defaultListTab, inSection, noReviews, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
 } from "./tabs";
 
 /** When you last opened each row, by row key; "Review next" walks past the ones you just opened. */
@@ -192,6 +192,11 @@ export function mountList(root: HTMLElement): void {
   };
   // Larger text can push the selected tab past the strip's edge; a hidden strip can't scroll, so this also runs on return from settings.
   const revealTab = () => strip.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // Settings opens on the active workspace, whose editor holds the field.
+  const showWatchedRepos = () => {
+    showSettings(true, "workspaces");
+    settingsPanel.querySelector<HTMLInputElement>('input[aria-label="Watched repos"]')?.focus();
+  };
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
@@ -249,7 +254,16 @@ export function mountList(root: HTMLElement): void {
     const current = tab;
     const inThis = all.filter((i) => inSection(i, current));
     const items = current === "mine" ? newestFirst(inThis) : inThis;
-    if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
+    // Only once every source has answered: until then an empty Review tab may just mean a source hasn't.
+    const why = current === "needsReview" && snapshot.lastRefreshed !== null && noReviews(all);
+    const watch = why && snapshot.hasGithubToken;
+    if (items.length === 0) body.append(h("p", { class: "empty" },
+      "Nothing here.",
+      why && " Rado lists PRs where you or your teams are reviewers.",
+      watch && " To also see others' open PRs in a GitHub repo, add it to ",
+      watch && h("button", { type: "button", class: "link", onclick: showWatchedRepos }, "Watched repos"),
+      watch && ".",
+    ));
     const tracker = trackerName(activeWorkspace(snapshot.settings));
     for (const item of items) body.append(row(item, tracker, item.key === next?.key, act));
   };

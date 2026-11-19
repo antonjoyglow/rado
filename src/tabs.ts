@@ -23,6 +23,9 @@ export const SETTINGS_TABS: readonly { key: SettingsTab; label: string }[] = [
 
 export const inSection = (item: ReviewItem, key: SectionKey) => (key === "hidden" ? item.hidden : !item.hidden && item.state === key);
 
+/** No PR asks for your review: every row, if any, is one of yours. */
+export const noReviews = (items: ReviewItem[]) => items.every((i) => i.state === "mine");
+
 /** The tab to open when none was remembered: the first of review, re-review and mine with rows, else review. */
 export function defaultListTab(items: ReviewItem[]): SectionKey {
   const first: SectionKey[] = ["needsReview", "reReview", "mine"];

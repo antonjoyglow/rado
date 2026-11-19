@@ -163,7 +163,7 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .status .failed { margin-top: 4px; color: var(--urgent); }
 .status .failed:empty { display: none; }
 .newer { margin-top: 4px; color: var(--fg); }
-.newer .link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
+.newer .link, .empty .link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
 .spinner {
   display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
   border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
