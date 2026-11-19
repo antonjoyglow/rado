@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::group::Related;
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState, VoteMemory, VotedAt};
-use crate::source::{QueueRef, SourceError, SourcePoll, retry_at};
+use crate::source::{QueueRef, SourceError, SourcePoll, retry_at, throttled};
 
 const API: &str = "api-version=7.1";
 const PAGE: usize = 500;
@@ -178,10 +178,11 @@ impl Client {
         let status = response.status();
         // ADO answers an invalid PAT with a 203 sign-in HTML page instead of a 401.
         if status == reqwest::StatusCode::NON_AUTHORITATIVE_INFORMATION || status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(SourceError::rejected("PAT rejected (expired or missing Code: Read scope)"));
+            return Err("PAT rejected (expired or missing Code: Read scope)".into());
         }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SourceError::rate_limited(retry_at(response.headers(), Utc::now())));
+        let retry = retry_at(response.headers(), Utc::now());
+        if throttled(status, retry) {
+            return Err(SourceError::rate_limited(retry));
         }
         let endpoint = url.split('?').next().unwrap_or(url).rsplit("_apis/").next().unwrap_or(url);
         if !status.is_success() {

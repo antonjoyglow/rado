@@ -106,9 +106,16 @@ async fn poll_loop(app: AppHandle) {
         if let Some(ticket) = session(&app, |s| s.begin_poll(Utc::now())) {
             poll_workspace(&app, ticket, &mut me, &mut changed).await;
         }
-        let minutes = shared.inner.lock().expect("state lock").session.settings().poll_interval();
+        let wait = {
+            let inner = shared.inner.lock().expect("state lock");
+            let interval = Duration::from_secs(u64::from(inner.session.settings().poll_interval()) * 60);
+            // A failing source's next try can fall between polls (a rate limit's end); wake for it.
+            let now = Utc::now();
+            let next_try = inner.session.next_try(now).and_then(|at| (at - now).to_std().ok());
+            next_try.map_or(interval, |d| d.min(interval))
+        };
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = shared.wake.notified() => {}
         }
     }
@@ -120,9 +127,9 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
     let Ticket { workspace, generation, pat, github_token, settled, held } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})").into()),
             Ok(None) => Poll::Off,
-            Ok(Some(_)) if held.contains(&Provider::Ado) => Poll::Held,
+            _ if held.contains(&Provider::Ado) => Poll::Held,
+            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})").into()),
             Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &settled).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(error.named("Azure DevOps")),
@@ -131,9 +138,9 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
     };
     let github = async {
         match github_token.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})").into()),
             Ok(None) => Poll::Off,
-            Ok(Some(_)) if held.contains(&Provider::GitHub) => Poll::Held,
+            _ if held.contains(&Provider::GitHub) => Poll::Held,
+            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})").into()),
             Ok(Some(token)) => match github::fetch(token, &workspace.github.repos).await {
                 Ok(fetched) => Poll::Fresh(fetched),
                 Err(error) => Poll::Failed(error.named("GitHub")),
@@ -151,8 +158,13 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
 const THREAD_REQUESTS: usize = 6;
 
 /// Comment counts and last activity for the PRs in my list that need them; a PR whose threads fail to load keeps
-/// what the last poll knew.
-async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &ado::Me<'_>, settled: &HashMap<i64, String>) -> HashMap<i64, PrThreads> {
+/// what the last poll knew. A throttled threads request fails the whole poll, so the source backs off.
+async fn fetch_threads(
+    client: &ado::Client,
+    prs: &[ado::PullRequest],
+    me: &ado::Me<'_>,
+    settled: &HashMap<i64, String>,
+) -> Result<HashMap<i64, PrThreads>, source::SourceError> {
     // Collected first: a lazy map of async closures trips the compiler's `Send` check on the poll loop.
     let requests: Vec<_> = ado::needing_threads(prs, me, settled)
         .into_iter()
@@ -161,11 +173,18 @@ async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &ado:
             (pr.pull_request_id, stats)
         })
         .collect();
-    futures_util::stream::iter(requests)
-        .buffer_unordered(THREAD_REQUESTS)
-        .filter_map(|(id, stats)| std::future::ready(stats.ok().map(|s| (id, s))))
-        .collect()
-        .await
+    let answers: Vec<_> = futures_util::stream::iter(requests).buffer_unordered(THREAD_REQUESTS).collect().await;
+    let mut threads = HashMap::new();
+    for (id, stats) in answers {
+        match stats {
+            Ok(stats) => {
+                threads.insert(id, stats);
+            }
+            Err(error) if matches!(error.kind, source::FailureKind::RateLimited { .. }) => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(threads)
 }
 
 async fn poll_ado(
@@ -185,7 +204,7 @@ async fn poll_ado(
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
     let prs = client.active_pull_requests().await?;
     let teams: HashSet<String> = source.teams.iter().map(|t| t.trim().to_lowercase()).collect();
-    let threads = fetch_threads(&client, &prs, &ado::Me { id: &my_id, teams: &teams }, settled).await;
+    let threads = fetch_threads(&client, &prs, &ado::Me { id: &my_id, teams: &teams }, settled).await?;
     let urls = prs.iter().map(|pr| (pr.pull_request_id, client.pr_url(pr))).collect();
     Ok(ado::Fetched { prs, my_id, teams, threads, urls })
 }
@@ -309,7 +328,7 @@ fn get_snapshot(state: tauri::State<'_, Shared>) -> Snapshot {
 
 #[tauri::command]
 fn refresh_now(app: AppHandle) {
-    session(&app, Session::refresh);
+    session(&app, |s| s.refresh(Utc::now()));
 }
 
 // Async: building a window inside a synchronous command can deadlock on Windows.
@@ -557,7 +576,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "show" => {
                 let _ = show_list(app);
             }
-            "refresh" => session(app, Session::refresh),
+            "refresh" => session(app, |s| s.refresh(Utc::now())),
             "quit" => quit(app.clone()),
             _ => {}
         })

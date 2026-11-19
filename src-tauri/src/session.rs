@@ -56,18 +56,18 @@ struct Backoff {
 }
 
 impl Backoff {
-    /// The wait after the `failures`-th failure in a row: one poll interval, doubled for each failure before it, up to
-    /// an hour, and never shorter than a rate limit asked for.
+    /// The wait after the `failures`-th failure in a row: when a rate limit names a time, that time (but at least one
+    /// poll interval); otherwise one interval, doubled for each failure before it, up to an hour.
     fn after(failures: u32, error: SourceError, interval_minutes: u32, now: DateTime<Utc>) -> Self {
-        let minutes = (i64::from(interval_minutes) << (failures - 1).min(16)).min(MAX_BACKOFF_MINUTES);
-        let mut until = now + chrono::Duration::minutes(minutes);
-        let (rate_limited, error) = match error.kind {
+        let interval = chrono::Duration::minutes(i64::from(interval_minutes));
+        let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(MAX_BACKOFF_MINUTES));
+        let (until, rate_limited, error) = match error.kind {
             FailureKind::RateLimited { until: asked } => {
-                until = until.max(asked.unwrap_or(until));
-                (true, format!("{} until {}", error.message, clock(until)))
+                let until = asked.map_or(doubled, |at| at.max(now + interval));
+                (until, true, format!("{} until {}", error.message, clock(until)))
             }
-            _ if failures > 1 => (false, format!("{} · next try {}", error.message, clock(until))),
-            _ => (false, error.message),
+            FailureKind::Other if failures > 1 => (doubled, false, format!("{} · next try {}", error.message, clock(doubled))),
+            FailureKind::Other => (doubled, false, error.message),
         };
         Self { failures, until, rate_limited, error }
     }
@@ -201,8 +201,6 @@ pub struct Session {
     generation: u64,
     /// Set when the poller must run now rather than at its next interval; drained by `take_wake`.
     wake: bool,
-    /// Set by `refresh` and drained by the next `begin_poll`: a poll the user asked for.
-    manual: bool,
 }
 
 /// A token that couldn't be read counts as saved: its source then fails with the read error instead of turning off,
@@ -226,7 +224,7 @@ impl Session {
             })
             .collect();
         let ws = WorkspaceState::load(&store, &loaded.settings.active_workspace);
-        let session = Self { store, settings: loaded.settings, ws, parked: HashMap::new(), saved, polling: false, generation: 0, wake: false, manual: false };
+        let session = Self { store, settings: loaded.settings, ws, parked: HashMap::new(), saved, polling: false, generation: 0, wake: false };
         (session, loaded.warning)
     }
 
@@ -324,7 +322,6 @@ impl Session {
     /// Starts a poll of the active workspace: None when there is nothing to poll. With no token saved, the
     /// workspace's rows and queue go, and the status line asks for a token.
     pub fn begin_poll(&mut self, now: DateTime<Utc>) -> Option<Ticket> {
-        let manual = std::mem::take(&mut self.manual);
         let workspace = self.settings.active()?.clone();
         let (pat, github_token) = (self.store.read_pat(&workspace.id), self.store.read_github_token(&workspace.id));
         self.saved.insert(workspace.id.clone(), Saved { pat: token_saved(&pat), github_token: token_saved(&github_token) });
@@ -352,15 +349,23 @@ impl Session {
             .filter(|i| i.provider == Provider::Ado && (i.hidden || i.state == score::ReviewState::Approved) && i.comments.is_some())
             .filter_map(|i| Some((i.id, self.ws.commits.get(&i.id)?.clone())))
             .collect();
-        // Refresh retries a failing source at once, but never inside the window a rate limit asked for.
-        let held = self.ws.backoff.iter().filter(|(_, b)| b.until > now && (b.rate_limited || !manual)).map(|(p, _)| *p).collect();
+        // The slack lets the poll that wakes for a next try make it even if the clock moved back a little.
+        let held = self.ws.backoff.iter().filter(|(_, b)| b.until > now + chrono::Duration::seconds(30)).map(|(p, _)| *p).collect();
         Some(Ticket { workspace, generation: self.generation, pat, github_token, settled, held })
     }
 
-    /// Polls now, as the Refresh button and the tray's Refresh now ask.
-    pub fn refresh(&mut self) {
-        self.manual = true;
+    /// Polls now, as the Refresh button and the tray's Refresh now ask: a failing source is tried again at once,
+    /// unless a rate limit asked to wait.
+    pub fn refresh(&mut self, now: DateTime<Utc>) {
+        for backoff in self.ws.backoff.values_mut().filter(|b| !b.rate_limited) {
+            backoff.until = backoff.until.min(now);
+        }
         self.wake = true;
+    }
+
+    /// The earliest next try of a failing source of the active workspace, so the poller can wake for it.
+    pub fn next_try(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.ws.backoff.values().map(|b| b.until).filter(|at| *at > now).min()
     }
 
     /// Files a poll's result under the active workspace and saves what it changed. Nothing happens when the poll is
@@ -820,7 +825,6 @@ mod tests {
             polling: false,
             generation: 0,
             wake: false,
-            manual: false,
         };
         Fixture { s, secrets, dir }
     }
@@ -1078,6 +1082,10 @@ mod tests {
         assert_eq!(asked.error, format!("GitHub: rate limited until {}", clock(t0() + minutes(90))));
         let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
+        let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
+        assert_eq!(after_failures.until, t0() + minutes(3), "a named time replaces the doubling");
+        let unnamed = Backoff::after(3, SourceError::rate_limited(None).named("GitHub"), 3, t0());
+        assert_eq!(unnamed.until, t0() + minutes(12));
     }
 
     #[test]
@@ -1105,20 +1113,20 @@ mod tests {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-refresh");
         file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
         file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
-        s.refresh();
+        assert_eq!(s.next_try(t0()), Some(t0() + minutes(6)));
+        s.refresh(t0() + minutes(1));
         assert!(s.take_wake());
         assert!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held.is_empty());
-        assert!(!s.begin_poll(t0() + minutes(1)).expect("a ticket").held.is_empty(), "only the poll the user asked for skips the wait");
 
         file_github(&mut s, Poll::Failed(SourceError::rate_limited(Some(t0() + minutes(30))).named("GitHub")), t0());
-        s.refresh();
+        s.refresh(t0() + minutes(1));
         assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
     }
 
     #[test]
     fn saveSecret_endsTheSourcesBackoff() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-token");
-        file_github(&mut s, Poll::Failed(SourceError::rejected("token rejected (expired or revoked)").named("GitHub")), t0());
+        file_github(&mut s, Poll::Failed("GitHub: token rejected (expired or revoked)".into()), t0());
         s.save_secret("a", Provider::GitHub, "gh-new").expect("saved");
         assert!(s.ws.backoff.is_empty());
         assert!(s.begin_poll(t0()).expect("a ticket").held.is_empty());

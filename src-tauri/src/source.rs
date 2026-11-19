@@ -13,7 +13,6 @@ use crate::score::{PrThreads, ReviewItem};
 pub enum FailureKind {
     /// Throttled; `until` is when the source said to come back, if it said.
     RateLimited { until: Option<DateTime<Utc>> },
-    Rejected,
     Other,
 }
 
@@ -26,10 +25,6 @@ pub struct SourceError {
 impl SourceError {
     pub fn rate_limited(until: Option<DateTime<Utc>>) -> Self {
         Self { kind: FailureKind::RateLimited { until }, message: "rate limited".into() }
-    }
-
-    pub fn rejected(message: &str) -> Self {
-        Self { kind: FailureKind::Rejected, message: message.into() }
     }
 
     /// The same error under a source's name, such as `Azure DevOps: `.
@@ -51,16 +46,22 @@ impl From<&str> for SourceError {
 }
 
 /// When a throttled response says to come back: `Retry-After` in seconds, or else the `X-RateLimit-Reset` epoch
-/// second when no requests remain. Azure DevOps and GitHub both send these.
+/// second when no requests remain. Azure DevOps and GitHub both send these. Never more than a day away.
 pub fn retry_at(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    const DAY: i64 = 86_400;
     let number = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok();
     if let Some(seconds) = number("retry-after") {
-        return Some(now + chrono::Duration::seconds(seconds.max(0)));
+        return Some(now + chrono::Duration::seconds(seconds.clamp(0, DAY)));
     }
     if number("x-ratelimit-remaining") == Some(0) {
-        return DateTime::from_timestamp(number("x-ratelimit-reset")?, 0);
+        return DateTime::from_timestamp(number("x-ratelimit-reset")?, 0).map(|at| at.min(now + chrono::Duration::seconds(DAY)));
     }
     None
+}
+
+/// Whether a response is throttling: a 429, or a 403 that carries the rate-limit headers (GitHub's way).
+pub fn throttled(status: reqwest::StatusCode, retry: Option<DateTime<Utc>>) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || (status == reqwest::StatusCode::FORBIDDEN && retry.is_some())
 }
 
 /// What the MCP queue needs from a PR beyond its list row.
@@ -120,6 +121,23 @@ mod tests {
         let reset = now() + chrono::Duration::minutes(20);
         let at = retry_at(&headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset.timestamp().to_string())]), now());
         assert_eq!(at, Some(reset));
+    }
+
+    #[test]
+    fn retryAt_hugeValues_areCappedAtADay() {
+        let day = now() + chrono::Duration::days(1);
+        assert_eq!(retry_at(&headers(&[("retry-after", "99999999999999")]), now()), Some(day));
+        assert_eq!(retry_at(&headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "99999999999")]), now()), Some(day));
+    }
+
+    #[test]
+    fn throttled_is429_or403WithRateLimitHeaders() {
+        use reqwest::StatusCode;
+        let later = Some(now());
+        assert!(throttled(StatusCode::TOO_MANY_REQUESTS, None));
+        assert!(throttled(StatusCode::FORBIDDEN, later));
+        assert!(!throttled(StatusCode::FORBIDDEN, None), "a 403 without the headers is a permission error");
+        assert!(!throttled(StatusCode::OK, later));
     }
 
     #[test]

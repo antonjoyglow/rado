@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState};
-use crate::source::{QueueRef, SourceError, SourcePoll, retry_at};
+use crate::source::{QueueRef, SourceError, SourcePoll, retry_at, throttled};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
@@ -206,10 +206,9 @@ pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, Sou
     let status = response.status();
     let retry = retry_at(response.headers(), Utc::now());
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(SourceError::rejected("token rejected (expired or revoked)"));
+        return Err("token rejected (expired or revoked)".into());
     }
-    // GitHub throttles with a 429, or a 403 carrying the rate-limit headers.
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || (status == reqwest::StatusCode::FORBIDDEN && retry.is_some()) {
+    if throttled(status, retry) {
         return Err(SourceError::rate_limited(retry));
     }
     if !status.is_success() {
