@@ -559,6 +559,10 @@ impl Session {
         if let Some(state) = self.state_of(&id) {
             if ado_changed {
                 state.baseline.remove(&Provider::Ado);
+                // PR ids repeat across organizations: a PR in the new one must not carry these threads.
+                for item in state.items.iter_mut().filter(|i| i.provider == Provider::Ado) {
+                    (item.comments, item.updated_at) = (None, None);
+                }
             }
             if github_changed {
                 state.baseline.remove(&Provider::GitHub);
@@ -1013,6 +1017,30 @@ mod tests {
         s.save_workspace(changed).expect("saved");
         assert_eq!((s.generation, s.take_wake()), (generation, false), "a rename needs no poll");
         assert_eq!(s.ws.baseline.get(&Provider::Ado), Some(&ids(&[1])));
+    }
+
+    #[test]
+    fn saveWorkspace_newOrganization_leavesNoThreadsToCarry() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-org");
+        let known = score::CommentStats { total: 2, open_threads: 0 };
+        let ado_item = ReviewItem { provider: Provider::Ado, comments: Some(known), ..pr(1, ReviewState::NeedsReview) };
+        let github_item = ReviewItem { comments: Some(known), ..pr(2, ReviewState::NeedsReview) };
+        s.ws.items = vec![ado_item, github_item];
+
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.azure_dev_ops.organization = "other".into();
+        s.save_workspace(changed).expect("saved");
+
+        assert_eq!(s.ws.items.iter().map(|i| (i.id, i.comments)).collect::<Vec<_>>(), [(1, None), (2, Some(known))]);
+    }
+
+    #[test]
+    fn filePoll_threadsNotLoaded_carriesOnlyFromTheSameSource() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("carry-source");
+        let github_item = ReviewItem { comments: Some(score::CommentStats { total: 9, open_threads: 0 }), ..pr(1, ReviewState::NeedsReview) };
+        s.ws.items = vec![github_item];
+        file(&mut s, ado(vec![ado_pr(1, "b1", Some(0))]), Poll::Off);
+        assert_eq!(s.ws.items.iter().map(|i| (i.provider, i.comments)).collect::<Vec<_>>(), [(Provider::Ado, None)]);
     }
 
     #[test]

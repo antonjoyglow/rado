@@ -285,13 +285,6 @@ mod tests {
         assert!(items.iter().all(|i| i.updated_at.is_none()));
     }
 
-    #[test]
-    fn attachThreads_threadsNotLoadedOnAFirstSighting_leavesCommentsAndActivityUnknown() {
-        let mut items = vec![mine(1, 0)];
-        attach_threads(&mut items, &HashMap::new(), &HashMap::new(), now());
-        assert_eq!((items[0].comments, items[0].updated_at), (None, None));
-    }
-
     fn review_opened_days_ago(days: i64) -> ReviewItem {
         let mut p = pr(1, vec![reviewer(ME, 0, false, false)]);
         p.creation_date = now() - Duration::days(days);
@@ -341,10 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn attachThreads_activeReviewWhoseThreadsFailedToLoad_staysActionable() {
+    fn attachThreads_oldReviewWhoseThreadsNeverLoaded_staysActionableWithNothingKnown() {
         let mut items = vec![review_opened_days_ago(60)];
         attach_threads(&mut items, &HashMap::new(), &HashMap::new(), now());
-        assert_eq!(items[0].state, ReviewState::NeedsReview);
+        assert_eq!((items[0].state, items[0].comments, items[0].updated_at), (ReviewState::NeedsReview, None, None));
     }
 
     #[test]
