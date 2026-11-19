@@ -535,7 +535,9 @@ impl Session {
             }
         }
         mark_hidden(ws);
-        self.store.save_hidden(&self.settings.active_workspace, &hidden_file(&self.ws))
+        self.store
+            .save_hidden(&self.settings.active_workspace, &hidden_file(&self.ws))
+            .map_err(|e| format!("Changed, but not saved: {e}"))
     }
 
     /// Saves a workspace's PAT or GitHub token, trimmed.

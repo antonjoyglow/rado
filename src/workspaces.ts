@@ -65,11 +65,8 @@ export function isTyping(target: EventTarget | null): boolean {
 
 const KEYS_HINT = "Ctrl+← / Ctrl+→ switch workspaces";
 
-/** A switch that couldn't be saved still happened for this run, and the status line already says why saving fails. */
-export const switchWorkspace = (id: string) => void api.switchWorkspace(id).catch(() => undefined);
-
 /** The header chip naming the active workspace, and the picker it opens. */
-export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; picker: HTMLElement; render: (s: Snapshot) => void; close: () => boolean } {
+export function workspaceChip(onManage: () => void, switchTo: (id: string) => void): { chip: HTMLButtonElement; picker: HTMLElement; render: (s: Snapshot) => void; close: () => boolean } {
   const label = h("span", { class: "ws-name" });
   const chip = h("button", { class: "ws-chip", type: "button", ariaHasPopup: "menu", ariaExpanded: "false" }, label, h("span", { ariaHidden: "true" }, "▾"));
   const picker = h("div", { class: "ws-picker", role: "menu", hidden: true });
@@ -87,7 +84,7 @@ export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; 
         data: { id: w.id },
         onclick: () => {
           close();
-          if (w.id !== snapshot?.settings.activeWorkspace) switchWorkspace(w.id);
+          if (w.id !== snapshot?.settings.activeWorkspace) switchTo(w.id);
         },
       }, w.name)),
       h("button", { type: "button", role: "menuitem", class: "manage", onclick: () => { close(); onManage(); } }, "Manage workspaces…"),
@@ -178,7 +175,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     const isActive = workspace.id === snapshot.settings.activeWorkspace;
     activeSlot.replaceChildren(isActive
       ? h("span", { class: "ws-active" }, "Active: polled and counted now")
-      : h("button", { type: "button", onclick: () => switchWorkspace(workspace.id) }, "Make active"));
+      : h("button", { type: "button", onclick: () => api.switchWorkspace(workspace.id).catch((e) => fail(listNote, e)) }, "Make active"));
   };
 
   const buildEditor = (original: Workspace, saved: Saved) => {

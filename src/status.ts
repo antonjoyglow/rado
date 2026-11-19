@@ -25,8 +25,23 @@ export function statusLine(s: Polled, pollingSince: number | null, now: Date): S
 }
 
 /** The banner shows only when one of its lines has something to say. */
-export function showStatus(line: StatusLine | null, warning: string | null, newerRelease: unknown): boolean {
-  return line !== null || Boolean(warning) || Boolean(newerRelease);
+export function showStatus(line: StatusLine | null, warning: string | null, actionError: string | null, newerRelease: unknown): boolean {
+  return line !== null || Boolean(warning) || Boolean(actionError) || Boolean(newerRelease);
+}
+
+/**
+ * Runs actions taken in the list (open, hide, switch workspace). Each clears the last one's error as it starts and
+ * reports its own failure, unless a newer action has started since.
+ */
+export function listActions(report: (error: string | null) => void) {
+  let latest = 0;
+  return (action: Promise<unknown>): Promise<void> => {
+    const run = ++latest;
+    report(null);
+    return action.then(() => undefined, (e: unknown) => {
+      if (run === latest) report(String(e));
+    });
+  };
 }
 
 export function checkedText(lastRefreshed: string | null, now: Date): string {

@@ -160,6 +160,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .status { padding: 6px 14px; color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); }
 .status[data-kind="error"] { color: var(--urgent); }
 .hint { margin-top: 4px; color: var(--normal); }
+.status .failed { margin-top: 4px; color: var(--urgent); }
+.status .failed:empty { display: none; }
 .newer { margin-top: 4px; color: var(--fg); }
 .newer .link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
 .spinner {
