@@ -7,9 +7,10 @@ use crate::score::{CommentStats, Provider, ReviewItem, ReviewState};
 use crate::workspace::Tracker;
 
 /// One PR inside a row; `state` is `None` for a PR on the same branch that I am not asked to review.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
+    /// Unique across sources; what `open_pr` takes.
     pub id: i64,
     pub provider: Provider,
     pub number: i64,
@@ -34,8 +35,11 @@ pub struct Related {
     pub created_at: DateTime<Utc>,
 }
 
-/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole.
-#[derive(Debug, Clone, Serialize)]
+/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole:
+/// `createdAt` is when its earliest PR assigned to me (or mine) was opened, and `updatedAt` the latest activity
+/// across those PRs, a later sibling's opening included.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "ReviewItem")]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRow {
     pub key: String,
@@ -208,7 +212,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
 }
 
 /// The counter's two numbers, counted in rows: rows waiting on my review, and rows of mine that need work.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, ts_rs::TS)]
 pub struct Counts {
     pub reviews: u32,
     pub mine: u32,

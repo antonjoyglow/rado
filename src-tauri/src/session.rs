@@ -47,7 +47,7 @@ impl WorkspaceState {
 }
 
 /// Which secrets a workspace has saved; the values never leave the store.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Saved {
     pat: bool,
@@ -68,7 +68,8 @@ impl Saved {
 }
 
 /// The session's part of the snapshot the windows render.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "SessionStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     items: Vec<group::ReviewRow>,

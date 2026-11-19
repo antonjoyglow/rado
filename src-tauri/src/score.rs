@@ -4,16 +4,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Where a PR stands for me. `mine`: a PR I opened, shown for its review progress and never counted as waiting on me.
+/// `stale`: a review with no activity for `STALE_AFTER_DAYS`, out of the count until something happens on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ReviewState {
     NeedsReview,
     ReReview,
     WaitingOnAuthor,
     Approved,
-    /// A PR I opened; shown for its review progress, never counted as waiting on me.
     Mine,
-    /// A review with no activity for `STALE_AFTER_DAYS`; out of the count until something happens on it.
     Stale,
 }
 
@@ -25,7 +25,7 @@ impl ReviewState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Provider {
     Ado,
@@ -33,7 +33,7 @@ pub enum Provider {
     GitHub,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Tier {
     Low,
@@ -41,7 +41,8 @@ pub enum Tier {
     Urgent,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "RowSummary")]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewItem {
     /// Unique across sources: the Azure DevOps PR id, or the GitHub PR's global `databaseId`.
@@ -74,7 +75,7 @@ pub struct ReviewItem {
     /// Individual reviewers who rejected or are waiting for the author.
     pub objections: u32,
     pub comments: Option<CommentStats>,
-    /// Waiting on me: a review to do, or my own PR with rejections or unresolved threads.
+    /// Waiting on me: a review to do, or my own PR with rejections or unresolved threads. Never true for a hidden row.
     pub actionable: bool,
 }
 
@@ -115,7 +116,7 @@ pub fn attach_threads(items: &mut [ReviewItem], threads: &HashMap<i64, PrThreads
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentStats {
     pub total: u32,
