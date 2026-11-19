@@ -140,7 +140,8 @@ fn tools() -> Value {
             "name": "list_drafted",
             "description": "The queued PRs that list_review_queue leaves out because a draft review was marked at their \
                 current sourceCommit, in the same shape and order. Use it to find the prId and commit to pass to \
-                unmark_drafted. Fails when Rado's data is stale, as list_review_queue does.",
+                unmark_drafted. Unlike list_review_queue it answers from an old queue too; refreshedMinutesAgo says \
+                how old.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "workspace": workspace_argument() },
@@ -151,7 +152,7 @@ fn tools() -> Value {
         {
             "name": "unmark_drafted",
             "description": "Undoes mark_drafted, so list_review_queue lists the PR again: call it when the draft was \
-                deleted, never published, or marked on the wrong PR. Pass the prId and commit list_drafted shows, and the \
+                deleted, never saved, or marked on the wrong PR. Pass the prId and commit list_drafted shows, and the \
                 workspaceId it returned as workspace. Fails when the PR has no mark at that commit. Changes nothing on \
                 Azure DevOps or GitHub.",
             "inputSchema": {
@@ -164,7 +165,7 @@ fn tools() -> Value {
                 "required": ["prId", "commit"],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false },
+            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
         },
     ])
 }
@@ -187,9 +188,9 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
         workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)))
     };
     let outcome = match name {
-        "list_review_queue" => in_workspace(&|ws| list(ws, now, queue::pending)),
+        "list_review_queue" => in_workspace(&|ws| list(ws, now, queue::pending, true)),
         "mark_drafted" => in_workspace(&|ws| mark_drafted(ws, args)),
-        "list_drafted" => in_workspace(&|ws| list(ws, now, queue::drafted)),
+        "list_drafted" => in_workspace(&|ws| list(ws, now, queue::drafted, false)),
         "unmark_drafted" => in_workspace(&|ws| unmark_drafted(ws, args)),
         other => return Err(format!("Unknown tool: {other}")),
     };
@@ -336,12 +337,13 @@ fn read_drafts(path: &Path) -> Result<Drafts, String> {
         .map_err(|e| advise(e, "Delete it to start over; the PRs drafted so far will then be listed again."))
 }
 
-/// The queue's branches that `select` keeps, given the recorded drafts.
-fn list(ws: &Workspace, now: DateTime<Utc>, select: fn(&Queue, &Drafts) -> Vec<queue::Branch>) -> Result<Value, String> {
+/// The queue's branches that `select` keeps, given the recorded drafts. Only a list to review from refuses an old
+/// queue: undoing a mark doesn't depend on its age.
+fn list(ws: &Workspace, now: DateTime<Utc>, select: fn(&Queue, &Drafts) -> Vec<queue::Branch>, to_review: bool) -> Result<Value, String> {
     let queue = read_queue(ws)?;
     let age = (now - queue.refreshed).num_minutes();
     let limit = queue::stale_after_minutes(queue.poll_minutes);
-    if age > limit {
+    if to_review && age > limit {
         let advice = ws.poll_advice("Rado is not running or cannot reach Azure DevOps or GitHub; start Rado and run again.");
         return Err(format!("Rado's review queue is {age} minutes old (the limit is {limit}). Review nothing from it. {advice}"));
     }
@@ -386,16 +388,19 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
-/// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR.
+/// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR, so the
+/// error never names the marked commit.
 fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let (pr_id, commit) = pr_and_commit(args)?;
-    let _lock = lock_drafts(&ws.dir)?;
     let path = ws.dir.join(DRAFTS_FILE);
+    let unmarked = || format!("PR {pr_id} has no draft mark at {commit}; pass the prId and commit list_drafted shows");
+    if !path.exists() {
+        return Err(unmarked());
+    }
+    let _lock = lock_drafts(&ws.dir)?;
     let mut drafts = read_drafts(&path)?;
-    match drafts.get(&pr_id) {
-        Some(marked) if marked == commit => {}
-        Some(marked) => return Err(format!("PR {pr_id} is marked at {marked}, not {commit}; pass the commit list_drafted shows")),
-        None => return Err(format!("PR {pr_id} has no draft mark; pass the prId list_drafted shows, not the GitHub PR number")),
+    if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
+        return Err(unmarked());
     }
     drafts.shift_remove(&pr_id);
     queue::write_json_atomic(&path, &drafts)?;
@@ -554,15 +559,26 @@ mod tests {
         let other_commit = error_text(&call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c0" })));
         let unmarked = error_text(&call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 2, "commit": "c2" })));
 
-        assert_eq!(other_commit, "Workspace Work (id w1): PR 1 is marked at c1, not c0; pass the commit list_drafted shows");
-        assert!(unmarked.contains("PR 2 has no draft mark"), "{unmarked}");
+        assert_eq!(other_commit, "Workspace Work (id w1): PR 1 has no draft mark at c0; pass the prId and commit list_drafted shows");
+        assert!(!other_commit.contains("c1"), "the error must not hand over the marked commit");
+        assert!(unmarked.contains("PR 2 has no draft mark at c2"), "{unmarked}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), marks);
     }
 
     #[test]
-    fn listDrafted_staleQueue_refuses() {
+    fn unmarkDrafted_workspaceNeverPolled_saysThereIsNoMark() {
+        let (root, _, _) = two_workspaces("unmark-new");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta"), ("c3", "Gamma")]);
+
+        let text = error_text(&call_tool(&root.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "c3" })));
+
+        assert!(text.ends_with("PR 1 has no draft mark at c; pass the prId and commit list_drafted shows"), "{text}");
+    }
+
+    #[test]
+    fn listDrafted_staleQueue_isStillListed() {
         let dir = with_queue("drafted-stale");
-        assert!(error_text(&call_tool(&dir.0, at(31), "list_drafted", json!({}))).contains("31 minutes old"));
+        assert_eq!(text(&call_tool(&dir.0, at(31), "list_drafted", json!({})))["refreshedMinutesAgo"], 31);
     }
 
     #[test]
