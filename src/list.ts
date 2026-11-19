@@ -8,7 +8,7 @@ import { h, whenBlurred } from "./dom";
 import { bird, glow, yawn } from "./bird";
 import { glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
-import { lastingSaver, type LastingSaver } from "./save";
+import { DROPPED, lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
 import { activeWorkspace, isTyping, stepWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
@@ -107,16 +107,26 @@ export function mountList(root: HTMLElement): void {
     announcer.textContent = "";
     requestAnimationFrame(() => { announcer.textContent = text; });
   };
-  const act = listActions((error) => {
-    // Opening a link can hide the list before a later link of the same row fails; that error belongs to the last visit.
-    if (error && document.hidden) return;
+  const showFailure = (error: string | null) => {
     actionText.textContent = error ?? "";
     if (error) announce(error);
     renderStatus();
+  };
+  const act = listActions((error) => {
+    // Opening a link can hide the list before a later link of the same row fails; that error belongs to the last visit.
+    if (error && document.hidden) return;
+    showFailure(error);
   });
   const switchTo = (id: string) => void act(api.switchWorkspace(id));
   const refreshButton = h("button", { class: "icon refresh", type: "button", ariaLabel: "Refresh now", title: "Refresh now", onclick: () => void act(api.refresh()) }, h("span", { class: "refresh-glyph" }, "↻"));
-  const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
+  const settingsButton = h("button", {
+    class: "icon",
+    type: "button",
+    title: "Settings",
+    // Keeps focus in a Settings field until the click, so ← commits it the way Esc does.
+    onmousedown: (e: MouseEvent) => e.preventDefault(),
+    onclick: () => showSettings(settingsPanel.hidden !== false),
+  }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
   const workspace = workspaceChip(() => showSettings(true, "workspaces"), switchTo);
 
@@ -154,8 +164,16 @@ export function mountList(root: HTMLElement): void {
   const showSettings = (on: boolean, startTab: SettingsTab = settingsTab) => {
     if (on && !settingsPanel.hidden) settingsView?.select(startTab);
     if (on === !settingsPanel.hidden) return;
-    if (on) listScroll = body.scrollTop;
+    if (on) {
+      listScroll = body.scrollTop;
+      // Whatever failed on the way out is now in front of you to fix.
+      showFailure(null);
+    }
+    const editing = !on && document.activeElement instanceof HTMLElement && settingsPanel.contains(document.activeElement) ? document.activeElement : null;
     settingsPanel.hidden = !on;
+    // The focused field commits now rather than whenever Chromium moves focus off the hidden field, and once hidden,
+    // so its save, or the check that refuses it, reports to the status line instead of a hidden note.
+    editing?.blur();
     body.hidden = on;
     strip.list.hidden = on;
     heading.textContent = on ? "Settings" : "Reviews";
@@ -165,7 +183,7 @@ export function mountList(root: HTMLElement): void {
       ? renderSettings(settingsPanel, snapshot, startTab, (key) => {
           settingsTab = key;
           remember(SETTINGS_TAB_KEY, key);
-        })
+        }, showFailure)
       : null;
     if (!on) {
       body.scrollTop = listScroll;
@@ -406,6 +424,7 @@ function renderSettings(
   snapshot: Snapshot,
   startTab: SettingsTab,
   onSelect: (key: SettingsTab) => void,
+  showFailure: (error: string) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
   const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
   // This saver is the only writer of these settings, and the snapshot can lag a save just made.
@@ -421,7 +440,12 @@ function renderSettings(
     if (kind === "ok") timers.set(n, setTimeout(() => (n.textContent = ""), 2000));
   };
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
-  const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
+  const fail = (n: HTMLElement, e: unknown) => {
+    show(n, "error", String(e));
+    // A save made on the way out of Settings, or out of a workspace's editor, can fail after its note left the screen.
+    // DROPPED would hide the error that caused it.
+    if (n.offsetParent === null && e !== DROPPED) showFailure(String(e).startsWith("Not saved") ? String(e) : `Not saved: ${String(e)}`);
+  };
   // General and Counter share `settings` and save it whole. A failed save puts both tabs back to the last saved
   // values in place; a General field that has focus is put back when it loses it.
   saver.revert = (saved) => {
