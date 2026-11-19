@@ -287,21 +287,15 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       whenBlurred(org, () => (org.value = workspace.azureDevOps.organization));
       whenBlurred(teams, () => (teams.value = workspace.azureDevOps.teams.join(", ")));
       whenBlurred(repos, () => (repos.value = workspace.github.repos.join(", ")));
-      // The tracker goes back as one block, and only when it changed, so a chosen kind with its field still empty
-      // survives another field's failure. A block being typed in goes back on blur, unless that blur saved anew.
+      // The tracker goes back only when it changed, so a chosen kind with its field still empty survives another
+      // field's failure. It goes back at once and whole, even mid-typing: any part left over would be sent again
+      // with the next tracker save, or mixed with the restored kind.
       if (JSON.stringify(workspace.tracker) === trackerBefore) return;
-      const reverted = workspace.tracker;
-      const showSaved = () => {
-        if (workspace.tracker !== reverted) return;
-        kind = reverted.kind;
-        keys = trackerKeys(reverted);
-        trackerField.value = trackerValue(reverted);
-        keysField.value = keys.join(", ");
-        showTracker();
-      };
-      const typing = [trackerField, keysField].find((f) => document.activeElement === f);
-      if (typing) whenBlurred(typing, showSaved);
-      else showSaved();
+      kind = workspace.tracker.kind;
+      keys = trackerKeys(workspace.tracker);
+      trackerField.value = trackerValue(workspace.tracker);
+      keysField.value = keys.join(", ");
+      showTracker();
     };
 
     const removeSlot = h("span", { class: "inline" });
