@@ -151,7 +151,11 @@ fn workspace_argument() -> Value {
 /// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
     let args = &params["arguments"];
-    let in_workspace = |tool: &dyn Fn(&Workspace) -> Result<Value, String>| workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)));
+    let name = params["name"].as_str().unwrap_or_default();
+    let in_workspace = |tool: &dyn Fn(&Workspace) -> Result<Value, String>| {
+        known_arguments(name, args)?;
+        workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)))
+    };
     let outcome = match params["name"].as_str() {
         Some("list_review_queue") => in_workspace(&|ws| list(ws, now)),
         Some("mark_drafted") => in_workspace(&|ws| mark_drafted(ws, args)),
@@ -161,6 +165,20 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
     })
+}
+
+/// Refuses an argument the tool's schema doesn't list: ignoring a misnamed `workspaceId` would use the active
+/// workspace instead of the one the agent meant.
+fn known_arguments(tool: &str, args: &Value) -> Result<(), String> {
+    let tools = tools();
+    let schema = tools.as_array().and_then(|all| all.iter().find(|t| t["name"] == tool));
+    let (Some(properties), Some(args)) = (schema.and_then(|t| t["inputSchema"]["properties"].as_object()), args.as_object()) else {
+        return Ok(());
+    };
+    match args.keys().find(|key| !properties.contains_key(*key)) {
+        Some(key) => Err(format!("{tool} takes no argument {key:?}; it takes {}", properties.keys().cloned().collect::<Vec<_>>().join(", "))),
+        None => Ok(()),
+    }
 }
 
 /// Names the workspace in a tool's reply, an object, or in its error.
@@ -241,7 +259,11 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
             "Rado has no workspace {requested:?}; it has {}. Don't pick another: review nothing and tell the user.",
             listed(&all.iter().collect::<Vec<_>>())
         )),
-        _ => Err(format!("{} workspaces are named {requested:?}; pass the id of one: {}", named.len(), listed(&named))),
+        _ => Err(format!(
+            "{} workspaces are named {requested:?}: {}. Don't pick one: review nothing and tell the user to name a workspaceId in your instructions.",
+            named.len(),
+            listed(&named)
+        )),
     }
 }
 
@@ -499,8 +521,8 @@ mod tests {
         for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), r#""2""#.to_string())] {
             std::fs::write(&path, json!({ "schemaVersion": schema, "queue": [] }).to_string()).unwrap();
 
-            for tool in ["list_review_queue", "mark_drafted"] {
-                let result = call_tool(&dir.0, at(1), tool, json!({ "prId": 1, "commit": "c1" }));
+            for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
+                let result = call_tool(&dir.0, at(1), tool, arguments);
                 assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {shown}")), "{tool}: {result}");
             }
         }
@@ -724,8 +746,26 @@ mod tests {
 
         let text = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "Work" })));
 
-        assert_eq!(text, r#"2 workspaces are named "Work"; pass the id of one: Work (id a1), work (id b2)"#);
+        assert_eq!(
+            text,
+            r#"2 workspaces are named "Work": Work (id a1), work (id b2). Don't pick one: review nothing and tell the user to name a workspaceId in your instructions."#
+        );
         assert!(!a.join(DRAFTS_FILE).exists() && !b.join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn unknownArgument_isAnErrorNotTheActiveWorkspace() {
+        let (root, a, _) = two_workspaces("unknown-arg");
+        let q = Queue { missing_sources: vec![queue::GITHUB.into()], ..make_queue(vec![]) };
+        write_json_atomic(&a.join(QUEUE_FILE), &q).unwrap();
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+
+        let listed = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspaceId": "b2" })));
+        let marked = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspaceId": "b2" })));
+
+        assert_eq!(listed, r#"list_review_queue takes no argument "workspaceId"; it takes workspace"#);
+        assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, prId, workspace"#);
+        assert!(!a.join(DRAFTS_FILE).exists());
     }
 
     #[test]
