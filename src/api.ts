@@ -31,6 +31,7 @@ export const api = {
   openList: () => invoke<void>("open_list"),
   hideList: () => invoke<void>("hide_list"),
   openPr: (id: number) => invoke<void>("open_pr", { id }),
+  openDraft: (id: number) => invoke<void>("open_draft", { id }),
   openRow: (key: string) => invoke<void>("open_row", { key }),
   openTicket: (key: string) => invoke<void>("open_ticket", { key }),
   copyRow: (key: string) => invoke<void>("copy_row", { key }),

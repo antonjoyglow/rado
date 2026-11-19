@@ -134,6 +134,21 @@ export function rowFacts(item: ReviewItem): RowFact[] {
   return facts.filter((f): f is RowFact => Boolean(f));
 }
 
+export interface DraftMarker {
+  title: string;
+  /** Only a linked draft can be opened. */
+  linked: boolean;
+}
+
+/** The hover text for a PR's "Draft ready" marker, which names where the draft opens. */
+export function draftMarker(m: Member): DraftMarker | null {
+  if (!m.agentDraft) return null;
+  const { host } = m.agentDraft;
+  return host
+    ? { title: `Open the agent's draft review of ${prLabel(m)} (${host})`, linked: true }
+    : { title: `An agent drafted a review of ${prLabel(m)} at its latest commit; Rado has no link to it`, linked: false };
+}
+
 /** Hover text for a row's details: one line per PR with its exact opened and, when known, last-activity times. */
 export function datesTooltip(members: Member[], format: (iso: string) => string): string {
   return members

@@ -347,6 +347,13 @@ fn open_pr(app: AppHandle, id: i64) -> Result<(), String> {
     open_links(&app, vec![url.ok_or("Unknown pull request")?])
 }
 
+/// Opens the agent's draft for a PR. The link comes from the session, never from the window.
+#[tauri::command]
+fn open_draft(app: AppHandle, id: i64) -> Result<(), String> {
+    let url = read(&app, |s| s.draft_url(id))?;
+    open_links(&app, vec![url])
+}
+
 #[tauri::command]
 fn open_row(app: AppHandle, key: String) -> Result<(), String> {
     let row = read(&app, |s| s.row(&key))?;
@@ -598,6 +605,7 @@ pub fn run() {
             open_list,
             hide_list,
             open_pr,
+            open_draft,
             open_row,
             open_ticket,
             copy_row,

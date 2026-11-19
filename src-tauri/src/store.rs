@@ -464,6 +464,16 @@ impl Store {
         self.write_in(id, queue::QUEUE_FILE, queue)
     }
 
+    /// The PRs `rado-mcp` marked drafted at the commit `commits` gives them, with the draft's link. Read only: a
+    /// missing or damaged file means no marker, and the server reports the damage to the agent.
+    pub fn agent_drafts(&self, id: &str, commits: &HashMap<i64, String>) -> HashMap<i64, Option<String>> {
+        let dir = self.workspace_dir(id);
+        // Marks before links: rado-mcp writes links first, so a new mark is never read with an old link.
+        let drafts = queue::read_json(&dir.join(queue::DRAFTS_FILE)).unwrap_or_default();
+        let links = queue::read_json(&dir.join(queue::DRAFT_LINKS_FILE)).unwrap_or_default();
+        queue::agent_drafts(commits, &drafts, &links)
+    }
+
     /// The PAT, `None` when none is saved, or the error when Credential Manager couldn't be read.
     pub fn read_pat(&self, id: &str) -> Result<Option<String>, String> {
         self.secrets.read(&workspace::pat_key(id))
