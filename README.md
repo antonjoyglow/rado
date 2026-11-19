@@ -9,9 +9,9 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 1. **Install.** Download `Rado_<version>_x64-setup.exe` from the [latest release](https://github.com/antonjoyglow/rado/releases/latest) and run it. It installs for your user only. The installer isn't code-signed, so Windows SmartScreen may warn you; choose **More info → Run anyway**.
 2. **Create a token** for each source you use:
    - **Azure DevOps PAT:** **Code (Read)** is the only scope it needs.
-   - **GitHub token:** a classic token with `repo` (to read private repos) and `read:org` (to see review requests to your teams). A fine-grained token with *Pull requests: Read* and *Metadata: Read* on your orgs should also work, but some orgs must approve it first.
+   - **GitHub token:** a classic token with `repo` (to read private repos) and `read:org` (to see review requests to your teams). A fine-grained token with *Pull requests: Read* and *Metadata: Read* on your orgs may work instead (some orgs must approve it first).
 3. **Fill in your workspace.** The counter shows `!` beside Rado's bird until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
-   - Azure DevOps: paste the PAT (it saves on Enter, on **Save**, or when you leave the field), then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`; pasting a `dev.azure.com` or `yourorg.visualstudio.com` link works too) and, if your teams get review requests, **My teams** (comma-separated).
+   - Azure DevOps: paste the PAT (it saves on Enter or when you leave the field), then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`; pasting a `dev.azure.com` or `yourorg.visualstudio.com` link works too) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token the same way. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
    Tokens go to Windows Credential Manager; **Remove…** beside a saved one deletes it and turns that source off. Other fields save when you leave them.
@@ -25,7 +25,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
 
    That is for cmd; in PowerShell, write the path as `"$env:LOCALAPPDATA\Rado\rado-mcp.exe"`.
 
-Not verified yet: the SmartScreen prompt on a machine that has never run Rado, and a fine-grained GitHub token.
+Not verified yet: the SmartScreen prompt on a fresh download, and a fine-grained GitHub token.
 
 ## Walkthrough
 
@@ -80,7 +80,7 @@ Not verified yet: the SmartScreen prompt on a machine that has never run Rado, a
 - It opens against the screen edge on the counter's side (left or right), level with the counter and kept on screen, on the counter's screen. The counter is hidden while the list is open and comes back when it closes: ✕, **Esc**, or a click anywhere else.
 - *List width* (20–100% of the screen, chips for 25%, 33%, Half and Full; never under 360 px) and *List height* (25–100%, chips for Half and Full) are in **Settings → General**. The default is 33% wide and half the screen high. Pixel sizes saved by 0.9.0 are dropped for these defaults.
 - **New version:** Rado asks GitHub for its latest release at start and every 6 hours. When it is newer, the status line under the title reads *Rado x.y.z is available · Download*, and **Download** opens the release's installer in your default browser. Run it to update; Rado itself downloads and installs nothing. Offline or rate-limited checks stay silent.
-- Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. When you have no reviews at all, the empty *Review* tab says Rado lists only PRs where you or your teams are reviewers, and, with a GitHub token, links to **Watched repos**. Arrow keys, Home and End move between tabs.
+- Tabs: *Review* (needs your review), *Re-review* (new pushes since your vote), *Mine* (your PRs), *Author* (waiting on author), *Approved* (by you or your team), *Quiet* (no activity for 3 weeks) and *Hidden* (Not mine or hidden). All seven always show, each with its count; empty ones are muted. Once every source has answered with no reviews, the empty *Review* tab says Rado lists PRs where you or your teams are reviewers, and, with a GitHub token, links to **Watched repos**. Arrow keys, Home and End move between tabs.
 - The list reopens on the tab you last chose. Before you choose one, it opens the first of *Review*, *Re-review* and *Mine* that had rows at start. Each tab keeps its scroll position.
 - *Mine* is grouped by branch, newest first. You get a notification when one of your PRs starts needing you.
 - **Review next:** the top-ranked review's details start with *Review next*, its row gets a tint and an accent bar, and its tab gets a dot. Rows you opened since Rado started move behind the others; once you've opened them all, it marks the one you opened longest ago.
@@ -114,7 +114,8 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 ### Sources
 
 - Azure DevOps and GitHub (github.com) are polled at the same time. A source is on once its token is saved. If one fails, its PRs from the last good poll stay listed and the status line names it.
-- A failing source waits before it is asked again: one poll interval, doubled for each failure in a row, up to an hour (3, 6, 12, 24, 48, then 60 minutes at the default 3). From the second failure the status line adds *· next try 14:12*. A rate limit waits until the time Azure DevOps or GitHub names, and at least one interval; the status line reads *rate limited until 14:05*. Refreshing retries a waiting source at once, unless it is rate-limited. A good poll, a token save or removal, or a change to the source's settings ends the wait.
+- A failing source waits before its next try: 3, 6, 12, 24, 48, then 60 minutes at the default 3-minute interval (it doubles from one interval, up to an hour or one interval if that is longer). From the second failure the status line adds *· next try 14:12*.
+- When Azure DevOps or GitHub rate-limits Rado and names a time, the source waits until then; the status line reads *rate limited until 14:05*. Refreshing retries a waiting source at once, unless it is rate-limited. A good poll, a token save or removal, or a change to the source's settings ends the wait.
 - A source's first good poll (new token, or after failing since start) records its reviews without notifying. A poll that was running when you switched workspaces, saved a token or changed the organization or teams is discarded.
 - **Azure DevOps:** every active PR in the organization comes from one paged call. Rado keeps those where you, or one of **My teams**, is a reviewer. Teams match by name (`TeamAlpha` matches `[contoso]\TeamAlpha`). On a team-only PR, the team's vote decides the section. Your own open PRs go under *Mine*; PRs you declined are skipped. One extra call per listed PR fetches its threads and last activity; if it fails, the row shows no comments or activity.
 - **GitHub:** one GraphQL call per poll searches every repo the token can see: reviews requested from you or your teams, open PRs you reviewed, and your own open PRs.
@@ -184,13 +185,13 @@ The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads t
 
 ## Releasing
 
-Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: npm test, npm run build, cargo test, a check that `src/bindings` matches the Rust types (cargo test regenerates it; commit the result), and clippy.
+Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: tests, build, clippy, and a check that `src/bindings` matches the Rust types (run `cargo test` and commit the result, deletions included).
 
 1. Cut the release branch from main: `git fetch origin && git switch -c release/0.11.0 origin/main && git push -u origin release/0.11.0`.
-2. Feature PRs target it (`gh pr create --base release/0.11.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog. For a single-commit PR, GitHub uses the commit's subject instead of the PR title, so give the commit the same conventional title.
-3. To release, on the release branch run `npm run release -- 0.11.0` (`--dry-run` prints the section first). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`, and writes a dated `## [0.11.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
+2. Feature PRs target it (`gh pr create --base release/0.11.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog; the squash subject is the PR title.
+3. To release, on the release branch run `npm run release -- 0.11.0` (`--dry-run` prints the section and changes nothing). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` and `browser-extension/manifest.json`, and writes a dated `## [0.11.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
 4. Edit the section, commit, and open the release PR from `release/0.11.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
-5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.11.0 origin/main && git push origin v0.11.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing.
+5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.11.0 origin/main && git push origin v0.11.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing or empty.
 6. Cut the next release branch from main after tagging (`release/0.12.0`). A patch release also starts from main (`release/0.11.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again.
 
 ## License
