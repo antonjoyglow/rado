@@ -213,10 +213,7 @@ impl Session {
         let tracker = self.settings.active().map(|w| &w.tracker).unwrap_or(&Tracker::None);
         let mut rows = group::group(&self.ws.items, &self.ws.related, &self.ws.urls, tracker);
         for member in rows.iter_mut().flat_map(|r| &mut r.members) {
-            member.agent_draft = self.ws.agent_drafts.get(&member.id).map(|url| match url {
-                Some(_) => group::AgentDraft::Linked,
-                None => group::AgentDraft::Unlinked,
-            });
+            member.agent_draft = self.ws.agent_drafts.get(&member.id).map(|url| group::AgentDraft { host: url.as_deref().map(|u| queue::url_authority(u).to_string()) });
         }
         rows
     }
@@ -787,7 +784,7 @@ mod tests {
     }
 
     fn agent_draft(s: &Session, id: i64) -> Option<group::AgentDraft> {
-        s.rows().iter().flat_map(|r| &r.members).find(|m| m.id == id).expect("listed").agent_draft
+        s.rows().iter().flat_map(|r| &r.members).find(|m| m.id == id).expect("listed").agent_draft.clone()
     }
 
     #[test]
@@ -800,7 +797,7 @@ mod tests {
         poll(&mut s, &[1, 2, 3]);
 
         let drafts: Vec<_> = [1, 2, 3].iter().map(|id| agent_draft(&s, *id)).collect();
-        assert_eq!(drafts, [Some(group::AgentDraft::Linked), Some(group::AgentDraft::Unlinked), None]);
+        assert_eq!(drafts, [Some(group::AgentDraft { host: Some("d".into()) }), Some(group::AgentDraft { host: None }), None]);
         assert_eq!(s.draft_url(1), Ok("https://d/1".into()));
         assert!(s.draft_url(2).is_err() && s.draft_url(3).is_err());
     }
@@ -810,7 +807,7 @@ mod tests {
         let Fixture { mut s, dir, .. } = two_workspaces("agent-drafts-failed");
         agent_files(&dir, &[(5, "sha1")], &[(5, "sha1", "https://d/5")]);
         file(&mut s, ado(vec![ado_pr(5, "feature/x", Some(0))]), github(&[7]));
-        assert_eq!(agent_draft(&s, 5), Some(group::AgentDraft::Linked));
+        assert_eq!(agent_draft(&s, 5), Some(group::AgentDraft { host: Some("d".into()) }));
 
         file(&mut s, Poll::Failed("Azure DevOps: HTTP 503".into()), github(&[7]));
 

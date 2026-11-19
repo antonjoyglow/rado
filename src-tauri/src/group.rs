@@ -26,13 +26,11 @@ pub struct Member {
 }
 
 /// A review draft an agent marked through `rado-mcp` at the PR's head commit.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-pub enum AgentDraft {
-    /// `open_draft` opens its link.
-    Linked,
-    /// Marked without a link.
-    Unlinked,
+pub struct AgentDraft {
+    /// Where `open_draft` goes, shown before it opens; `None` when Rado has no link to the draft.
+    pub host: Option<String>,
 }
 
 /// An active PR on the same source branch as one of mine, where I am not a reviewer.

@@ -3,4 +3,8 @@
 /**
  * A review draft an agent marked through `rado-mcp` at the PR's head commit.
  */
-export type AgentDraft = "linked" | "unlinked";
+export type AgentDraft = { 
+/**
+ * Where `open_draft` goes, shown before it opens; `None` when Rado has no link to the draft.
+ */
+host: string | null, };

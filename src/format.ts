@@ -135,23 +135,18 @@ export function rowFacts(item: ReviewItem): RowFact[] {
 }
 
 export interface DraftMarker {
-  text: string;
   title: string;
   /** Only a linked draft can be opened. */
   linked: boolean;
 }
 
-/** The marker for a PR an agent drafted a review of; it names the PR only when the row holds several. */
-export function draftMarker(m: Member, aggregate: boolean): DraftMarker | null {
+/** The hover text for a PR's "Draft ready" marker, which names where the draft opens. */
+export function draftMarker(m: Member): DraftMarker | null {
   if (!m.agentDraft) return null;
-  const linked = m.agentDraft === "linked";
-  return {
-    text: aggregate ? `Draft ready ${prLabel(m)}` : "Draft ready",
-    title: linked
-      ? `Open the agent's draft review of ${prLabel(m)}`
-      : `An agent drafted a review of ${prLabel(m)} at its latest commit but recorded no link to it`,
-    linked,
-  };
+  const { host } = m.agentDraft;
+  return host
+    ? { title: `Open the agent's draft review of ${prLabel(m)} (${host})`, linked: true }
+    : { title: `An agent drafted a review of ${prLabel(m)} at its latest commit; Rado has no link to it`, linked: false };
 }
 
 /** Hover text for a row's details: one line per PR with its exact opened and, when known, last-activity times. */

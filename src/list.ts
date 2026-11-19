@@ -1,4 +1,4 @@
-import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, datesTooltip, draftMarker, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
@@ -275,7 +275,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   });
   if (isNext) facts.unshift(h("span", { class: "next-label" }, "Review next"));
   const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" ", f]));
-  const members = item.members.map((m) => h("button", {
+  const members = item.members.flatMap((m) => [h("button", {
       class: "member",
       type: "button",
       title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
@@ -285,22 +285,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         opened(item.key);
         void api.openPr(m.id);
       },
-    }, prLabel(m)));
-  const drafts = item.members.flatMap((m) => {
-    const marker = draftMarker(m, aggregate);
-    if (!marker) return [];
-    if (!marker.linked) return [h("span", { class: "agent-draft", title: marker.title }, marker.text)];
-    const open: HTMLButtonElement = h("button", {
-      class: "member agent-draft",
-      type: "button",
-      title: marker.title,
-      onclick: (e: MouseEvent) => {
-        e.stopPropagation();
-        api.openDraft(m.id).catch(() => flash(open, "Gone, refresh"));
-      },
-    }, marker.text);
-    return [open];
-  });
+    }, prLabel(m)), draftChip(m)]);
   const ticket = item.ticket && h("button", {
     class: "member",
     type: "button",
@@ -335,7 +320,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         title: aggregate ? `Open all ${item.members.length} PRs` : `Open ${prLabel(item)}`,
       }, item.title),
       h("span", { class: "meta", title: datesTooltip(item.members, (iso) => DATE_FORMAT.format(new Date(iso))) }, ...meta),
-      h("span", { class: "members" }, ticket, ...members, ...drafts),
+      h("span", { class: "members" }, ticket, ...members),
     ),
     h("div", { class: "side" },
       ageCell(item),
@@ -351,6 +336,23 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
       ),
     ),
   );
+}
+
+/** "Draft ready" beside the PR's chip: a button when the draft has a link, plain text when it has none. */
+function draftChip(m: Member): HTMLElement | null {
+  const marker = draftMarker(m);
+  if (!marker) return null;
+  if (!marker.linked) return h("span", { class: "agent-draft", title: marker.title }, "Draft ready");
+  const open: HTMLButtonElement = h("button", {
+    class: "member agent-draft",
+    type: "button",
+    title: marker.title,
+    onclick: (e: MouseEvent) => {
+      e.stopPropagation();
+      api.openDraft(m.id).catch(() => flash(open, "Failed"));
+    },
+  }, "Draft ready");
+  return open;
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });

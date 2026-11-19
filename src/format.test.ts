@@ -131,18 +131,16 @@ const member = (over: Partial<Member>): Member => ({
 });
 
 describe("draftMarker", () => {
-  it("isNull_withoutADraft", () => expect(draftMarker(member({}), false)).toBeNull());
+  it("isNull_withoutADraft", () => expect(draftMarker(member({}))).toBeNull());
 
-  it("linked_opensTheDraft_andNamesThePrOnlyInAnAggregate", () => {
-    expect(draftMarker(member({ agentDraft: "linked" }), false)).toEqual({ text: "Draft ready", title: "Open the agent's draft review of WebApp !1", linked: true });
-    expect(draftMarker(member({ agentDraft: "linked" }), true)?.text).toBe("Draft ready WebApp !1");
-  });
+  it("linked_namesWhereTheDraftOpens", () =>
+    expect(draftMarker(member({ agentDraft: { host: "github.com" } }))).toEqual({ title: "Open the agent's draft review of WebApp !1 (github.com)", linked: true }));
 
-  it("unlinked_saysThereIsNoLink", () => {
-    const marker = draftMarker(member({ agentDraft: "unlinked" }), false);
-    expect(marker?.linked).toBe(false);
-    expect(marker?.title).toContain("no link");
-  });
+  it("withoutALink_saysRadoHasNone", () =>
+    expect(draftMarker(member({ agentDraft: { host: null } }))).toEqual({
+      title: "An agent drafted a review of WebApp !1 at its latest commit; Rado has no link to it",
+      linked: false,
+    }));
 });
 
 describe("rowFacts", () => {

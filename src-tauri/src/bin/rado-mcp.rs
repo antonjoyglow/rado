@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLinks, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
+use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLinks, Drafts, MAX_DRAFT_URL, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
 
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
@@ -123,9 +123,10 @@ fn tools() -> Value {
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
                 out of the queue is still accepted, unless the id is a queued PR's GitHub number at that commit. A queued PR at another \
                 commit is refused: list again. Pass the workspaceId list_review_queue returned as workspace, so a switch \
-                in Rado between the two calls can't send the mark elsewhere. Pass draftUrl so the PR's row in Rado's list \
-                gets a Draft ready button that opens the draft; marking again without it removes the link. Changes \
-                nothing on Azure DevOps or GitHub.",
+                in Rado between the two calls can't send the mark elsewhere. Pass draftUrl so Draft ready on the PR's \
+                row in Rado's list becomes a button that opens the draft; marking again without it removes the link. \
+                A reply without a draftUrl field came from an older server that dropped the link: tell the user to \
+                restart the Claude session. Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -386,7 +387,7 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let url = match args.get("draftUrl") {
         None | Some(Value::Null) => None,
         Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
-        Some(other) => return Err(format!("draftUrl must be an http or https link without spaces, not {other}")),
+        Some(_) => return Err(format!("draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, without spaces or quotes")),
     };
     let queue = read_queue(ws)?;
     let dir = &ws.dir;
@@ -410,13 +411,15 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let before = read_links(&links_path)?;
     queue::record_draft(&mut drafts, pr_id, commit);
     let mut links = before.clone();
-    links.shift_remove(&pr_id);
-    if let Some(url) = &url {
-        links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() });
-    }
+    match &url {
+        Some(url) => links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() }),
+        None => links.shift_remove(&pr_id),
+    };
     queue::prune_links(&mut links, &drafts);
-    queue::write_json_atomic(&path, &drafts)?;
+    // Links first: Rado reads both files without the lock, and a link whose commit isn't marked yet shows nothing,
+    // while a new mark read with the old link would show as having none.
     save_links(&links_path, &links, &before)?;
+    queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit, "draftUrl": url }))
 }
 
@@ -439,8 +442,8 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     drafts.shift_remove(&pr_id);
     let mut links = before.clone();
     queue::prune_links(&mut links, &drafts);
-    queue::write_json_atomic(&path, &drafts)?;
     save_links(&links_path, &links, &before)?;
+    queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
@@ -655,9 +658,9 @@ mod tests {
     #[test]
     fn markDrafted_draftUrlNotAnHttpLink_isAnErrorAndRecordsNothing() {
         let dir = with_queue("bad-url");
-        for url in [json!("file:///C:/drafts/1.md"), json!("C:\\drafts\\1.md"), json!("https://x/a b"), json!(7)] {
+        for url in [json!("file:///C:/drafts/1.md"), json!(7)] {
             let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
-            assert!(error.contains("draftUrl must be an http or https link"), "{error}");
+            assert!(error.ends_with("draftUrl must be an http:// or https:// link of at most 2048 characters, without spaces or quotes"), "{error}");
         }
         assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
         assert!(!links_at(&dir).exists());

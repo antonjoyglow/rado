@@ -17,7 +17,7 @@ pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
 pub const DRAFT_LINKS_FILE: &str = "agent-draft-links.json";
 /// The drafts file keeps the newest marks only, so it stays small.
 pub const MAX_DRAFTS: usize = 500;
-const MAX_DRAFT_URL: usize = 2048;
+pub const MAX_DRAFT_URL: usize = 2048;
 pub const SETTINGS_FILE: &str = "settings.json";
 /// The queue file's schema. Bump it only for a change an older `rado-mcp` would misread: readers ignore fields they
 /// don't know, so an added field needs no bump.
@@ -157,10 +157,16 @@ pub struct DraftLink {
     pub url: String,
 }
 
-/// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file.
+/// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file. A
+/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags.
 pub fn is_draft_url(url: &str) -> bool {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
-    rest.is_some_and(|rest| !rest.is_empty()) && url.len() <= MAX_DRAFT_URL && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+    !url_authority(url).is_empty() && url.len() <= MAX_DRAFT_URL && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
+}
+
+/// The part between `http(s)://` and the path, shown before a draft opens; empty when it isn't an http link.
+pub fn url_authority(url: &str) -> &str {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or_default();
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
 }
 
 /// Keeps the links whose PR is still marked at the link's commit, which also bounds them by `MAX_DRAFTS`.
@@ -346,9 +352,17 @@ pub(crate) mod tests {
             assert!(is_draft_url(good), "{good}");
         }
         let long = format!("https://x/{}", "a".repeat(MAX_DRAFT_URL));
-        for bad in ["https://", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\n", "HTTPS://x", &long] {
+        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "HTTPS://x", &long] {
             assert!(!is_draft_url(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn urlAuthority_isWhatComesBeforeThePath() {
+        assert_eq!(url_authority("https://github.com/o/r/pull/1"), "github.com");
+        assert_eq!(url_authority("http://localhost:8080?x"), "localhost:8080");
+        assert_eq!(url_authority("https://github.com@evil.example/x"), "github.com@evil.example", "a disguised host stays visible");
+        assert_eq!(url_authority("file:///x"), "");
     }
 
     #[test]
