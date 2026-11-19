@@ -140,23 +140,24 @@ fn tools() -> Value {
 }
 
 fn workspace_argument() -> Value {
-    json!({ "type": "string", "description": "A workspace's name or id; the one active in Rado when left out. Rado polls only the active workspace." })
+    json!({
+        "type": "string",
+        "description": "A workspace's name or id; the one active in Rado when left out. Pass it in a scheduled run, so \
+            a switch in Rado doesn't change which queue it reviews. Rado polls only the active workspace.",
+    })
 }
 
-/// Replies with a JSON object, which `call` adds the workspace to.
-type Tool = fn(&Workspace, DateTime<Utc>, &Value) -> Result<Value, String>;
-
 /// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead. Every
-/// reply names the workspace it used, once that is known.
+/// reply names the workspace it used, once that is known; tools reply with a JSON object for that.
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
-    let tool: Tool = match params["name"].as_str() {
-        Some("list_review_queue") => |ws, now, _| list(ws, now),
-        Some("mark_drafted") => |ws, _, args| mark_drafted(ws, args),
-        other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
-    };
+    let name = params["name"].as_str().unwrap_or_default();
+    if !matches!(name, "list_review_queue" | "mark_drafted") {
+        return Err(format!("Unknown tool: {name}"));
+    }
     let args = &params["arguments"];
     let outcome = workspace(root, args.get("workspace")).and_then(|ws| {
-        tool(&ws, now, args)
+        let reply = if name == "list_review_queue" { list(&ws, now) } else { mark_drafted(&ws, args) };
+        reply
             .map(|mut reply| {
                 if let Some(fields) = reply.as_object_mut() {
                     fields.insert("workspace".into(), json!(ws.name));
@@ -189,7 +190,7 @@ struct Workspace {
 }
 
 impl Workspace {
-    /// What to do about a missing or old queue: `if_active`, since only the active workspace is polled.
+    /// What to do about a missing, damaged or old queue: `if_active`, since only the active workspace is polled.
     fn poll_advice(&self, if_active: &str) -> String {
         if self.active {
             if_active.into()
@@ -219,16 +220,16 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
     let no_workspace = || format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display());
     let requested = match requested {
         None | Some(Value::Null) => return all.into_iter().find(|w| w.active).ok_or_else(no_workspace),
-        Some(Value::String(requested)) => requested,
+        Some(Value::String(requested)) => requested.trim(),
         Some(other) => return Err(format!("workspace must be a workspace's name or id, not {other}")),
     };
     if all.is_empty() {
         return Err(no_workspace());
     }
-    if let Some(ws) = all.iter().find(|w| w.id == *requested) {
+    if let Some(ws) = all.iter().find(|w| w.id == requested) {
         return Ok(ws.clone());
     }
-    let key = requested.trim().to_lowercase();
+    let key = requested.to_lowercase();
     let named: Vec<&Workspace> = all.iter().filter(|w| w.name.trim().to_lowercase() == key).collect();
     let listed = |workspaces: &[&Workspace]| workspaces.iter().map(|w| format!("{} (id {})", w.name, w.id)).collect::<Vec<_>>().join(", ");
     match named[..] {
@@ -241,7 +242,7 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
 /// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
 fn read_queue(ws: &Workspace) -> Result<Queue, String> {
     let path = ws.dir.join(QUEUE_FILE);
-    let rewrite = |e| advise(e, "Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running.");
+    let rewrite = |e| advise(e, &ws.poll_advice("Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running."));
     let file: Value = queue::read_json_file(&path)
         .map_err(rewrite)?
         .ok_or_else(|| {
@@ -685,7 +686,7 @@ mod tests {
         let (root, a, b) = two_workspaces("pick");
         settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
 
-        for requested in ["b2", "Beta", " beta "] {
+        for requested in ["b2", " b2 ", "Beta", " beta "] {
             let body = text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
             assert_eq!((&body["workspace"], &body["workspaceId"]), (&json!("Beta"), &json!("b2")), "{requested}");
             assert_eq!(body["branches"][0]["prs"][0]["prId"], 2);
@@ -734,6 +735,10 @@ mod tests {
 
         let stale = error_text(&call_tool(&root.0, at(31), "list_review_queue", json!({ "workspace": "Beta" })));
         assert!(stale.starts_with("Workspace Beta (id b2): Rado's review queue is 31 minutes old") && stale.ends_with(switch), "{stale}");
+
+        std::fs::write(b.join(QUEUE_FILE), "{").unwrap();
+        let damaged = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(damaged.contains("is not valid") && damaged.ends_with(switch), "{damaged}");
 
         std::fs::remove_file(b.join(QUEUE_FILE)).unwrap();
         let missing = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
