@@ -825,6 +825,17 @@ mod tests {
         assert_eq!((agent_draft(&s, 1), s.ws.error.as_deref()), (None, None));
     }
 
+    #[test]
+    fn agentDrafts_damagedLinksFile_showsTheMarksWithoutLinks() {
+        let Fixture { mut s, dir, .. } = two_workspaces("agent-links-damaged");
+        agent_files(&dir, &[(1, "head")], &[]);
+        std::fs::write(queue::workspace_dir(&dir.0, "a").join(queue::DRAFT_LINKS_FILE), "[").unwrap();
+
+        poll(&mut s, &[1]);
+
+        assert_eq!(agent_draft(&s, 1), Some(group::AgentDraft { host: None }));
+    }
+
     // Saving and removing secrets.
 
     #[test]

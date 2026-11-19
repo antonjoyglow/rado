@@ -222,7 +222,7 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 }
 .row .member[data-assigned="false"] { border-style: dashed; color: var(--muted); }
 .row .member:hover { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
-.row .member.agent-draft { border-color: var(--accent); color: var(--accent); }
+.row .member.agent-draft:not(:hover) { border-color: var(--accent); color: var(--accent); }
 .row span.agent-draft { padding: 0 6px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .row .dot { width: 8px; height: 8px; margin-top: calc(6px * var(--text-scale, 1)); border-radius: 50%; background: var(--low); }
 .row[data-tier="urgent"] .dot { background: var(--urgent); }

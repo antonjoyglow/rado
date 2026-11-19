@@ -125,8 +125,7 @@ fn tools() -> Value {
                 commit is refused: list again. Pass the workspaceId list_review_queue returned as workspace, so a switch \
                 in Rado between the two calls can't send the mark elsewhere. Pass draftUrl so Draft ready on the PR's \
                 row in Rado's list becomes a button that opens the draft; marking again without it removes the link. \
-                A reply without a draftUrl field came from an older server that dropped the link: tell the user to \
-                restart the Claude session. Changes nothing on Azure DevOps or GitHub.",
+                Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -134,7 +133,9 @@ fn tools() -> Value {
                     "commit": { "type": "string", "description": "The sourceCommit the draft reviewed." },
                     "draftUrl": {
                         "type": "string",
-                        "description": "An http or https link where the user can read the draft: its summary, risks and suggested comments.",
+                        "description": "An http:// or https:// link where the user can read the draft: its summary, risks and \
+                            suggested comments. At most 2048 characters; percent-encode spaces, quotes and backslashes, \
+                            and put no user name or @ before the host.",
                     },
                     "workspace": workspace_argument(),
                 },
@@ -370,16 +371,25 @@ fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
     Ok((pr_id, commit))
 }
 
-/// Like `read_drafts`: replacing a damaged file would drop every link in it.
-fn read_links(path: &Path) -> Result<DraftLinks, String> {
-    queue::read_json_file(path)
-        .map(Option::unwrap_or_default)
-        .map_err(|e| advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links."))
+/// The links, or None when the file can't be used and no link is being written. A damaged file is never replaced, as
+/// that would drop every link in it; but Rado's list ignores it, so it blocks only a call that must write a link,
+/// rather than have the agent draft a PR again because its mark was refused.
+fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, String> {
+    match queue::read_json_file(path) {
+        Ok(links) => Ok(Some(links.unwrap_or_default())),
+        Err(e) if writing_a_link => Err(advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links.")),
+        Err(_) => Ok(None),
+    }
 }
 
-/// Writes the links only when they changed, so an agent that never passes `draftUrl` never creates the file.
-fn save_links(path: &Path, links: &DraftLinks, before: &DraftLinks) -> Result<(), String> {
-    if links == before { Ok(()) } else { queue::write_json_atomic(path, links) }
+/// Applies `change`, keeps only links whose mark still matches, and writes the file only when it changed, so an agent
+/// that never passes `draftUrl` never creates it.
+fn update_links(path: &Path, read: Option<DraftLinks>, drafts: &Drafts, change: impl FnOnce(&mut DraftLinks)) -> Result<(), String> {
+    let Some(before) = read else { return Ok(()) };
+    let mut links = before.clone();
+    change(&mut links);
+    queue::prune_links(&mut links, drafts);
+    if links == before { Ok(()) } else { queue::write_json_atomic(path, &links) }
 }
 
 fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
@@ -387,7 +397,9 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let url = match args.get("draftUrl") {
         None | Some(Value::Null) => None,
         Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
-        Some(_) => return Err(format!("draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, without spaces or quotes")),
+        Some(_) => return Err(format!(
+            "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, without spaces, quotes, backslashes or an @ before the host"
+        )),
     };
     let queue = read_queue(ws)?;
     let dir = &ws.dir;
@@ -408,17 +420,16 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let _lock = lock_drafts(dir)?;
     let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
     let mut drafts = read_drafts(&path)?;
-    let before = read_links(&links_path)?;
+    let links = read_links(&links_path, url.is_some())?;
     queue::record_draft(&mut drafts, pr_id, commit);
-    let mut links = before.clone();
-    match &url {
-        Some(url) => links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() }),
-        None => links.shift_remove(&pr_id),
-    };
-    queue::prune_links(&mut links, &drafts);
     // Links first: Rado reads both files without the lock, and a link whose commit isn't marked yet shows nothing,
     // while a new mark read with the old link would show as having none.
-    save_links(&links_path, &links, &before)?;
+    update_links(&links_path, links, &drafts, |links| {
+        match &url {
+            Some(url) => links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() }),
+            None => links.shift_remove(&pr_id),
+        };
+    })?;
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit, "draftUrl": url }))
 }
@@ -435,15 +446,14 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let _lock = lock_drafts(&ws.dir)?;
     let links_path = ws.dir.join(DRAFT_LINKS_FILE);
     let mut drafts = read_drafts(&path)?;
-    let before = read_links(&links_path)?;
+    let links = read_links(&links_path, false)?;
     if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
         return Err(unmarked());
     }
     drafts.shift_remove(&pr_id);
-    let mut links = before.clone();
-    queue::prune_links(&mut links, &drafts);
-    save_links(&links_path, &links, &before)?;
+    // Marks first: until the link goes, it can't show, since its mark is gone.
     queue::write_json_atomic(&path, &drafts)?;
+    update_links(&links_path, links, &drafts, |_| {})?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
@@ -660,7 +670,7 @@ mod tests {
         let dir = with_queue("bad-url");
         for url in [json!("file:///C:/drafts/1.md"), json!(7)] {
             let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
-            assert!(error.ends_with("draftUrl must be an http:// or https:// link of at most 2048 characters, without spaces or quotes"), "{error}");
+            assert!(error.contains("draftUrl must be an http:// or https:// link of at most 2048 characters"), "{error}");
         }
         assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
         assert!(!links_at(&dir).exists());
@@ -675,6 +685,20 @@ mod tests {
 
         assert!(error.contains("is not valid") && error.contains("Delete it"), "{error}");
         assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+        assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
+    }
+
+    #[test]
+    fn invalidLinksFile_marksWithoutALinkAndUnmarksStillWork_andTheFileIsKept() {
+        let dir = with_queue("bad-links-no-url");
+        std::fs::write(links_at(&dir), "[").unwrap();
+        let drafts = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::from([(1, "c1".to_string())]));
+        assert_eq!(call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+
+        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::new());
         assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
     }
 

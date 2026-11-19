@@ -285,7 +285,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         opened(item.key);
         void api.openPr(m.id);
       },
-    }, prLabel(m)), draftChip(m)]);
+    }, prLabel(m)), draftChip(m, item.key)]);
   const ticket = item.ticket && h("button", {
     class: "member",
     type: "button",
@@ -339,7 +339,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
 }
 
 /** "Draft ready" beside the PR's chip: a button when the draft has a link, plain text when it has none. */
-function draftChip(m: Member): HTMLElement | null {
+function draftChip(m: Member, rowKey: string): HTMLElement | null {
   const marker = draftMarker(m);
   if (!marker) return null;
   if (!marker.linked) return h("span", { class: "agent-draft", title: marker.title }, "Draft ready");
@@ -349,7 +349,11 @@ function draftChip(m: Member): HTMLElement | null {
     title: marker.title,
     onclick: (e: MouseEvent) => {
       e.stopPropagation();
-      api.openDraft(m.id).catch(() => flash(open, "Failed"));
+      opened(rowKey);
+      api.openDraft(m.id).catch((error: unknown) => {
+        open.title = `${marker.title}\nCouldn't open it: ${String(error)}`;
+        flash(open, "Failed");
+      });
     },
   }, "Draft ready");
   return open;

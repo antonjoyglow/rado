@@ -158,9 +158,14 @@ pub struct DraftLink {
 }
 
 /// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file. A
-/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags.
+/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags. No
+/// `\` or `@` either, so the host the list shows is the one the browser goes to.
 pub fn is_draft_url(url: &str) -> bool {
-    !url_authority(url).is_empty() && url.len() <= MAX_DRAFT_URL && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
+    let authority = url_authority(url);
+    !authority.is_empty()
+        && !authority.contains('@')
+        && url.chars().count() <= MAX_DRAFT_URL
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\\')
 }
 
 /// The part between `http(s)://` and the path, shown before a draft opens; empty when it isn't an http link.
@@ -352,7 +357,7 @@ pub(crate) mod tests {
             assert!(is_draft_url(good), "{good}");
         }
         let long = format!("https://x/{}", "a".repeat(MAX_DRAFT_URL));
-        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "HTTPS://x", &long] {
+        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "https://evil.example\\@github.com/x", "https://github.com@evil.example/", "HTTPS://x", &long] {
             assert!(!is_draft_url(bad), "{bad}");
         }
     }
@@ -361,7 +366,6 @@ pub(crate) mod tests {
     fn urlAuthority_isWhatComesBeforeThePath() {
         assert_eq!(url_authority("https://github.com/o/r/pull/1"), "github.com");
         assert_eq!(url_authority("http://localhost:8080?x"), "localhost:8080");
-        assert_eq!(url_authority("https://github.com@evil.example/x"), "github.com@evil.example", "a disguised host stays visible");
         assert_eq!(url_authority("file:///x"), "");
     }
 
