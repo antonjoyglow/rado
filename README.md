@@ -180,14 +180,15 @@ The agent below drafts each queued GitHub PR as a pending review on your account
    ```
    Draft reviews for the PRs Rado queues for me, in Rado workspace 1879a2c4e5f60b3d.
    1. Call list_review_queue with workspace 1879a2c4e5f60b3d. If it fails, stop and report the error.
-   2. For each PR with provider gitHub, at most 3 per run: read it with the github tools. For a reReview PR
-      with lastVotedCommit, review only the changes since that commit.
+   2. For each PR with provider gitHub, at most 3 per run: read it with pull_request_read (owner = project,
+      repo, pullNumber = number; methods get and get_diff). For a reReview PR with lastVotedCommit, focus
+      on what changed since that commit.
    3. Create a pending review with pull_request_review_write (method create, commitID = sourceCommit,
       no event). If that fails (you may already have a pending review there), skip the PR without
       marking it and report it. Add line comments with add_comment_to_pending_review (subjectType LINE),
-      and the summary and risks as one comment with subjectType FILE on the most-changed file: a pending
-      review created without an event drops its body. Never submit the review, approve, request
-      changes or comment anywhere else.
+      and the summary and risks as one comment with subjectType FILE on the most-changed file, since
+      pull_request_review_write drops body unless event is set. Never submit the review, approve,
+      request changes or comment anywhere else.
    4. Call mark_drafted with the PR's prId, commit = sourceCommit, workspace 1879a2c4e5f60b3d and
       draftUrl = the PR's url followed by /files.
    ```
@@ -203,10 +204,10 @@ The agent below drafts each queued GitHub PR as a pending review on your account
 4. Run it every hour with Task Scheduler (from cmd):
 
    ```
-   schtasks /create /tn "Rado review agent" /sc hourly /tr "%USERPROFILE%\rado-review.cmd"
+   schtasks /create /tn "Rado review agent" /sc hourly /tr "\"%USERPROFILE%\rado-review.cmd\""
    ```
 
-   Don't use the Claude desktop app's scheduled tasks for this: a program the app starts writes to its private copy of `%APPDATA%`, so Rado never sees the marks.
+   It runs while you are logged on, in a console window. GitHub allows one pending review per PR for you, so a PR whose earlier draft you haven't submitted or deleted is skipped and reported each run until you do. Don't use the Claude desktop app's scheduled tasks for this: a program the app starts writes to its private copy of `%APPDATA%`, so Rado never sees the marks.
 
 A run's `list_review_queue` reply:
 
@@ -260,7 +261,7 @@ Its `mark_drafted` reply, after which the next `list_review_queue` has no branch
 }
 ```
 
-After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens the pending review.
+After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens the PR's Files changed tab, where your pending comments show.
 
 ### Storage
 
