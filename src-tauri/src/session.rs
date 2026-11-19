@@ -114,6 +114,9 @@ pub struct Ticket {
     pub generation: u64,
     pub pat: Result<Option<String>, String>,
     pub github_token: Result<Option<String>, String>,
+    /// Approved or hidden Azure DevOps PRs whose threads are already known, by the head commit they were seen at:
+    /// their threads only matter for the row's comment count and activity, so they load again after a push.
+    pub settled: HashMap<i64, String>,
 }
 
 /// What a filed poll asks the app to show.
@@ -294,7 +297,14 @@ impl Session {
             return None;
         }
         self.polling = true;
-        Some(Ticket { workspace, generation: self.generation, pat, github_token })
+        let settled = self
+            .ws
+            .items
+            .iter()
+            .filter(|i| i.provider == Provider::Ado && (i.hidden || i.state == score::ReviewState::Approved) && i.comments.is_some())
+            .filter_map(|i| Some((i.id, self.ws.commits.get(&i.id)?.clone())))
+            .collect();
+        Some(Ticket { workspace, generation: self.generation, pat, github_token, settled })
     }
 
     /// Files a poll's result under the active workspace and saves what it changed. Nothing happens when the poll is
@@ -322,8 +332,8 @@ impl Session {
         let mut applied = Applied::default();
         let organization = self.settings.active().map(|w| w.azure_dev_ops.organization.clone()).unwrap_or_default();
         let ws = &mut self.ws;
-        let was_stale: HashSet<i64> = ws.items.iter().filter(|i| i.state == score::ReviewState::Stale).map(|i| i.id).collect();
         let (old_items, old_urls, old_commits) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls), std::mem::take(&mut ws.commits));
+        let previous: HashMap<i64, &ReviewItem> = old_items.iter().map(|i| (i.id, i)).collect();
         let mut items = Vec::new();
         let mut urls = HashMap::new();
         let mut commits = HashMap::new();
@@ -375,7 +385,7 @@ impl Session {
                     if provider == Provider::Ado {
                         applied.memory = Some(ws.memory.clone());
                     }
-                    score::attach_threads(&mut poll.items, &poll.threads, &was_stale, now);
+                    score::attach_threads(&mut poll.items, &poll.threads, &previous, now);
                     ws.related.retain(|r| r.provider != provider);
                     ws.related.extend(poll.related);
                     urls.extend(poll.urls);
@@ -958,6 +968,26 @@ mod tests {
         assert_eq!((ticket.workspace.id.as_str(), ticket.generation), ("a", s.generation));
         assert_eq!((ticket.pat, ticket.github_token), (Ok(None), Ok(Some("gh-a".into()))));
         assert!(s.polling);
+    }
+
+    #[test]
+    fn beginPoll_settlesApprovedAndHiddenAdoPrsWithKnownThreads_andTheirRowsKeepThem() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("settled");
+        let known = score::PrThreads { comments: score::CommentStats { total: 3, open_threads: 1 }, last_activity: None };
+        // 1 approved, 2 waiting on me, 3 hidden, 4 approved with threads that failed to load.
+        let prs = vec![ado_pr(1, "b1", Some(10)), ado_pr(2, "b2", Some(0)), ado_pr(3, "b3", Some(0)), ado_pr(4, "b4", Some(10))];
+        let Poll::Fresh(mut fetched) = ado(prs) else { unreachable!() };
+        fetched.threads = HashMap::from([(1, known), (2, known), (3, known)]);
+        s.ws.hidden.insert(3);
+        file(&mut s, Poll::Fresh(fetched), Poll::Off);
+
+        let ticket = s.begin_poll().expect("a ticket");
+        assert_eq!(ticket.settled, HashMap::from([(1, "sha1".to_string()), (3, "sha1".to_string())]));
+
+        let prs = vec![ado_pr(1, "b1", Some(10)), ado_pr(2, "b2", Some(0)), ado_pr(3, "b3", Some(0)), ado_pr(4, "b4", Some(10))];
+        file(&mut s, ado(prs), Poll::Off);
+        let comments: HashMap<i64, Option<score::CommentStats>> = s.ws.items.iter().map(|i| (i.id, i.comments)).collect();
+        assert_eq!(comments, HashMap::from([(1, Some(known.comments)), (2, Some(known.comments)), (3, Some(known.comments)), (4, None)]));
     }
 
     // Saving a workspace.

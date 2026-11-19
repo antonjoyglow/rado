@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -92,16 +92,22 @@ pub fn activity_after(at: DateTime<Utc>, created: DateTime<Utc>) -> Option<DateT
 }
 
 /// Adds comment counts and last activity, moves quiet reviews to `Stale`, then promotes my own PRs that
-/// need work: they count toward {n} and score above my other PRs. `was_stale` holds the previous poll's
-/// `Stale` ids: a PR whose threads failed to load keeps that verdict.
-pub fn attach_threads(items: &mut [ReviewItem], threads: &HashMap<i64, PrThreads>, was_stale: &HashSet<i64>, now: DateTime<Utc>) {
+/// need work: they count toward {n} and score above my other PRs. A PR whose threads weren't loaded this poll
+/// (skipped, or failed) keeps the comments, last activity and `Stale` verdict of its item in `previous`.
+pub fn attach_threads(items: &mut [ReviewItem], threads: &HashMap<i64, PrThreads>, previous: &HashMap<i64, &ReviewItem>, now: DateTime<Utc>) {
     for item in items.iter_mut() {
-        let loaded = threads.get(&item.id);
-        item.comments = loaded.map(|t| t.comments);
-        item.updated_at = loaded.and_then(|t| t.last_activity).and_then(|at| activity_after(at, item.created_at));
-        let quiet = match loaded {
-            Some(_) => now - item.updated_at.unwrap_or(item.created_at) >= chrono::Duration::days(STALE_AFTER_DAYS),
-            None => was_stale.contains(&item.id),
+        let quiet = match threads.get(&item.id) {
+            Some(loaded) => {
+                item.comments = Some(loaded.comments);
+                item.updated_at = loaded.last_activity.and_then(|at| activity_after(at, item.created_at));
+                now - item.updated_at.unwrap_or(item.created_at) >= chrono::Duration::days(STALE_AFTER_DAYS)
+            }
+            None => {
+                let before = previous.get(&item.id);
+                item.comments = before.and_then(|b| b.comments);
+                item.updated_at = before.and_then(|b| b.updated_at);
+                before.is_some_and(|b| b.state == ReviewState::Stale)
+            }
         };
         if item.state.is_actionable() && quiet {
             item.state = ReviewState::Stale;
@@ -237,7 +243,7 @@ mod tests {
     #[test]
     fn attachThreads_myPrWithRejection_becomesActionable() {
         let mut items = vec![mine(1, 1)];
-        attach_threads(&mut items, &HashMap::new(), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::new(), &HashMap::new(), now());
         assert!(items[0].actionable);
         assert_eq!(items[0].tier, Tier::Normal);
     }
@@ -246,7 +252,7 @@ mod tests {
     fn attachThreads_myPrWithOpenThreads_becomesActionableAndScoresAboveMyOthers() {
         let mut items = vec![mine(1, 0), mine(2, 0)];
         let loaded = HashMap::from([(2, threads(3, 1, None)), (1, threads(5, 0, None))]);
-        attach_threads(&mut items, &loaded, &HashSet::new(), now());
+        attach_threads(&mut items, &loaded, &HashMap::new(), now());
         assert_eq!(items.iter().map(|i| (i.id, i.actionable)).collect::<Vec<_>>(), [(1, false), (2, true)]);
         assert!(items[1].score > items[0].score);
     }
@@ -254,7 +260,7 @@ mod tests {
     #[test]
     fn attachThreads_reviewItem_keepsItsOwnActionability() {
         let mut items = vec![rank_one(pr(1, vec![reviewer(ME, 10, false, false)]), &mut VoteMemory::new()).unwrap()];
-        attach_threads(&mut items, &HashMap::from([(1, threads(2, 2, None))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(2, 2, None))]), &HashMap::new(), now());
         assert!(!items[0].actionable, "open threads on someone else's PR are not my work");
     }
 
@@ -262,7 +268,7 @@ mod tests {
     fn attachThreads_lastActivity_becomesUpdatedAt() {
         let mut items = vec![mine(1, 0)];
         let pushed = now() - Duration::hours(2);
-        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(pushed)))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(pushed)))]), &HashMap::new(), now());
         assert_eq!(items[0].updated_at, Some(pushed));
     }
 
@@ -275,15 +281,15 @@ mod tests {
             (2, threads(0, 0, Some(created + Duration::seconds(7)))),
             (3, threads(0, 0, Some(created - Duration::days(1)))),
         ]);
-        attach_threads(&mut items, &loaded, &HashSet::new(), now());
+        attach_threads(&mut items, &loaded, &HashMap::new(), now());
         assert!(items.iter().all(|i| i.updated_at.is_none()));
     }
 
     #[test]
-    fn attachThreads_threadsFailedToLoad_leavesUpdatedAtUnknown() {
+    fn attachThreads_threadsNotLoadedOnAFirstSighting_leavesCommentsAndActivityUnknown() {
         let mut items = vec![mine(1, 0)];
-        attach_threads(&mut items, &HashMap::new(), &HashSet::new(), now());
-        assert_eq!(items[0].updated_at, None);
+        attach_threads(&mut items, &HashMap::new(), &HashMap::new(), now());
+        assert_eq!((items[0].comments, items[0].updated_at), (None, None));
     }
 
     fn review_opened_days_ago(days: i64) -> ReviewItem {
@@ -295,35 +301,48 @@ mod tests {
     #[test]
     fn attachThreads_reviewQuietFor21Days_isStaleAndNotActionable() {
         let mut items = vec![review_opened_days_ago(30)];
-        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(now() - Duration::days(21))))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(now() - Duration::days(21))))]), &HashMap::new(), now());
         assert_eq!((items[0].state, items[0].actionable, items[0].tier), (ReviewState::Stale, false, Tier::Low));
     }
 
     #[test]
     fn attachThreads_reviewWithNoActivitySinceOpening21DaysAgo_isStale() {
         let mut items = vec![review_opened_days_ago(21)];
-        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, None))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, None))]), &HashMap::new(), now());
         assert_eq!(items[0].state, ReviewState::Stale);
     }
 
     #[test]
     fn attachThreads_oldReviewWithRecentActivity_staysActionable() {
         let mut items = vec![review_opened_days_ago(60)];
-        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(now() - Duration::days(20))))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, Some(now() - Duration::days(20))))]), &HashMap::new(), now());
         assert_eq!((items[0].state, items[0].actionable), (ReviewState::NeedsReview, true));
     }
 
     #[test]
     fn attachThreads_quietReviewWhoseThreadsFailedToLoad_staysStale() {
         let mut items = vec![review_opened_days_ago(60)];
-        attach_threads(&mut items, &HashMap::new(), &HashSet::from([1]), now());
+        let mut before = items[0].clone();
+        before.state = ReviewState::Stale;
+        attach_threads(&mut items, &HashMap::new(), &HashMap::from([(1, &before)]), now());
         assert_eq!((items[0].state, items[0].actionable), (ReviewState::Stale, false));
+    }
+
+    #[test]
+    fn attachThreads_threadsNotLoaded_keepsThePreviousCommentsAndActivity() {
+        let mut items = vec![mine(1, 0)];
+        let mut before = items[0].clone();
+        before.comments = Some(CommentStats { total: 4, open_threads: 1 });
+        before.updated_at = Some(now() - Duration::hours(3));
+        attach_threads(&mut items, &HashMap::new(), &HashMap::from([(1, &before)]), now());
+        assert_eq!((items[0].comments, items[0].updated_at), (before.comments, before.updated_at));
+        assert!(items[0].actionable, "a carried open thread on my PR is still my work");
     }
 
     #[test]
     fn attachThreads_activeReviewWhoseThreadsFailedToLoad_staysActionable() {
         let mut items = vec![review_opened_days_ago(60)];
-        attach_threads(&mut items, &HashMap::new(), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::new(), &HashMap::new(), now());
         assert_eq!(items[0].state, ReviewState::NeedsReview);
     }
 
@@ -333,7 +352,7 @@ mod tests {
         p.created_by.id = ME.into();
         p.creation_date = now() - Duration::days(60);
         let mut items = vec![rank_one(p, &mut VoteMemory::new()).unwrap()];
-        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, None))]), &HashSet::new(), now());
+        attach_threads(&mut items, &HashMap::from([(1, threads(0, 0, None))]), &HashMap::new(), now());
         assert_eq!(items[0].state, ReviewState::Mine);
     }
 }

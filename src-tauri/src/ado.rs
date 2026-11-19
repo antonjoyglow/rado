@@ -312,9 +312,15 @@ fn role<'a>(pr: &'a PullRequest, me: &Me) -> Option<Role<'a>> {
     }
 }
 
-/// Whether the PR is in my list, whatever my vote: the PRs whose threads are worth fetching.
-pub fn involves(pr: &PullRequest, me: &Me) -> bool {
-    role(pr, me).is_some()
+/// The PRs whose threads to load: those in my list, except the `settled` ones (by head commit) with no push since.
+pub fn needing_threads<'a>(prs: &'a [PullRequest], me: &Me, settled: &HashMap<i64, String>) -> Vec<&'a PullRequest> {
+    prs.iter()
+        .filter(|pr| role(pr, me).is_some())
+        .filter(|pr| {
+            let head = pr.last_merge_source_commit.as_ref().map(|c| &c.commit_id);
+            head.is_none() || settled.get(&pr.pull_request_id) != head
+        })
+        .collect()
 }
 
 /// The PRs I wrote or am asked to review, unsorted; updates `memory` with my current votes.
@@ -655,7 +661,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn involves_isExactlyThePrsRankLists() {
+    fn needingThreads_nothingSettled_isExactlyThePrsRankLists() {
         let declined_with_my_team = {
             let mut me = reviewer(ME, 0, false, false);
             me.has_declined = true;
@@ -673,10 +679,21 @@ pub(crate) mod tests {
         ];
         let t = teams();
         let me = Me { id: ME, teams: &t };
-        for p in &prs {
-            assert_eq!(involves(p, &me), rank_one(p.clone(), &mut VoteMemory::new()).is_some(), "PR {}", p.pull_request_id);
-        }
-        assert!(!involves(&prs[4], &me), "declining in person outweighs my team being asked");
+        let fetched: Vec<i64> = needing_threads(&prs, &me, &HashMap::new()).iter().map(|p| p.pull_request_id).collect();
+        let ranked: Vec<i64> = prs.iter().filter(|p| rank_one((*p).clone(), &mut VoteMemory::new()).is_some()).map(|p| p.pull_request_id).collect();
+        assert_eq!(fetched, ranked);
+        assert!(!fetched.contains(&5), "declining in person outweighs my team being asked");
+    }
+
+    #[test]
+    fn needingThreads_settledPr_loadsAgainOnlyAfterAPush() {
+        let mut no_head = pr(3, vec![reviewer(ME, 10, false, false)]);
+        no_head.last_merge_source_commit = None;
+        let prs = [pr(1, vec![reviewer(ME, 10, false, false)]), pr(2, vec![reviewer(ME, 10, false, false)]), no_head];
+        let settled = HashMap::from([(1, "sha1".to_string()), (2, "sha0".to_string()), (3, "sha1".to_string())]);
+        let t = teams();
+        let fetched: Vec<i64> = needing_threads(&prs, &Me { id: ME, teams: &t }, &settled).iter().map(|p| p.pull_request_id).collect();
+        assert_eq!(fetched, [2, 3]);
     }
 
     #[test]

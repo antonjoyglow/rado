@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -116,12 +117,12 @@ async fn poll_loop(app: AppHandle) {
 /// Polls one workspace for its ticket: a switch while it runs drops the result rather than filing it under the
 /// workspace switched to.
 async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
-    let Ticket { workspace, generation, pat, github_token } = ticket;
+    let Ticket { workspace, generation, pat, github_token, settled } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
             Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})")),
             Ok(None) => Poll::Off,
-            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me).await {
+            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &settled).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
             },
@@ -144,17 +145,25 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
     }
 }
 
-/// Comment counts and last activity for the PRs in my list only; a PR whose threads fail to load just shows neither.
-async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &ado::Me<'_>) -> HashMap<i64, PrThreads> {
-    let requests = prs.iter().filter(|pr| ado::involves(pr, me)).map(|pr| async move {
-        let stats = client.threads(&pr.repository.project.id, &pr.repository.id, pr.pull_request_id).await;
-        (pr.pull_request_id, stats)
-    });
-    futures_util::future::join_all(requests)
-        .await
+/// Thread requests in flight at once, so a long list doesn't burst at Azure DevOps.
+const THREAD_REQUESTS: usize = 6;
+
+/// Comment counts and last activity for the PRs in my list that need them; a PR whose threads fail to load keeps
+/// what the last poll knew.
+async fn fetch_threads(client: &ado::Client, prs: &[ado::PullRequest], me: &ado::Me<'_>, settled: &HashMap<i64, String>) -> HashMap<i64, PrThreads> {
+    // Collected first: a lazy map of async closures trips the compiler's `Send` check on the poll loop.
+    let requests: Vec<_> = ado::needing_threads(prs, me, settled)
         .into_iter()
-        .filter_map(|(id, stats)| stats.ok().map(|s| (id, s)))
+        .map(|pr| async move {
+            let stats = client.threads(&pr.repository.project.id, &pr.repository.id, pr.pull_request_id).await;
+            (pr.pull_request_id, stats)
+        })
+        .collect();
+    futures_util::stream::iter(requests)
+        .buffer_unordered(THREAD_REQUESTS)
+        .filter_map(|(id, stats)| std::future::ready(stats.ok().map(|s| (id, s))))
         .collect()
+        .await
 }
 
 async fn poll_ado(
@@ -162,6 +171,7 @@ async fn poll_ado(
     pat: &str,
     generation: u64,
     me: &mut Option<(u64, String)>,
+    settled: &HashMap<i64, String>,
 ) -> Result<ado::Fetched, String> {
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
@@ -173,7 +183,7 @@ async fn poll_ado(
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
     let prs = client.active_pull_requests().await?;
     let teams: HashSet<String> = source.teams.iter().map(|t| t.trim().to_lowercase()).collect();
-    let threads = fetch_threads(&client, &prs, &ado::Me { id: &my_id, teams: &teams }).await;
+    let threads = fetch_threads(&client, &prs, &ado::Me { id: &my_id, teams: &teams }, settled).await;
     let urls = prs.iter().map(|pr| (pr.pull_request_id, client.pr_url(pr))).collect();
     Ok(ado::Fetched { prs, my_id, teams, threads, urls })
 }
