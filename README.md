@@ -150,10 +150,11 @@ flowchart LR
   agent -->|"reads the PR, saves a draft review"| provider["Azure DevOps or GitHub MCP server"]
   agent -->|"mark_drafted"| mcp
   mcp --> drafts["agent-drafts.json and agent-draft-links.json"]
+  drafts -->|"drafted PRs left out until a push"| mcp
   drafts -->|"read at Rado's next poll"| row["Draft ready on the PR's row"]
 ```
 
-Rado writes `queue.json` after each poll in which at least one source answered. The server reads it from the active workspace (looked up on every call, so it follows a switch), or from the one a tool's optional `workspace` argument names by id or by name (ignoring case). Every reply names the `workspace` and `workspaceId` it used, and so does every error once the workspace is found. To keep a scheduled agent on one workspace whichever is active, name its `workspaceId` in the agent's prompt (a `list_review_queue` reply shows it, and so does `settings.json`): unlike the name, it survives a rename. Rado polls only the active workspace, so another one's queue goes stale soon after you switch away from it. The server never reads your tokens, and refuses an argument a tool doesn't take rather than ignore it. It changes nothing on Azure DevOps or GitHub; what the agent does there is up to its prompt.
+Rado writes `queue.json` after each poll in which at least one source answered. The server reads it from the active workspace (looked up on every call, so it follows a switch), or from the one a tool's optional `workspace` argument names by id or by name (ignoring case). Every reply names the `workspace` and `workspaceId` it used, and so does every error once the workspace is found. To keep a scheduled agent on one workspace whichever is active, name its `workspaceId` in the agent's prompt (a `list_review_queue` reply shows it, and so does `settings.json`): unlike the name, it survives a rename. Rado polls only the active workspace, so another one's queue goes stale soon after you switch away from it. The server never reads your tokens, and refuses an argument a tool doesn't take rather than ignore it. The agent reads and drafts through the Azure DevOps or GitHub MCP server, and is meant only to draft, never post or vote; `rado-mcp` can't enforce that, so its prompt and allowed tools must.
 
 - `list_review_queue(workspace?)`: reviews waiting on you on both providers, best-ranked first, grouped by branch. Each PR has `provider` (`azureDevOps` or `gitHub`), `project` (the GitHub owner), `repo`, `repoId` (`owner/repo` on GitHub), `number`, `prId` and `sourceCommit`, plus `lastVotedCommit` on a re-review. `agentAuthored` is true when a bot opened the PR or it carries an `agent`, `ai`, `ai-generated` or `ai-assisted` label (GitHub only for now). `missingSources` names a provider whose last poll failed or came back partial, so some of its PRs may be absent rather than done. It leaves out hidden, quiet and your own PRs, and PRs already drafted at their current commit. It refuses when the queue is older than three polls (at least 30 minutes), meaning Rado isn't running or can't reach either provider. Not mine, Hide and Show take effect at the next poll.
 - `mark_drafted(prId, commit, draftUrl?, workspace?)`: records the draft in `agent-drafts.json` so later runs skip the PR until a new push. Pass the `prId` (not the GitHub PR number) and the PR's current `sourceCommit`, so a PR id from another workspace's organization isn't marked by mistake. Also pass the `workspaceId` the list returned, so a switch in Rado between the two calls doesn't matter. While `missingSources` is set, a PR that is no longer queued is still recorded, unless the id is a queued PR's GitHub number at that commit. Two agents marking at once wait for each other on `agent-drafts.lock`, so neither mark is lost. A draft is kept while its PR is out of the queue, so a PR that was hidden or quiet for a while isn't drafted again at the same commit; the file keeps the newest 500 marks. `draftUrl`, an http or https link where you can read the draft (its summary, risks and suggested comments; at most 2048 characters, with no spaces, quotes, backslashes or non-ASCII characters, and no `@` before the host), goes in `agent-draft-links.json` with the commit, and makes *Draft ready* on the row a button that opens it (see [List](#list)); marking again without it removes the link. Nothing changes on Azure DevOps or GitHub. A `rado-mcp` from 0.10.0 ignores `draftUrl`: if a `mark_drafted` reply has no `draftUrl` field, the Claude session still runs that server, and the row shows *Draft ready* without a link. Restart the session.
@@ -166,9 +167,9 @@ Register the installed server with the command in [Quick setup](#quick-setup), o
 
 #### Example: an hourly GitHub review agent
 
-The agent below drafts each queued GitHub PR as a pending review, which only you see until you submit it. Not verified end to end: no scheduled run has drafted a real PR yet. The tool replies are real `rado-mcp` output for a sample queue.
+The agent below drafts each queued GitHub PR as a pending review on your account, whose comments only you see until you submit it. Not verified end to end: no scheduled run has drafted a real PR yet. The tool replies are real `rado-mcp` output for a sample queue.
 
-1. Register Rado's server ([Quick setup](#quick-setup)) and GitHub's, with a classic token that has `repo` (from GitHub's [Claude install guide](https://github.com/github/github-mcp-server/blob/main/docs/installation-guides/install-claude.md)):
+1. Register Rado's server ([Quick setup](#quick-setup)) and GitHub's (command from GitHub's [Claude install guide](https://github.com/github/github-mcp-server/blob/main/docs/installation-guides/install-claude.md)), with your own token that can write pull request reviews on those repos:
 
    ```
    claude mcp add --scope user --transport http github https://api.githubcopilot.com/mcp -H "Authorization: Bearer YOUR_GITHUB_PAT"
@@ -182,19 +183,30 @@ The agent below drafts each queued GitHub PR as a pending review, which only you
    2. For each PR with provider gitHub, at most 3 per run: read it with the github tools. For a reReview PR
       with lastVotedCommit, review only the changes since that commit.
    3. Create a pending review with pull_request_review_write (method create, commitID = sourceCommit,
-      no event), add line comments with add_comment_to_pending_review, and put a summary and the risks
-      in the review body. Never submit the review, approve, request changes or comment anywhere else.
+      no event). If that fails (you may already have a pending review there), skip the PR without
+      marking it and report it. Add line comments with add_comment_to_pending_review (subjectType LINE),
+      and the summary and risks as one comment with subjectType FILE on the most-changed file: a pending
+      review created without an event drops its body. Never submit the review, approve, request
+      changes or comment anywhere else.
    4. Call mark_drafted with the PR's prId, commit = sourceCommit, workspace 1879a2c4e5f60b3d and
       draftUrl = the PR's url followed by /files.
    ```
 
-3. Run it every hour with Task Scheduler (from cmd). `claude -p` reads the prompt from stdin, and `--allowedTools` lets the two servers' tools run without asking:
+3. Save `%USERPROFILE%\rado-review.cmd`. It runs the prompt with `claude -p`, which reads it from stdin, and lets only the tools the agent needs run without asking. `pull_request_review_write` can still submit a review; only the prompt stops it.
 
    ```
-   schtasks /create /tn "Rado review agent" /sc hourly /tr "cmd /c cd /d %USERPROFILE% && claude -p --allowedTools mcp__rado,mcp__github < rado-review.md >> rado-review.log 2>&1"
+   @echo off
+   cd /d "%USERPROFILE%"
+   claude -p --allowedTools mcp__rado,mcp__github__pull_request_read,mcp__github__pull_request_review_write,mcp__github__add_comment_to_pending_review < rado-review.md >> rado-review.log 2>&1
    ```
 
-   Don't schedule it from the Claude desktop app: a program it starts writes to the app's private copy of `%APPDATA%`, so Rado never sees the marks.
+4. Run it every hour with Task Scheduler (from cmd):
+
+   ```
+   schtasks /create /tn "Rado review agent" /sc hourly /tr "%USERPROFILE%\rado-review.cmd"
+   ```
+
+   Don't use the Claude desktop app's scheduled tasks for this: a program the app starts writes to its private copy of `%APPDATA%`, so Rado never sees the marks.
 
 A run's `list_review_queue` reply:
 
