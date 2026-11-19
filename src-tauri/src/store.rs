@@ -616,7 +616,8 @@ pub(crate) mod tests {
         let dir = TempDir::new("settings-path");
         let settings = Settings { active_workspace: "w1".into(), ..Settings::default() };
         store(&dir, &MemorySecrets::default()).save_settings(&settings).unwrap();
-        let read: serde_json::Value = queue::read_json_file(&queue::settings_path(&dir.0)).unwrap().expect("written");
+        // Spelled out, not through settings_path: installed rado-mcp builds and the README rely on this exact place.
+        let read: serde_json::Value = queue::read_json_file(&dir.0.join("settings.json")).unwrap().expect("written");
         assert_eq!(read["activeWorkspace"], "w1");
     }
 
