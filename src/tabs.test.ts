@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ReviewItem } from "./api";
-import { defaultListTab, restoreTab, SECTIONS, stepTab } from "./tabs";
+import { defaultListTab, noReviews, restoreTab, SECTIONS, stepTab } from "./tabs";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
@@ -8,6 +8,18 @@ const item = (over: Partial<ReviewItem>): ReviewItem => ({
   required: false, viaGroup: false, draft: false, state: "needsReview", score: 50, tier: "normal", hidden: false, approvals: 0, objections: 0, comments: null,
   actionable: true,
   ...over,
+});
+
+describe("noReviews", () => {
+  it("onlyMyPrs_orNothing_isTrue", () => {
+    expect(noReviews([])).toBe(true);
+    expect(noReviews([item({ state: "mine" }), item({ state: "mine", hidden: true })])).toBe(true);
+  });
+
+  it("anyReviewRow_hiddenOrNot_isFalse", () => {
+    expect(noReviews([item({ state: "mine" }), item({ state: "approved" })])).toBe(false);
+    expect(noReviews([item({ state: "needsReview", hidden: true })])).toBe(false);
+  });
 });
 
 describe("defaultListTab", () => {
