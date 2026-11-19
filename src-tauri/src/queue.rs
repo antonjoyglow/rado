@@ -148,19 +148,12 @@ pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 }
 
 /// Why a file that exists couldn't be used; each message names the file.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum ReadError {
     /// Held by another program, most likely for a moment.
     Unreadable(String),
     /// Damaged, or not the expected shape.
     Invalid(String),
-}
-
-impl std::fmt::Display for ReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let (Self::Unreadable(message) | Self::Invalid(message)) = self;
-        f.write_str(message)
-    }
 }
 
 /// The file's contents, or None when it doesn't exist.

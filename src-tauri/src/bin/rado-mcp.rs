@@ -156,7 +156,7 @@ fn advise(error: ReadError, repair: &str) -> String {
 }
 
 fn active_workspace(root: &Path) -> Result<PathBuf, String> {
-    queue::active_workspace_dir(root).map_err(|e| advise(e, "Start Rado to repair it."))?.ok_or_else(|| {
+    queue::active_workspace_dir(root).map_err(|e| advise(e, "Fix it, or change any setting in Rado while it runs."))?.ok_or_else(|| {
         format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
     })
 }
@@ -606,11 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn activeWorkspace_invalidSettings_saysSoAndToStartRado() {
+    fn activeWorkspace_invalidSettings_saysSoAndHowToRepairIt() {
         let dir = TempDir::new("bad-settings");
         std::fs::write(dir.0.join(queue::SETTINGS_FILE), "{").unwrap();
         let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
-        assert!(text.contains("settings.json is not valid") && text.ends_with("Start Rado to repair it."), "{text}");
+        assert!(text.contains("settings.json is not valid") && text.ends_with("change any setting in Rado while it runs."), "{text}");
     }
 
     #[test]
