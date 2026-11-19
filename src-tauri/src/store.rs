@@ -300,7 +300,7 @@ pub struct Loaded {
 pub type Hidden = HashMap<i64, Option<Provider>>;
 
 pub struct Store {
-    config_dir: PathBuf,
+    /// Settings, workspaces and the queue `rado-mcp` reads: one folder, so both binaries agree on the layout.
     data_dir: PathBuf,
     secrets: Box<dyn Secrets>,
     /// Set when the settings file couldn't be copied aside, so that saving would destroy the only copy.
@@ -308,14 +308,13 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(config_dir: &Path, data_dir: &Path, secrets: Box<dyn Secrets>) -> Self {
-        let _ = std::fs::create_dir_all(config_dir);
+    pub fn new(data_dir: &Path, secrets: Box<dyn Secrets>) -> Self {
         let _ = std::fs::create_dir_all(data_dir);
-        Self { config_dir: config_dir.into(), data_dir: data_dir.into(), secrets, frozen: AtomicBool::new(false) }
+        Self { data_dir: data_dir.into(), secrets, frozen: AtomicBool::new(false) }
     }
 
     fn settings_path(&self) -> PathBuf {
-        self.config_dir.join(queue::SETTINGS_FILE)
+        queue::settings_path(&self.data_dir)
     }
 
     /// Reads the settings, turning a file from before workspaces into one workspace. Every step can be re-run: the
@@ -376,7 +375,7 @@ impl Store {
 
     fn keep_unreadable(&self, path: &Path) -> String {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let copy = self.config_dir.join(format!("settings.unreadable-{secs}.json"));
+        let copy = self.data_dir.join(format!("settings.unreadable-{secs}.json"));
         match std::fs::copy(path, &copy) {
             Ok(_) => format!("settings.json couldn't be read; kept it as {} and started with defaults", copy.display()),
             Err(e) => {
@@ -387,7 +386,7 @@ impl Store {
     }
 
     fn back_up(&self, path: &Path) -> Result<(), String> {
-        let backup = self.config_dir.join(BACKUP_FILE);
+        let backup = self.data_dir.join(BACKUP_FILE);
         if backup.exists() {
             return Ok(());
         }
@@ -609,7 +608,16 @@ pub(crate) mod tests {
     }
 
     fn store(dir: &TempDir, secrets: &MemorySecrets) -> Store {
-        Store::new(&dir.0, &dir.0, Box::new(secrets.clone()))
+        Store::new(&dir.0, Box::new(secrets.clone()))
+    }
+
+    #[test]
+    fn saveSettings_landsWhereRadoMcpReadsTheWorkspaces() {
+        let dir = TempDir::new("settings-path");
+        let settings = Settings { active_workspace: "w1".into(), ..Settings::default() };
+        store(&dir, &MemorySecrets::default()).save_settings(&settings).unwrap();
+        let read: serde_json::Value = queue::read_json_file(&queue::settings_path(&dir.0)).unwrap().expect("written");
+        assert_eq!(read["activeWorkspace"], "w1");
     }
 
     const OLD_FILE: &str = r#"{"organization":"contoso","pollMinutes":5,"notify":false,"teams":["TeamAlpha"],"pillScale":120,"jiraSite":"acme.atlassian.net"}"#;

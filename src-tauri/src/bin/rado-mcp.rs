@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
+use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, settings_path};
 
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
@@ -264,7 +264,7 @@ impl Workspace {
 /// on every call, so a switch in Rado is followed without restarting this server. Only ids the settings list are
 /// used, so the argument never becomes a path.
 fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String> {
-    let settings: Value = queue::read_json_file(&root.join(SETTINGS_FILE))
+    let settings: Value = queue::read_json_file(&settings_path(root))
         .map_err(|e| {
             advise(e, "Fix it, or change any setting in Rado while it runs. Starting Rado on a damaged file sets it aside as settings.unreadable-*.json and starts over with one empty workspace.")
         })?
@@ -448,7 +448,7 @@ mod tests {
     /// Writes the settings file as Rado does: `workspaces` as (id, name), and the active one's id.
     fn settings(root: &Path, active: &str, workspaces: &[(&str, &str)]) {
         let workspaces: Vec<Value> = workspaces.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
-        write_json_atomic(&root.join(SETTINGS_FILE), &json!({ "activeWorkspace": active, "workspaces": workspaces })).unwrap();
+        write_json_atomic(&settings_path(root), &json!({ "activeWorkspace": active, "workspaces": workspaces })).unwrap();
     }
 
     /// A data folder whose active workspace `w1`, named Work, has a queue.
@@ -922,7 +922,7 @@ mod tests {
             let dir = TempDir::new("unsafe");
             write_json_atomic(&dir.0.join(QUEUE_FILE), &make_queue(vec![])).unwrap();
             if let Some(file) = &file {
-                write_json_atomic(&dir.0.join(SETTINGS_FILE), file).unwrap();
+                write_json_atomic(&settings_path(&dir.0), file).unwrap();
             }
             let result = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
             assert!(error_text(&result).contains("no active workspace"), "{file:?}");
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn activeWorkspace_invalidSettings_saysSoAndHowToRepairIt() {
         let dir = TempDir::new("bad-settings");
-        std::fs::write(dir.0.join(queue::SETTINGS_FILE), "{").unwrap();
+        std::fs::write(settings_path(&dir.0), "{").unwrap();
         let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
         assert!(text.contains("settings.json is not valid") && text.contains("change any setting in Rado while it runs."), "{text}");
     }

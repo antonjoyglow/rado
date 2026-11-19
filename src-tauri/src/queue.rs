@@ -14,7 +14,7 @@ pub const DRAFTS_FILE: &str = "agent-drafts.json";
 pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
 /// The drafts file keeps the newest marks only, so it stays small.
 pub const MAX_DRAFTS: usize = 500;
-pub const SETTINGS_FILE: &str = "settings.json";
+const SETTINGS_FILE: &str = "settings.json";
 /// The queue file's schema. Bump it only for a change an older `rado-mcp` would misread: readers ignore fields they
 /// don't know, so an added field needs no bump.
 pub const QUEUE_SCHEMA: u32 = 1;
@@ -22,6 +22,11 @@ pub const QUEUE_SCHEMA: u32 = 1;
 /// Letters, digits and dashes only, so an id read from a hand-edited file can't point outside the data folder.
 pub fn is_workspace_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Where the app saves its settings and `rado-mcp` finds the workspaces: in the data folder itself.
+pub fn settings_path(root: &Path) -> PathBuf {
+    root.join(SETTINGS_FILE)
 }
 
 /// Where a workspace keeps its queue, drafts, votes and hidden PRs.

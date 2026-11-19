@@ -705,7 +705,7 @@ mod tests {
         let ws = |id: &str| Workspace { id: id.into(), name: id.to_uppercase(), ..Workspace::default() };
         let saved = Saved { pat: false, github_token: true };
         let s = Session {
-            store: Store::new(&dir.0, &dir.0, Box::new(secrets.clone())),
+            store: Store::new(&dir.0, Box::new(secrets.clone())),
             settings: Settings { workspaces: vec![ws("a"), ws("b")], active_workspace: "a".into(), ..Settings::default() },
             ws: WorkspaceState::default(),
             parked: HashMap::new(),
@@ -911,7 +911,7 @@ mod tests {
     fn saveWorkspace_failedWrite_changesNothing_andNeedsNoPoll() {
         let Fixture { mut s, dir, .. } = two_workspaces("save-workspace-unwritable");
         // A folder where settings.json goes: the rename into place fails.
-        std::fs::create_dir_all(dir.0.join(crate::queue::SETTINGS_FILE)).expect("folder");
+        std::fs::create_dir_all(crate::queue::settings_path(&dir.0)).expect("folder");
         let generation = s.generation;
         let mut changed = s.settings.workspaces[0].clone();
         changed.github.repos = vec!["owner/name".into()];
@@ -1133,7 +1133,7 @@ mod tests {
         let Fixture { s, secrets, dir } = two_workspaces("load");
         s.store.save_settings(&s.settings).expect("saved");
         s.store.save_pat("b", "pat-b").expect("saved");
-        let (loaded, warning) = Session::load(Store::new(&dir.0, &dir.0, Box::new(secrets)));
+        let (loaded, warning) = Session::load(Store::new(&dir.0, Box::new(secrets)));
         assert_eq!(warning, None);
         assert_eq!(loaded.status().saved["b"], Saved { pat: true, github_token: true });
         assert_eq!(loaded.settings.active_workspace, "a");

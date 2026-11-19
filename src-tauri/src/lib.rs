@@ -563,9 +563,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .setup(|app| {
-            let config = app.path().app_config_dir()?;
             let data = app.path().app_data_dir()?;
-            let store = Store::new(&config, &data, Box::new(Keyring::from_env()));
+            let store = Store::new(&data, Box::new(Keyring::from_env()));
             let (session, load_warning) = Session::load(store);
             let pill_scale = session.settings().pill_scale;
             let inner = Inner { session, load_warning, list_had_focus: false, newer_release: None };
