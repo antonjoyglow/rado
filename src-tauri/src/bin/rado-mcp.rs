@@ -156,10 +156,10 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
         known_arguments(name, args)?;
         workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)))
     };
-    let outcome = match params["name"].as_str() {
-        Some("list_review_queue") => in_workspace(&|ws| list(ws, now)),
-        Some("mark_drafted") => in_workspace(&|ws| mark_drafted(ws, args)),
-        other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
+    let outcome = match name {
+        "list_review_queue" => in_workspace(&|ws| list(ws, now)),
+        "mark_drafted" => in_workspace(&|ws| mark_drafted(ws, args)),
+        other => return Err(format!("Unknown tool: {other}")),
     };
     Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
@@ -172,7 +172,12 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
 fn known_arguments(tool: &str, args: &Value) -> Result<(), String> {
     let tools = tools();
     let schema = tools.as_array().and_then(|all| all.iter().find(|t| t["name"] == tool));
-    let (Some(properties), Some(args)) = (schema.and_then(|t| t["inputSchema"]["properties"].as_object()), args.as_object()) else {
+    let args = match args {
+        Value::Null => return Ok(()),
+        Value::Object(args) => args,
+        other => return Err(format!("{tool}'s arguments must be an object, not {other}")),
+    };
+    let Some(properties) = schema.and_then(|t| t["inputSchema"]["properties"].as_object()) else {
         return Ok(());
     };
     match args.keys().find(|key| !properties.contains_key(*key)) {
@@ -238,14 +243,14 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
             Some(Workspace { id: id.into(), name: name.into(), dir: queue::workspace_dir(root, id), active: active == Some(id) })
         })
         .collect();
-    let no_workspace = || format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display());
+    let none = |what| format!("Rado has no {what} in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display());
     let requested = match requested {
-        None | Some(Value::Null) => return all.into_iter().find(|w| w.active).ok_or_else(no_workspace),
+        None | Some(Value::Null) => return all.into_iter().find(|w| w.active).ok_or_else(|| none("active workspace")),
         Some(Value::String(requested)) => requested.trim(),
         Some(other) => return Err(format!("workspace must be a workspace's name or id, not {other}")),
     };
     if all.is_empty() {
-        return Err(no_workspace());
+        return Err(none("workspaces"));
     }
     if let Some(ws) = all.iter().find(|w| w.id == requested) {
         return Ok(ws.clone());
@@ -766,6 +771,9 @@ mod tests {
         assert_eq!(listed, r#"list_review_queue takes no argument "workspaceId"; it takes workspace"#);
         assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, prId, workspace"#);
         assert!(!a.join(DRAFTS_FILE).exists());
+
+        let not_an_object = send(&root.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue", "arguments": "b2" } }));
+        assert_eq!(error_text(&not_an_object["result"]), r#"list_review_queue's arguments must be an object, not "b2""#);
     }
 
     #[test]
