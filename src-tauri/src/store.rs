@@ -58,6 +58,11 @@ impl Settings {
         self.workspaces.iter().find(|w| w.id == self.active_workspace)
     }
 
+    /// Minutes between polls, within the allowed range.
+    pub fn poll_interval(&self) -> u32 {
+        self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1)
+    }
+
     /// A file with a junk global value still keeps its workspaces; losing them would strand their secrets.
     fn lenient(file: &Value) -> Self {
         serde_json::from_value(file.clone()).unwrap_or_else(|_| Self {

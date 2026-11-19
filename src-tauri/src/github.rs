@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState};
-use crate::source::{QueueRef, SourcePoll};
+use crate::source::{QueueRef, SourceError, SourcePoll, retry_at};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
@@ -189,7 +189,7 @@ pub struct Fetched {
     pub partial: bool,
 }
 
-pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, String> {
+pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, SourceError> {
     let watched = watched_query(watched_repos);
     let variables = serde_json::json!({ "watched": watched.as_deref().unwrap_or_default(), "watching": watched.is_some() });
     let response = reqwest::Client::builder()
@@ -204,14 +204,20 @@ pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, Str
         .await
         .map_err(|e| format!("network: {e}"))?;
     let status = response.status();
+    let retry = retry_at(response.headers(), Utc::now());
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("token rejected (expired or revoked)".into());
+        return Err(SourceError::rejected("token rejected (expired or revoked)"));
+    }
+    // GitHub throttles with a 429, or a 403 carrying the rate-limit headers.
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || (status == reqwest::StatusCode::FORBIDDEN && retry.is_some()) {
+        return Err(SourceError::rate_limited(retry));
     }
     if !status.is_success() {
-        return Err(format!("HTTP {status}"));
+        return Err(format!("HTTP {status}").into());
     }
     let body = response.bytes().await.map_err(|e| format!("network: {e}"))?;
-    parse(&body)
+    // GraphQL reports a spent rate limit as a 200 with an error and no data.
+    parse(&body).map_err(|e| if retry.is_some() { SourceError::rate_limited(retry) } else { e.into() })
 }
 
 fn parse(body: &[u8]) -> Result<Fetched, String> {

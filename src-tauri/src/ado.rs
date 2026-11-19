@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::group::Related;
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState, VoteMemory, VotedAt};
-use crate::source::{QueueRef, SourcePoll};
+use crate::source::{QueueRef, SourceError, SourcePoll, retry_at};
 
 const API: &str = "api-version=7.1";
 const PAGE: usize = 500;
@@ -167,7 +167,7 @@ impl Client {
         )
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, String> {
+    async fn get<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, SourceError> {
         let response = self
             .http
             .get(url)
@@ -178,22 +178,25 @@ impl Client {
         let status = response.status();
         // ADO answers an invalid PAT with a 203 sign-in HTML page instead of a 401.
         if status == reqwest::StatusCode::NON_AUTHORITATIVE_INFORMATION || status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err("PAT rejected (expired or missing Code: Read scope)".into());
+            return Err(SourceError::rejected("PAT rejected (expired or missing Code: Read scope)"));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(SourceError::rate_limited(retry_at(response.headers(), Utc::now())));
         }
         let endpoint = url.split('?').next().unwrap_or(url).rsplit("_apis/").next().unwrap_or(url);
         if !status.is_success() {
-            return Err(format!("HTTP {status} from {endpoint}"));
+            return Err(format!("HTTP {status} from {endpoint}").into());
         }
         let body = response.bytes().await.map_err(|e| format!("network: {e}"))?;
-        serde_json::from_slice::<T>(&body).map_err(|e| format!("unexpected {endpoint} response: {e}"))
+        Ok(serde_json::from_slice::<T>(&body).map_err(|e| format!("unexpected {endpoint} response: {e}"))?)
     }
 
-    pub async fn my_id(&self) -> Result<String, String> {
+    pub async fn my_id(&self) -> Result<String, SourceError> {
         let conn: ConnectionData = self.get(&format!("https://dev.azure.com/{}/_apis/connectionData", self.org)).await?;
         Ok(conn.authenticated_user.id)
     }
 
-    pub async fn active_pull_requests(&self) -> Result<Vec<PullRequest>, String> {
+    pub async fn active_pull_requests(&self) -> Result<Vec<PullRequest>, SourceError> {
         let mut all = Vec::new();
         loop {
             let url = format!(
@@ -210,7 +213,7 @@ impl Client {
         }
     }
 
-    pub async fn threads(&self, project_id: &str, repo_id: &str, pr_id: i64) -> Result<PrThreads, String> {
+    pub async fn threads(&self, project_id: &str, repo_id: &str, pr_id: i64) -> Result<PrThreads, SourceError> {
         let url = format!(
             "https://dev.azure.com/{}/{project_id}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads?{API}",
             self.org

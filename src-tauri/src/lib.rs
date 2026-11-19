@@ -103,10 +103,10 @@ async fn poll_loop(app: AppHandle) {
         let shared = app.state::<Shared>();
         // Subscribed before the ticket reads the generation: a switch after this point cancels the poll below.
         let mut changed = shared.generation.subscribe();
-        if let Some(ticket) = session(&app, Session::begin_poll) {
+        if let Some(ticket) = session(&app, |s| s.begin_poll(Utc::now())) {
             poll_workspace(&app, ticket, &mut me, &mut changed).await;
         }
-        let minutes = shared.inner.lock().expect("state lock").session.settings().poll_minutes.clamp(store::POLL_MINUTES_RANGE.0, store::POLL_MINUTES_RANGE.1);
+        let minutes = shared.inner.lock().expect("state lock").session.settings().poll_interval();
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(u64::from(minutes) * 60)) => {}
             _ = shared.wake.notified() => {}
@@ -117,24 +117,26 @@ async fn poll_loop(app: AppHandle) {
 /// Polls one workspace for its ticket: a switch while it runs drops the result rather than filing it under the
 /// workspace switched to.
 async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
-    let Ticket { workspace, generation, pat, github_token, settled } = ticket;
+    let Ticket { workspace, generation, pat, github_token, settled, held } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})")),
+            Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})").into()),
             Ok(None) => Poll::Off,
+            Ok(Some(_)) if held.contains(&Provider::Ado) => Poll::Held,
             Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &settled).await {
                 Ok(poll) => Poll::Fresh(poll),
-                Err(error) => Poll::Failed(format!("Azure DevOps: {error}")),
+                Err(error) => Poll::Failed(error.named("Azure DevOps")),
             },
         }
     };
     let github = async {
         match github_token.as_ref().map(Option::as_deref) {
-            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})")),
+            Err(error) => Poll::Failed(format!("GitHub: can't read the token ({error})").into()),
             Ok(None) => Poll::Off,
+            Ok(Some(_)) if held.contains(&Provider::GitHub) => Poll::Held,
             Ok(Some(token)) => match github::fetch(token, &workspace.github.repos).await {
                 Ok(fetched) => Poll::Fresh(fetched),
-                Err(error) => Poll::Failed(format!("GitHub: {error}")),
+                Err(error) => Poll::Failed(error.named("GitHub")),
             },
         }
     };
@@ -172,7 +174,7 @@ async fn poll_ado(
     generation: u64,
     me: &mut Option<(u64, String)>,
     settled: &HashMap<i64, String>,
-) -> Result<ado::Fetched, String> {
+) -> Result<ado::Fetched, source::SourceError> {
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
     }
@@ -306,8 +308,8 @@ fn get_snapshot(state: tauri::State<'_, Shared>) -> Snapshot {
 }
 
 #[tauri::command]
-fn refresh_now(state: tauri::State<'_, Shared>) {
-    state.wake.notify_one();
+fn refresh_now(app: AppHandle) {
+    session(&app, Session::refresh);
 }
 
 // Async: building a window inside a synchronous command can deadlock on Windows.
@@ -555,7 +557,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             "show" => {
                 let _ = show_list(app);
             }
-            "refresh" => app.state::<Shared>().wake.notify_one(),
+            "refresh" => session(app, Session::refresh),
             "quit" => quit(app.clone()),
             _ => {}
         })
