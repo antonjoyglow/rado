@@ -4,7 +4,7 @@ import {
   ageColumn, datesTooltip, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
 import { POLL_MINUTES } from "./bindings/limits";
-import { h } from "./dom";
+import { h, whenBlurred } from "./dom";
 import { bird, glow, yawn } from "./bird";
 import { glows, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
@@ -395,10 +395,7 @@ function renderSettings(
   const save = (n: HTMLElement) => saver.save(settings).then(() => ok(n), (e) => fail(n, e));
   const generalShows: (() => void)[] = [];
   /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
-  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => {
-    if (document.activeElement === input) input.addEventListener("blur", show, { once: true });
-    else show();
-  });
+  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => whenBlurred(input, show));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
