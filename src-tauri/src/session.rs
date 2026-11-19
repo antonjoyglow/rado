@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::score::{self, Provider, ReviewItem, VoteMemory};
 use crate::store::{self, Settings, Store};
 use crate::workspace::{self, Tracker, Workspace};
+use crate::source::{FailureKind, SourceError};
 use crate::{ado, export, github, group, queue};
 
 /// What one workspace has seen. The active workspace's lives in `Session::ws`; the others wait in `Session::parked`
@@ -36,6 +37,53 @@ struct WorkspaceState {
     hidden_source: HashMap<i64, Provider>,
     /// Each source's last good poll in this run.
     source_refreshed: HashMap<Provider, DateTime<Utc>>,
+    /// Failing sources, until their next good poll or a change to their token or settings.
+    backoff: HashMap<Provider, Backoff>,
+}
+
+/// The longest wait between tries of a failing source, unless a rate limit asks for longer.
+const MAX_BACKOFF_MINUTES: i64 = 60;
+
+/// How long a failing source waits before its next try.
+#[derive(Debug, Clone, PartialEq)]
+struct Backoff {
+    /// Failed polls in a row.
+    failures: u32,
+    until: DateTime<Utc>,
+    rate_limited: bool,
+    /// The failure, named for its source; `status` adds the time.
+    message: String,
+}
+
+impl Backoff {
+    /// The wait after the `failures`-th failure in a row: when a rate limit names a time, that time (but at least one
+    /// poll interval); otherwise one interval, doubled for each failure before it, up to an hour.
+    fn after(failures: u32, error: SourceError, interval_minutes: u32, now: DateTime<Utc>) -> Self {
+        let interval = chrono::Duration::minutes(i64::from(interval_minutes));
+        let cap = MAX_BACKOFF_MINUTES.max(i64::from(interval_minutes));
+        let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(cap));
+        let (until, rate_limited) = match error.kind {
+            FailureKind::RateLimited { until: asked } => (asked.map_or(doubled, |at| at.max(now + interval)), true),
+            FailureKind::Other => (doubled, false),
+        };
+        Self { failures, until, rate_limited, message: error.message }
+    }
+
+    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true).
+    fn status(&self, now: DateTime<Utc>) -> String {
+        match (self.rate_limited, self.failures) {
+            (true, _) => format!("{} until {}", self.message, clock(self.until, now)),
+            (false, 1) => self.message.clone(),
+            (false, _) => format!("{} · next try {}", self.message, clock(self.until, now)),
+        }
+    }
+}
+
+/// `at` as the user's local `hh:mm`, with "tomorrow" when it isn't today (a wait is at most a day).
+fn clock(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let (at, now) = (at.with_timezone(&chrono::Local), now.with_timezone(&chrono::Local));
+    let time = at.format("%H:%M");
+    if at.date_naive() == now.date_naive() { time.to_string() } else { format!("tomorrow {time}") }
 }
 
 impl WorkspaceState {
@@ -93,8 +141,10 @@ pub struct Status {
 pub enum Poll<T> {
     /// No token for this source.
     Off,
-    /// Its PRs from the last good poll stay listed.
-    Failed(String),
+    /// Its PRs from the last good poll stay listed, and it waits longer before each next try.
+    Failed(SourceError),
+    /// Not asked: still waiting after a failure. Its PRs and error stay.
+    Held,
     Fresh(T),
 }
 
@@ -103,6 +153,7 @@ impl<T> Poll<T> {
         match self {
             Poll::Off => Poll::Off,
             Poll::Failed(error) => Poll::Failed(error),
+            Poll::Held => Poll::Held,
             Poll::Fresh(answer) => Poll::Fresh(f(answer)),
         }
     }
@@ -117,6 +168,8 @@ pub struct Ticket {
     /// Approved or hidden Azure DevOps PRs whose threads are already known, by the head commit they were seen at:
     /// their threads only matter for the row's comment count and activity, so they load again after a push.
     pub settled: HashMap<i64, String>,
+    /// Sources waiting out a backoff: not asked this poll.
+    pub held: HashSet<Provider>,
 }
 
 /// What a filed poll asks the app to show.
@@ -276,7 +329,7 @@ impl Session {
 
     /// Starts a poll of the active workspace: None when there is nothing to poll. With no token saved, the
     /// workspace's rows and queue go, and the status line asks for a token.
-    pub fn begin_poll(&mut self) -> Option<Ticket> {
+    pub fn begin_poll(&mut self, now: DateTime<Utc>) -> Option<Ticket> {
         let workspace = self.settings.active()?.clone();
         let (pat, github_token) = (self.store.read_pat(&workspace.id), self.store.read_github_token(&workspace.id));
         self.saved.insert(workspace.id.clone(), Saved { pat: token_saved(&pat), github_token: token_saved(&github_token) });
@@ -304,7 +357,30 @@ impl Session {
             .filter(|i| i.provider == Provider::Ado && (i.hidden || i.state == score::ReviewState::Approved) && i.comments.is_some())
             .filter_map(|i| Some((i.id, self.ws.commits.get(&i.id)?.clone())))
             .collect();
-        Some(Ticket { workspace, generation: self.generation, pat, github_token, settled })
+        // The slack lets the poll that wakes for a next try make it even if the clock moved back a little; a rate
+        // limit gets none, since a request inside it can extend it.
+        let held = self
+            .ws
+            .backoff
+            .iter()
+            .filter(|(_, b)| b.until > now + chrono::Duration::seconds(if b.rate_limited { 0 } else { 30 }))
+            .map(|(p, _)| *p)
+            .collect();
+        Some(Ticket { workspace, generation: self.generation, pat, github_token, settled, held })
+    }
+
+    /// Polls now, as the Refresh button and the tray's Refresh now ask: a failing source is tried again at once,
+    /// unless a rate limit asked to wait.
+    pub fn refresh(&mut self, now: DateTime<Utc>) {
+        for backoff in self.ws.backoff.values_mut().filter(|b| !b.rate_limited) {
+            backoff.until = backoff.until.min(now);
+        }
+        self.wake = true;
+    }
+
+    /// The earliest next try of a failing source of the active workspace, so the poller can wake for it.
+    pub fn next_try(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.ws.backoff.values().map(|b| b.until).filter(|at| *at > now).min()
     }
 
     /// Files a poll's result under the active workspace and saves what it changed. Nothing happens when the poll is
@@ -331,6 +407,7 @@ impl Session {
         }
         let mut applied = Applied::default();
         let organization = self.settings.active().map(|w| w.azure_dev_ops.organization.clone()).unwrap_or_default();
+        let interval = self.settings.poll_interval();
         let ws = &mut self.ws;
         let (old_items, old_urls, old_commits) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls), std::mem::take(&mut ws.commits));
         let previous = |provider: Provider| -> HashMap<i64, &ReviewItem> { old_items.iter().filter(|i| i.provider == provider).map(|i| (i.id, i)).collect() };
@@ -354,10 +431,21 @@ impl Session {
                 Poll::Off => {
                     ws.related.retain(|r| r.provider != provider);
                     ws.baseline.remove(&provider);
+                    ws.backoff.remove(&provider);
                     off.insert(provider);
                 }
                 // Its PRs, links and related PRs from the last good poll stay.
-                Poll::Failed(error) => {
+                Poll::Failed(_) | Poll::Held => {
+                    let error = match poll {
+                        Poll::Failed(error) => {
+                            let failures = ws.backoff.get(&provider).map_or(0, |b| b.failures) + 1;
+                            let next = Backoff::after(failures, error, interval, now);
+                            let message = next.status(now);
+                            ws.backoff.insert(provider, next);
+                            message
+                        }
+                        _ => ws.backoff.get(&provider).map(|b| b.status(now)).unwrap_or_default(),
+                    };
                     errors.push(error);
                     missing.push(export::source_name(provider).to_string());
                     for item in old_items.iter().filter(|i| i.provider == provider) {
@@ -371,6 +459,7 @@ impl Session {
                     }
                 }
                 Poll::Fresh(mut poll) => {
+                    ws.backoff.remove(&provider);
                     fresh_sources.push((provider, poll.warning.is_some()));
                     match poll.warning {
                         Some(warning) => errors.push(warning),
@@ -489,6 +578,7 @@ impl Session {
         }
         if let Some(state) = self.state_of(id) {
             state.baseline.remove(&provider);
+            state.backoff.remove(&provider);
         }
     }
 
@@ -559,6 +649,7 @@ impl Session {
         if let Some(state) = self.state_of(&id) {
             if ado_changed {
                 state.baseline.remove(&Provider::Ado);
+                state.backoff.remove(&Provider::Ado);
                 // PR ids repeat across organizations: a PR in the new one must not carry these threads.
                 for item in state.items.iter_mut().filter(|i| i.provider == Provider::Ado) {
                     (item.comments, item.updated_at) = (None, None);
@@ -566,6 +657,7 @@ impl Session {
             }
             if github_changed {
                 state.baseline.remove(&Provider::GitHub);
+                state.backoff.remove(&Provider::GitHub);
             }
         }
         if id == self.settings.active_workspace && (ado_changed || github_changed) {
@@ -891,7 +983,7 @@ mod tests {
         let Fixture { mut s, secrets, dir: _dir } = two_workspaces("begin-poll-unreadable");
         poll(&mut s, &[1]);
         secrets.fail_reads(true);
-        let ticket = s.begin_poll().expect("a ticket: the source fails with the read error instead of turning off");
+        let ticket = s.begin_poll(Utc::now()).expect("a ticket: the source fails with the read error instead of turning off");
         assert!(ticket.github_token.is_err());
         assert_eq!(listed(&s), ids(&[1]));
         assert!(s.status().saved["a"].github_token, "an unreadable token counts as saved");
@@ -904,7 +996,7 @@ mod tests {
         let queue_file = queue::workspace_dir(&dir.0, "a").join(queue::QUEUE_FILE);
         assert!(queue_file.exists(), "the poll wrote a queue");
         s.remove_secret("a", Provider::GitHub).expect("removed");
-        assert!(s.begin_poll().is_none());
+        assert!(s.begin_poll(Utc::now()).is_none());
         assert!(!queue_file.exists());
     }
 
@@ -960,7 +1052,7 @@ mod tests {
         assert!(!s.status().saved["a"].github_token);
         assert!(s.take_wake());
 
-        assert!(s.begin_poll().is_none());
+        assert!(s.begin_poll(Utc::now()).is_none());
         assert_eq!((listed(&s), s.polling), (ids(&[]), false));
         assert_eq!(s.ws.error.as_deref(), Some("Add an Azure DevOps PAT or a GitHub token to this workspace in settings"));
     }
@@ -968,10 +1060,128 @@ mod tests {
     #[test]
     fn beginPoll_withAToken_handsOutTheCurrentGenerationAndShowsPolling() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("begin-poll");
-        let ticket = s.begin_poll().expect("a ticket");
+        let ticket = s.begin_poll(Utc::now()).expect("a ticket");
         assert_eq!((ticket.workspace.id.as_str(), ticket.generation), ("a", s.generation));
         assert_eq!((ticket.pat, ticket.github_token), (Ok(None), Ok(Some("gh-a".into()))));
         assert!(s.polling);
+    }
+
+    // Backoff.
+
+    fn t0() -> DateTime<Utc> {
+        "2026-11-19T12:00:00Z".parse().unwrap()
+    }
+
+    fn minutes(m: i64) -> chrono::Duration {
+        chrono::Duration::minutes(m)
+    }
+
+    /// Files a GitHub poll at the current generation and time `at`.
+    fn file_github(s: &mut Session, github: Poll<github::Fetched>, at: DateTime<Utc>) {
+        let generation = s.generation;
+        s.file_poll(generation, Poll::Off, github, at).expect("current poll");
+    }
+
+    #[test]
+    fn backoff_doublesTheIntervalPerFailureUpToAnHour_andNamesTheNextTry() {
+        let waits: Vec<i64> = (1..=7).map(|n| (Backoff::after(n, "GitHub: HTTP 502".into(), 3, t0()).until - t0()).num_minutes()).collect();
+        assert_eq!(waits, [3, 6, 12, 24, 48, 60, 60]);
+        assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 3, t0()).status(t0()), "GitHub: HTTP 502");
+        assert_eq!(Backoff::after(2, "GitHub: HTTP 502".into(), 3, t0()).status(t0()), format!("GitHub: HTTP 502 · next try {}", clock(t0() + minutes(6), t0())));
+    }
+
+    #[test]
+    fn backoff_rateLimited_waitsAtLeastAsAsked_andSaysUntilWhen() {
+        let asked = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(90))).named("GitHub"), 3, t0());
+        assert_eq!((asked.until, asked.rate_limited), (t0() + minutes(90), true));
+        assert_eq!(asked.status(t0()), format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
+        let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
+        assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
+        let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
+        assert_eq!(after_failures.until, t0() + minutes(3), "a named time replaces the doubling");
+        let unnamed = Backoff::after(3, SourceError::rate_limited(None).named("GitHub"), 3, t0());
+        assert_eq!(unnamed.until, t0() + minutes(12));
+    }
+
+    #[test]
+    fn backoff_intervalOverAnHour_neverTriesSoonerThanTheInterval() {
+        assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 120, t0()).until, t0() + minutes(120));
+    }
+
+    #[test]
+    fn clock_aWaitIntoTheNextDay_saysTomorrow() {
+        let now = chrono::Local::now().with_timezone(&Utc);
+        assert!(!clock(now, now).starts_with("tomorrow"));
+        assert!(clock(now + chrono::Duration::days(1), now).starts_with("tomorrow "));
+    }
+
+    #[test]
+    fn nextTry_isTheEarliestFutureTryOfAnySource() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("next-try");
+        let generation = s.generation;
+        s.file_poll(generation, Poll::Failed("Azure DevOps: HTTP 502".into()), Poll::Failed(SourceError::rate_limited(Some(t0() + minutes(30))).named("GitHub")), t0())
+            .expect("current poll");
+        assert_eq!(s.next_try(t0()), Some(t0() + minutes(3)));
+        assert_eq!(s.next_try(t0() + minutes(3)), Some(t0() + minutes(30)), "a past try is not waited for");
+    }
+
+    #[test]
+    fn backoff_endsWhenTheSourceTurnsOffOrItsSettingsChange() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-off");
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        file_github(&mut s, Poll::Off, t0());
+        assert!(s.ws.backoff.is_empty());
+
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.github.repos = vec!["o/repo".into()];
+        s.save_workspace(changed).expect("saved");
+        assert!(s.ws.backoff.is_empty());
+    }
+
+    #[test]
+    fn beginPoll_failingSource_isHeldUntilItsNextTry_keepingItsRowsAndError() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-hold");
+        file_github(&mut s, github(&[1]), t0());
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        file_github(&mut s, Poll::Failed("GitHub: HTTP 502".into()), t0());
+        let until = s.ws.backoff[&Provider::GitHub].until;
+        assert_eq!(until, t0() + minutes(6));
+
+        assert_eq!(s.begin_poll(t0() + minutes(5)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
+        file_github(&mut s, Poll::Held, t0() + minutes(5));
+        assert_eq!(listed(&s), ids(&[1]));
+        assert_eq!(s.ws.error, Some(format!("GitHub: HTTP 502 · next try {}", clock(until, t0() + minutes(5)))));
+        assert_eq!(s.ws.backoff[&Provider::GitHub].failures, 2, "a held poll is not another failure");
+
+        assert!(s.begin_poll(until).expect("a ticket").held.is_empty());
+        file_github(&mut s, github(&[1]), until);
+        assert!(s.ws.backoff.is_empty() && s.ws.error.is_none());
+    }
+
+    #[test]
+    fn refresh_retriesAHeldSourceAtOnce_butNotInsideARateLimit() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-refresh");
+        file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
+        file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
+        assert_eq!(s.next_try(t0()), Some(t0() + minutes(6)));
+        s.refresh(t0() + minutes(1));
+        assert!(s.take_wake());
+        assert!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held.is_empty());
+
+        file_github(&mut s, Poll::Failed(SourceError::rate_limited(Some(t0() + minutes(30))).named("GitHub")), t0());
+        s.refresh(t0() + minutes(1));
+        assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
+        assert!(!s.begin_poll(t0() + minutes(30) - chrono::Duration::seconds(10)).expect("a ticket").held.is_empty(), "no slack inside a rate limit");
+    }
+
+    #[test]
+    fn saveSecret_endsTheSourcesBackoff() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-token");
+        file_github(&mut s, Poll::Failed("GitHub: token rejected (expired or revoked)".into()), t0());
+        s.save_secret("a", Provider::GitHub, "gh-new").expect("saved");
+        assert!(s.ws.backoff.is_empty());
+        assert!(s.begin_poll(t0()).expect("a ticket").held.is_empty());
     }
 
     #[test]
@@ -985,7 +1195,7 @@ mod tests {
         s.ws.hidden.insert(3);
         file(&mut s, Poll::Fresh(fetched), Poll::Off);
 
-        let ticket = s.begin_poll().expect("a ticket");
+        let ticket = s.begin_poll(Utc::now()).expect("a ticket");
         assert_eq!(ticket.settled, HashMap::from([(1, "sha1".to_string()), (3, "sha1".to_string())]));
 
         let prs = vec![ado_pr(1, "b1", Some(10)), ado_pr(2, "b2", Some(0)), ado_pr(3, "b3", Some(0)), ado_pr(4, "b4", Some(10))];
