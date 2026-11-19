@@ -333,7 +333,7 @@ impl Session {
         let organization = self.settings.active().map(|w| w.azure_dev_ops.organization.clone()).unwrap_or_default();
         let ws = &mut self.ws;
         let (old_items, old_urls, old_commits) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls), std::mem::take(&mut ws.commits));
-        let previous: HashMap<i64, &ReviewItem> = old_items.iter().map(|i| (i.id, i)).collect();
+        let previous = |provider: Provider| -> HashMap<i64, &ReviewItem> { old_items.iter().filter(|i| i.provider == provider).map(|i| (i.id, i)).collect() };
         let mut items = Vec::new();
         let mut urls = HashMap::new();
         let mut commits = HashMap::new();
@@ -385,7 +385,7 @@ impl Session {
                     if provider == Provider::Ado {
                         applied.memory = Some(ws.memory.clone());
                     }
-                    score::attach_threads(&mut poll.items, &poll.threads, &previous, now);
+                    score::attach_threads(&mut poll.items, &poll.threads, &previous(provider), now);
                     ws.related.retain(|r| r.provider != provider);
                     ws.related.extend(poll.related);
                     urls.extend(poll.urls);

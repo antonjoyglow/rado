@@ -93,22 +93,22 @@ pub fn activity_after(at: DateTime<Utc>, created: DateTime<Utc>) -> Option<DateT
 
 /// Adds comment counts and last activity, moves quiet reviews to `Stale`, then promotes my own PRs that
 /// need work: they count toward {n} and score above my other PRs. A PR whose threads weren't loaded this poll
-/// (skipped, or failed) keeps the comments, last activity and `Stale` verdict of its item in `previous`.
+/// (skipped, or failed) keeps the comments and last activity of its item in `previous`; with neither, it isn't judged quiet.
 pub fn attach_threads(items: &mut [ReviewItem], threads: &HashMap<i64, PrThreads>, previous: &HashMap<i64, &ReviewItem>, now: DateTime<Utc>) {
     for item in items.iter_mut() {
-        let quiet = match threads.get(&item.id) {
+        match threads.get(&item.id) {
             Some(loaded) => {
                 item.comments = Some(loaded.comments);
                 item.updated_at = loaded.last_activity.and_then(|at| activity_after(at, item.created_at));
-                now - item.updated_at.unwrap_or(item.created_at) >= chrono::Duration::days(STALE_AFTER_DAYS)
             }
             None => {
                 let before = previous.get(&item.id);
                 item.comments = before.and_then(|b| b.comments);
                 item.updated_at = before.and_then(|b| b.updated_at);
-                before.is_some_and(|b| b.state == ReviewState::Stale)
             }
-        };
+        }
+        // Comments are known exactly when threads loaded, this poll or an earlier one.
+        let quiet = item.comments.is_some() && now - item.updated_at.unwrap_or(item.created_at) >= chrono::Duration::days(STALE_AFTER_DAYS);
         if item.state.is_actionable() && quiet {
             item.state = ReviewState::Stale;
             item.actionable = false;
@@ -320,10 +320,11 @@ mod tests {
     }
 
     #[test]
-    fn attachThreads_quietReviewWhoseThreadsFailedToLoad_staysStale() {
+    fn attachThreads_threadsNotLoadedAndQuietSinceTheirLastLoad_isStale() {
         let mut items = vec![review_opened_days_ago(60)];
         let mut before = items[0].clone();
-        before.state = ReviewState::Stale;
+        before.comments = Some(CommentStats::default());
+        before.updated_at = Some(now() - Duration::days(22));
         attach_threads(&mut items, &HashMap::new(), &HashMap::from([(1, &before)]), now());
         assert_eq!((items[0].state, items[0].actionable), (ReviewState::Stale, false));
     }
