@@ -279,7 +279,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       trackerField.placeholder = chosen().placeholder;
     };
     showTracker();
-    // A failed save puts every field back to the last saved values; a field with focus once it loses it.
+    // A failed save puts every field back to the last saved values; a text field with focus once it loses it.
     saver.revert = (last) => {
       const trackerBefore = JSON.stringify(workspace.tracker);
       Object.assign(workspace, last);
