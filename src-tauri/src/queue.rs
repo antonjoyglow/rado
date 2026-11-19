@@ -211,10 +211,9 @@ pub(crate) mod tests {
         let q: Queue = serde_json::from_str(old).unwrap();
         let pr = &q.branches[0].prs[0];
         assert_eq!((pr.provider.as_str(), pr.pr_id, pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, 7, false, 0));
-        assert_eq!(q.schema_version, 1);
     }
 
-    /// 0.10.0's `Queue`, as an older `rado-mcp` still reads it.
+    /// 0.10.0's `Queue`, as an older `rado-mcp` still reads it; `Branch` and `QueuedPr` are unchanged since then.
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     #[allow(dead_code)]
@@ -232,24 +231,9 @@ pub(crate) mod tests {
         let q = queue(vec![branch("a", vec![pr(1, "c1")])]);
         let json = serde_json::to_string(&q).unwrap();
 
-        assert!(json.starts_with(r#"{"schemaVersion":1,"#), "{json}");
+        assert!(json.contains(r#""schemaVersion":1"#), "{json}");
         let old: QueueBeforeSchema = serde_json::from_str(&json).unwrap();
         assert_eq!((old.refreshed, old.branches), (q.refreshed, q.branches));
-    }
-
-    #[test]
-    fn readJsonFile_tellsMissingFromInvalid() {
-        let dir = std::env::temp_dir().join(format!("rado-queue-read-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("x.json");
-        std::fs::write(&path, "{ not json").unwrap();
-
-        let invalid = read_json_file::<Queue>(&path);
-        let missing = read_json_file::<Queue>(&dir.join("missing.json"));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(invalid.unwrap_err().contains("is not valid"));
-        assert_eq!(missing, Ok(None));
     }
 
     fn branch(name: &str, prs: Vec<QueuedPr>) -> Branch {

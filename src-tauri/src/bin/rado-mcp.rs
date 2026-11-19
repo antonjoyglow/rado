@@ -68,6 +68,9 @@ fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
         Ok(v) => v,
         Err(e) => return Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
     };
+    if request.is_array() {
+        return Some(error(Value::Null, -32600, "batches are not supported; send one request per line"));
+    }
     let id = request.get("id").cloned()?;
     let params = request.get("params").cloned().unwrap_or(Value::Null);
     let result = match request["method"].as_str().unwrap_or_default() {
@@ -145,7 +148,7 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
 }
 
 fn active_workspace(root: &Path) -> Result<PathBuf, String> {
-    queue::active_workspace_dir(root)?.ok_or_else(|| {
+    queue::active_workspace_dir(root).map_err(|e| format!("{e}. Start Rado to repair it."))?.ok_or_else(|| {
         format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
     })
 }
@@ -153,11 +156,11 @@ fn active_workspace(root: &Path) -> Result<PathBuf, String> {
 /// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
 fn read_queue(dir: &Path) -> Result<Queue, String> {
     let path = dir.join(QUEUE_FILE);
-    let retry = |e: String| format!("{e}. Rado rewrites it at its next poll; try again then.");
+    let retry = |e: String| format!("{e}. Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running.");
     let file: Value = queue::read_json_file(&path).map_err(retry)?.ok_or_else(|| {
         format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
     })?;
-    let schema = file.get("schemaVersion").and_then(Value::as_u64).unwrap_or(1);
+    let schema = file.get("schemaVersion").map_or(Some(1), Value::as_u64).unwrap_or(u64::MAX);
     if schema > u64::from(QUEUE_SCHEMA) {
         return Err(format!(
             "{} has schema {schema}, but this rado-mcp {} reads up to {QUEUE_SCHEMA}. Restart this Claude session to start \
@@ -400,12 +403,14 @@ mod tests {
     fn listReviewQueue_newerSchema_isRefusedAsNewerEvenWhenItsShapeChanged() {
         let dir = with_queue("newer");
         let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
-        std::fs::write(&path, json!({ "schemaVersion": QUEUE_SCHEMA + 1, "queue": [] }).to_string()).unwrap();
+        for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), u64::MAX.to_string())] {
+            std::fs::write(&path, json!({ "schemaVersion": schema, "queue": [] }).to_string()).unwrap();
 
-        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
-
-        assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {}", QUEUE_SCHEMA + 1)), "{result}");
+            for tool in ["list_review_queue", "mark_drafted"] {
+                let result = call_tool(&dir.0, at(1), tool, json!({ "prId": 1, "commit": "c1" }));
+                assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {shown}")), "{tool}: {result}");
+            }
+        }
     }
 
     #[test]
@@ -589,6 +594,21 @@ mod tests {
             assert_eq!(result["isError"], true, "{settings:?}");
             assert!(result["content"][0]["text"].as_str().unwrap().contains("no active workspace"));
         }
+    }
+
+    #[test]
+    fn activeWorkspace_invalidSettings_saysSoAndToStartRado() {
+        let dir = TempDir::new("bad-settings");
+        std::fs::write(dir.0.join(queue::SETTINGS_FILE), "{").unwrap();
+        let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("settings.json is not valid") && text.ends_with("Start Rado to repair it."), "{text}");
+    }
+
+    #[test]
+    fn batch_isRefusedWithOneError() {
+        let dir = TempDir::new("batch");
+        let reply = send(&dir.0, at(0), json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]));
+        assert_eq!(reply["error"]["code"], -32600);
     }
 
     #[test]
