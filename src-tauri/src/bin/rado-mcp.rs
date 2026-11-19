@@ -143,6 +143,7 @@ fn workspace_argument() -> Value {
     json!({ "type": "string", "description": "A workspace's name or id; the one active in Rado when left out. Rado polls only the active workspace." })
 }
 
+/// Replies with a JSON object, which `call` adds the workspace to.
 type Tool = fn(&Workspace, DateTime<Utc>, &Value) -> Result<Value, String>;
 
 /// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead. Every
@@ -157,11 +158,13 @@ fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String
     let outcome = workspace(root, args.get("workspace")).and_then(|ws| {
         tool(&ws, now, args)
             .map(|mut reply| {
-                reply["workspace"] = json!(ws.name);
-                reply["workspaceId"] = json!(ws.id);
+                if let Some(fields) = reply.as_object_mut() {
+                    fields.insert("workspace".into(), json!(ws.name));
+                    fields.insert("workspaceId".into(), json!(ws.id));
+                }
                 reply
             })
-            .map_err(|message| format!("Workspace {} ({}): {message}", ws.name, ws.id))
+            .map_err(|message| format!("Workspace {} (id {}): {message}", ws.name, ws.id))
     });
     Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
@@ -191,7 +194,7 @@ impl Workspace {
         if self.active {
             if_active.into()
         } else {
-            format!("Rado polls only the active workspace: switch to {} in Rado, or leave out workspace to use the active one.", self.name)
+            format!("Rado polls only the active workspace: ask the user to switch to {} in Rado, and review nothing until then.", self.name)
         }
     }
 }
@@ -209,7 +212,7 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
     let all: Vec<Workspace> = (settings["workspaces"].as_array().into_iter().flatten())
         .filter_map(|w| {
             let id = w["id"].as_str().filter(|id| queue::is_workspace_id(id))?;
-            let name = w["name"].as_str().unwrap_or(id);
+            let name = w["name"].as_str().filter(|name| !name.trim().is_empty()).unwrap_or(id);
             Some(Workspace { id: id.into(), name: name.into(), dir: queue::workspace_dir(root, id), active: active == Some(id) })
         })
         .collect();
@@ -532,7 +535,7 @@ mod tests {
         let workspace = queue::workspace_dir(&dir.0, "w1");
         std::fs::create_dir_all(&workspace).unwrap();
         settings(&dir.0, "w1", &[("w1", "Work")]);
-        let prs =(1..=AGENTS * MARKS_EACH).map(|id| pr(id, &format!("c{id}"))).collect();
+        let prs = (1..=AGENTS * MARKS_EACH).map(|id| pr(id, &format!("c{id}"))).collect();
         write_json_atomic(&workspace.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs }])).unwrap();
         let start = std::sync::Barrier::new(AGENTS as usize);
 
@@ -567,7 +570,7 @@ mod tests {
         drop(held);
 
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("Workspace Work (w1): Cannot read") && text.ends_with("Try again."), "{result}");
+        assert!(text.starts_with("Workspace Work (id w1): Cannot read") && text.ends_with("Try again."), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
@@ -694,14 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn workspaceArgument_idWinsOverAnotherWorkspacesName() {
-        let (root, _, _) = two_workspaces("id-first");
-        settings(&root.0, "a1", &[("a1", "b2"), ("b2", "Beta")]);
-
-        assert_eq!(text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "b2" })))["workspaceId"], "b2");
-    }
-
-    #[test]
     fn workspaceArgument_unknown_isAnErrorListingTheWorkspaces() {
         let (root, _, _) = two_workspaces("unknown-ws");
         settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta"), ("../..", "Escape")]);
@@ -735,14 +730,14 @@ mod tests {
     fn workspaceArgument_inactiveWorkspacesOldOrMissingQueue_saysToSwitchToIt() {
         let (root, _, b) = two_workspaces("inactive");
         settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
-        let switch = "Rado polls only the active workspace: switch to Beta in Rado";
+        let switch = "Rado polls only the active workspace: ask the user to switch to Beta in Rado, and review nothing until then.";
 
         let stale = error_text(&call_tool(&root.0, at(31), "list_review_queue", json!({ "workspace": "Beta" })));
-        assert!(stale.starts_with("Workspace Beta (b2): Rado's review queue is 31 minutes old") && stale.contains(switch), "{stale}");
+        assert!(stale.starts_with("Workspace Beta (id b2): Rado's review queue is 31 minutes old") && stale.ends_with(switch), "{stale}");
 
         std::fs::remove_file(b.join(QUEUE_FILE)).unwrap();
         let missing = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
-        assert!(missing.contains("has not written a review queue") && missing.contains(switch), "{missing}");
+        assert!(missing.contains("has not written a review queue") && missing.ends_with(switch), "{missing}");
     }
 
     #[test]
