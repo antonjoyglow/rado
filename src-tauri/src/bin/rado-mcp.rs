@@ -134,8 +134,8 @@ fn tools() -> Value {
                     "draftUrl": {
                         "type": "string",
                         "description": "An http:// or https:// link where the user can read the draft: its summary, risks and \
-                            suggested comments. At most 2048 characters; percent-encode spaces, quotes and backslashes, \
-                            and put no user name or @ before the host.",
+                            suggested comments. At most 2048 characters; percent-encode spaces, quotes, backslashes and \
+                            non-ASCII characters, and put no user name or @ before the host.",
                     },
                     "workspace": workspace_argument(),
                 },
@@ -371,14 +371,14 @@ fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
     Ok((pr_id, commit))
 }
 
-/// The links, or None when the file can't be used and no link is being written. A damaged file is never replaced, as
-/// that would drop every link in it; but Rado's list ignores it, so it blocks only a call that must write a link,
-/// rather than have the agent draft a PR again because its mark was refused.
+/// The links, or None when the file is damaged and no link is being written. A damaged file is never replaced, as
+/// that would drop every link in it; but Rado's list ignores it, so it blocks only a mark that writes a link, rather
+/// than have the agent draft a PR again because its mark was refused.
 fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, String> {
     match queue::read_json_file(path) {
         Ok(links) => Ok(Some(links.unwrap_or_default())),
-        Err(e) if writing_a_link => Err(advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links.")),
-        Err(_) => Ok(None),
+        Err(ReadError::Invalid(_)) if !writing_a_link => Ok(None),
+        Err(e) => Err(advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links.")),
     }
 }
 
@@ -398,7 +398,7 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
         None | Some(Value::Null) => None,
         Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
         Some(_) => return Err(format!(
-            "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, without spaces, quotes, backslashes or an @ before the host"
+            "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, with no spaces, quotes, backslashes or non-ASCII characters, and no @ before the host"
         )),
     };
     let queue = read_queue(ws)?;
@@ -444,16 +444,13 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
         return Err(unmarked());
     }
     let _lock = lock_drafts(&ws.dir)?;
-    let links_path = ws.dir.join(DRAFT_LINKS_FILE);
     let mut drafts = read_drafts(&path)?;
-    let links = read_links(&links_path, false)?;
     if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
         return Err(unmarked());
     }
+    // The link stays until the next mark prunes it; without its mark Rado never shows it.
     drafts.shift_remove(&pr_id);
-    // Marks first: until the link goes, it can't show, since its mark is gone.
     queue::write_json_atomic(&path, &drafts)?;
-    update_links(&links_path, links, &drafts, |_| {})?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
@@ -652,17 +649,6 @@ mod tests {
         call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
 
         assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::new());
-    }
-
-    #[test]
-    fn unmarkDrafted_removesTheLink() {
-        let dir = with_queue("unmark-link");
-        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" }));
-        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2", "draftUrl": "https://d/2" }));
-
-        call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" }));
-
-        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::from([(2, DraftLink { commit: "c2".into(), url: "https://d/2".into() })]));
     }
 
     #[test]

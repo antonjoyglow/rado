@@ -469,6 +469,7 @@ impl Store {
     /// missing or damaged file means no marker, and the server reports the damage to the agent.
     pub fn agent_drafts(&self, id: &str, commits: &HashMap<i64, String>) -> HashMap<i64, Option<String>> {
         let dir = self.workspace_dir(id);
+        // Marks before links: rado-mcp writes links first, so a new mark is never read with an old link.
         let drafts = queue::read_json(&dir.join(queue::DRAFTS_FILE)).unwrap_or_default();
         let links = queue::read_json(&dir.join(queue::DRAFT_LINKS_FILE)).unwrap_or_default();
         queue::agent_drafts(commits, &drafts, &links)

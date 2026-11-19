@@ -158,14 +158,14 @@ pub struct DraftLink {
 }
 
 /// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file. A
-/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags. No
-/// `\` or `@` either, so the host the list shows is the one the browser goes to.
+/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags.
+/// Printable ASCII only, with no `\` and no `@` in the host, so the host the list shows is the one the browser opens.
 pub fn is_draft_url(url: &str) -> bool {
     let authority = url_authority(url);
     !authority.is_empty()
         && !authority.contains('@')
-        && url.chars().count() <= MAX_DRAFT_URL
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\\')
+        && url.len() <= MAX_DRAFT_URL
+        && url.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
 }
 
 /// The part between `http(s)://` and the path, shown before a draft opens; empty when it isn't an http link.
@@ -357,7 +357,7 @@ pub(crate) mod tests {
             assert!(is_draft_url(good), "{good}");
         }
         let long = format!("https://x/{}", "a".repeat(MAX_DRAFT_URL));
-        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "https://evil.example\\@github.com/x", "https://github.com@evil.example/", "HTTPS://x", &long] {
+        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "https://evil.example\\@github.com/x", "https://github.com@evil.example/", "https://g\u{0456}thub.com/", "https://x/\u{200B}", "HTTPS://x", &long] {
             assert!(!is_draft_url(bad), "{bad}");
         }
     }
