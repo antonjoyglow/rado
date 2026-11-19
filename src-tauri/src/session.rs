@@ -51,8 +51,8 @@ struct Backoff {
     failures: u32,
     until: DateTime<Utc>,
     rate_limited: bool,
-    /// For the status line, with the time of the next try.
-    error: String,
+    /// The failure, named for its source; `status` adds the time.
+    message: String,
 }
 
 impl Backoff {
@@ -62,15 +62,20 @@ impl Backoff {
         let interval = chrono::Duration::minutes(i64::from(interval_minutes));
         let cap = MAX_BACKOFF_MINUTES.max(i64::from(interval_minutes));
         let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(cap));
-        let (until, rate_limited, error) = match error.kind {
-            FailureKind::RateLimited { until: asked } => {
-                let until = asked.map_or(doubled, |at| at.max(now + interval));
-                (until, true, format!("{} until {}", error.message, clock(until, now)))
-            }
-            FailureKind::Other if failures > 1 => (doubled, false, format!("{} · next try {}", error.message, clock(doubled, now))),
-            FailureKind::Other => (doubled, false, error.message),
+        let (until, rate_limited) = match error.kind {
+            FailureKind::RateLimited { until: asked } => (asked.map_or(doubled, |at| at.max(now + interval)), true),
+            FailureKind::Other => (doubled, false),
         };
-        Self { failures, until, rate_limited, error }
+        Self { failures, until, rate_limited, message: error.message }
+    }
+
+    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true).
+    fn status(&self, now: DateTime<Utc>) -> String {
+        match (self.rate_limited, self.failures) {
+            (true, _) => format!("{} until {}", self.message, clock(self.until, now)),
+            (false, 1) => self.message.clone(),
+            (false, _) => format!("{} · next try {}", self.message, clock(self.until, now)),
+        }
     }
 }
 
@@ -352,8 +357,15 @@ impl Session {
             .filter(|i| i.provider == Provider::Ado && (i.hidden || i.state == score::ReviewState::Approved) && i.comments.is_some())
             .filter_map(|i| Some((i.id, self.ws.commits.get(&i.id)?.clone())))
             .collect();
-        // The slack lets the poll that wakes for a next try make it even if the clock moved back a little.
-        let held = self.ws.backoff.iter().filter(|(_, b)| b.until > now + chrono::Duration::seconds(30)).map(|(p, _)| *p).collect();
+        // The slack lets the poll that wakes for a next try make it even if the clock moved back a little; a rate
+        // limit gets none, since a request inside it can extend it.
+        let held = self
+            .ws
+            .backoff
+            .iter()
+            .filter(|(_, b)| b.until > now + chrono::Duration::seconds(if b.rate_limited { 0 } else { 30 }))
+            .map(|(p, _)| *p)
+            .collect();
         Some(Ticket { workspace, generation: self.generation, pat, github_token, settled, held })
     }
 
@@ -428,11 +440,11 @@ impl Session {
                         Poll::Failed(error) => {
                             let failures = ws.backoff.get(&provider).map_or(0, |b| b.failures) + 1;
                             let next = Backoff::after(failures, error, interval, now);
-                            let message = next.error.clone();
+                            let message = next.status(now);
                             ws.backoff.insert(provider, next);
                             message
                         }
-                        _ => ws.backoff.get(&provider).map(|b| b.error.clone()).unwrap_or_default(),
+                        _ => ws.backoff.get(&provider).map(|b| b.status(now)).unwrap_or_default(),
                     };
                     errors.push(error);
                     missing.push(export::source_name(provider).to_string());
@@ -1074,15 +1086,15 @@ mod tests {
     fn backoff_doublesTheIntervalPerFailureUpToAnHour_andNamesTheNextTry() {
         let waits: Vec<i64> = (1..=7).map(|n| (Backoff::after(n, "GitHub: HTTP 502".into(), 3, t0()).until - t0()).num_minutes()).collect();
         assert_eq!(waits, [3, 6, 12, 24, 48, 60, 60]);
-        assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 3, t0()).error, "GitHub: HTTP 502");
-        assert_eq!(Backoff::after(2, "GitHub: HTTP 502".into(), 3, t0()).error, format!("GitHub: HTTP 502 · next try {}", clock(t0() + minutes(6), t0())));
+        assert_eq!(Backoff::after(1, "GitHub: HTTP 502".into(), 3, t0()).status(t0()), "GitHub: HTTP 502");
+        assert_eq!(Backoff::after(2, "GitHub: HTTP 502".into(), 3, t0()).status(t0()), format!("GitHub: HTTP 502 · next try {}", clock(t0() + minutes(6), t0())));
     }
 
     #[test]
     fn backoff_rateLimited_waitsAtLeastAsAsked_andSaysUntilWhen() {
         let asked = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(90))).named("GitHub"), 3, t0());
         assert_eq!((asked.until, asked.rate_limited), (t0() + minutes(90), true));
-        assert_eq!(asked.error, format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
+        assert_eq!(asked.status(t0()), format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
         let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
         let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
@@ -1139,7 +1151,7 @@ mod tests {
         assert_eq!(s.begin_poll(t0() + minutes(5)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
         file_github(&mut s, Poll::Held, t0() + minutes(5));
         assert_eq!(listed(&s), ids(&[1]));
-        assert_eq!(s.ws.error, Some(format!("GitHub: HTTP 502 · next try {}", clock(until, t0()))));
+        assert_eq!(s.ws.error, Some(format!("GitHub: HTTP 502 · next try {}", clock(until, t0() + minutes(5)))));
         assert_eq!(s.ws.backoff[&Provider::GitHub].failures, 2, "a held poll is not another failure");
 
         assert!(s.begin_poll(until).expect("a ticket").held.is_empty());
@@ -1160,6 +1172,7 @@ mod tests {
         file_github(&mut s, Poll::Failed(SourceError::rate_limited(Some(t0() + minutes(30))).named("GitHub")), t0());
         s.refresh(t0() + minutes(1));
         assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
+        assert!(!s.begin_poll(t0() + minutes(30) - chrono::Duration::seconds(10)).expect("a ticket").held.is_empty(), "no slack inside a rate limit");
     }
 
     #[test]
