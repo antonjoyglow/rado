@@ -112,11 +112,20 @@ pub fn stale_after_minutes(poll_minutes: u32) -> i64 {
 
 /// The queue without the PRs already drafted at their current source commit; a new push brings a PR back.
 pub fn pending(queue: &Queue, drafts: &Drafts) -> Vec<Branch> {
+    branches_where(queue, |p| !is_drafted(p, drafts))
+}
+
+/// The queued PRs a draft at their current source commit leaves out of `pending`.
+pub fn drafted(queue: &Queue, drafts: &Drafts) -> Vec<Branch> {
+    branches_where(queue, |p| is_drafted(p, drafts))
+}
+
+fn branches_where(queue: &Queue, keep: impl Fn(&QueuedPr) -> bool) -> Vec<Branch> {
     queue
         .branches
         .iter()
         .filter_map(|b| {
-            let prs: Vec<QueuedPr> = b.prs.iter().filter(|p| !is_drafted(p, drafts)).cloned().collect();
+            let prs: Vec<QueuedPr> = b.prs.iter().filter(|p| keep(p)).cloned().collect();
             (!prs.is_empty()).then(|| Branch { branch: b.branch.clone(), prs })
         })
         .collect()
@@ -249,6 +258,14 @@ pub(crate) mod tests {
         let pending = pending(&q, &drafts);
 
         assert_eq!(pending, vec![branch("a", vec![pr(2, "c2")])]);
+    }
+
+    #[test]
+    fn drafted_isWhatPendingLeavesOut() {
+        let q = queue(vec![branch("a", vec![pr(1, "c1"), pr(2, "c2")]), branch("b", vec![pr(3, "new")])]);
+        let drafts = Drafts::from([(1, "c1".to_string()), (3, "old".to_string())]);
+
+        assert_eq!(drafted(&q, &drafts), vec![branch("a", vec![pr(1, "c1")])]);
     }
 
     #[test]
