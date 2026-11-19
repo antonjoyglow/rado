@@ -11,7 +11,7 @@ Rado is a Windows tray app that shows the pull requests waiting for your review,
    - **Azure DevOps PAT:** **Code (Read)** is the only scope it needs.
    - **GitHub token:** a classic token with `repo` (to read private repos) and `read:org` (to see review requests to your teams). A fine-grained token with *Pull requests: Read* and *Metadata: Read* on your orgs should also work, but some orgs must approve it first (not tested yet).
 3. **Fill in your workspace.** The counter shows `!` beside Rado's bird until a token is saved. Click it (or the tray icon), and the list opens on **Settings → Workspaces**, where a workspace named *Default* is ready. Give it a name, then:
-   - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`) and, if your teams get review requests, **My teams** (comma-separated).
+   - Azure DevOps: paste the PAT and click **Save**, then fill in **Organization** (`yourorg`, as in `dev.azure.com/yourorg`; pasting a `dev.azure.com` or `yourorg.visualstudio.com` link works too) and, if your teams get review requests, **My teams** (comma-separated).
    - GitHub: paste the token and click **Save**. Optionally, add **Watched repos** (`owner/name`) to count every open PR in them as a review.
 
    Tokens go to Windows Credential Manager; **Remove…** beside a saved one deletes it and turns that source off. Other fields save when you leave them.
