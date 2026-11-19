@@ -140,7 +140,8 @@ fn tools() -> Value {
             "name": "list_drafted",
             "description": "The queued PRs that list_review_queue leaves out because a draft review was marked at their \
                 current sourceCommit, in the same shape and order. Use it to find the prId and commit to pass to \
-                unmark_drafted. Unlike list_review_queue it answers from an old queue too; refreshedMinutesAgo says \
+                unmark_drafted. A mark on a PR that is no longer queued, or is queued at another commit, isn't shown: \
+                to undo it, pass the prId and commit you marked. Unlike list_review_queue it answers from an old queue too; refreshedMinutesAgo says \
                 how old.",
             "inputSchema": {
                 "type": "object",
@@ -358,7 +359,7 @@ fn list(ws: &Workspace, now: DateTime<Utc>, select: fn(&Queue, &Drafts) -> Vec<q
 
 fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
     let pr_id = args["prId"].as_i64().ok_or("prId (an integer) is required")?;
-    let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
+    let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the PR's sourceCommit) is required")?;
     Ok((pr_id, commit))
 }
 
@@ -388,8 +389,8 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
-/// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR, so the
-/// error never names the marked commit.
+/// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR, and the
+/// error never names the marked commit, so retrying with it can't get around that.
 fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let (pr_id, commit) = pr_and_commit(args)?;
     let path = ws.dir.join(DRAFTS_FILE);
