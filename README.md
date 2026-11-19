@@ -181,8 +181,8 @@ The agent below drafts each queued GitHub PR as a pending review on your account
    Draft reviews for the PRs Rado queues for me, in Rado workspace 1879a2c4e5f60b3d.
    1. Call list_review_queue with workspace 1879a2c4e5f60b3d. If it fails, stop and report the error.
    2. For each PR with provider gitHub, at most 3 per run: read it with pull_request_read (owner = project,
-      repo, pullNumber = number; methods get and get_diff). For a reReview PR with lastVotedCommit, focus
-      on what changed since that commit.
+      repo, pullNumber = number; methods get, get_diff and get_commits). For a reReview PR with
+      lastVotedCommit, name the commits pushed after it in the summary.
    3. Create a pending review with pull_request_review_write (method create, commitID = sourceCommit,
       no event). If that fails (you may already have a pending review there), skip the PR without
       marking it and report it. Add line comments with add_comment_to_pending_review (subjectType LINE),
