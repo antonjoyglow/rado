@@ -14,3 +14,9 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   }
   return el;
 }
+
+/** Runs `show` now, or once `input` loses focus if it has it, so a rollback never rewrites what is being typed. */
+export function whenBlurred(input: HTMLElement, show: () => void): void {
+  if (document.activeElement === input) input.addEventListener("blur", show, { once: true });
+  else show();
+}

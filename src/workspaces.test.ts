@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
-import type { Settings, Workspace } from "./api";
-import { activeWorkspace, parseList, stepWorkspace, trackerFor, trackerKeys, trackerName, trackerValue, workspaceStep } from "./workspaces";
+import { describe, expect, it, vi } from "vitest";
+import { api, type Settings, type Workspace } from "./api";
+import { DROPPED } from "./save";
+import { activeWorkspace, parseList, stepWorkspace, trackerFor, trackerKeys, trackerName, trackerValue, workspaceSaver, workspaceStep } from "./workspaces";
+
+vi.mock("./api", () => ({ api: { saveWorkspace: vi.fn() } }));
 
 const ws = (id: string, tracker: Workspace["tracker"] = { kind: "none" }): Workspace => ({ id, name: id.toUpperCase(), azureDevOps: { organization: "", teams: [] }, github: { repos: [] }, tracker });
 const list = [ws("a"), ws("b"), ws("c")];
@@ -66,6 +69,33 @@ describe("trackers", () => {
     expect(trackerName(activeWorkspace({ ...settings, activeWorkspace: "c" }))).toBe("Linear");
     expect(trackerName(activeWorkspace({ ...settings, activeWorkspace: "a" }))).toBe("");
     expect(trackerName(activeWorkspace({ ...settings, activeWorkspace: "gone" }))).toBe("");
+  });
+});
+
+describe("workspaceSaver", () => {
+  it("keeps one queue per workspace, so a rebuilt editor queues behind a save still running", () => {
+    const first = workspaceSaver(ws("q1"));
+    expect(workspaceSaver({ ...ws("q1"), name: "From a later snapshot" })).toBe(first);
+    expect(workspaceSaver(ws("q2"))).not.toBe(first);
+  });
+
+  it("a failed save puts the workspace back to the last saved one and drops the saves queued behind it", async () => {
+    const send = vi.mocked(api.saveWorkspace);
+    send.mockReset();
+    send.mockResolvedValueOnce().mockRejectedValueOnce("Not saved: “x” isn't a GitHub repo (owner/name)").mockResolvedValue();
+    const saver = workspaceSaver(ws("r"));
+    let reverted: Workspace | null = null;
+    saver.revert = (last) => (reverted = last);
+
+    await saver.save({ ...ws("r"), name: "Renamed" });
+    const bad = saver.save({ ...ws("r"), name: "Renamed", github: { repos: ["x"] } });
+    const queued = saver.save({ ...ws("r"), name: "Queued", github: { repos: ["x"] } });
+
+    await expect(bad).rejects.toMatch(/^Not saved/);
+    await expect(queued).rejects.toBe(DROPPED);
+    expect(reverted).toEqual({ ...ws("r"), name: "Renamed" });
+    expect(saver.latest).toEqual({ ...ws("r"), name: "Renamed" });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 });
 

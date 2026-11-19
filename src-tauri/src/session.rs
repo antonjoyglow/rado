@@ -504,40 +504,40 @@ impl Session {
 
     /// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker. A changed
     /// source starts a new baseline, and on the active workspace makes the poll in flight stale and polls again.
+    /// Written before it is applied: any error means nothing changed, which is what the editor's rollback relies on.
     pub fn save_workspace(&mut self, workspace: Workspace) -> Result<(), String> {
+        if let Some(repo) = workspace.bad_repo() {
+            return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
+        }
         let typed_tracker = workspace.tracker != Tracker::None;
-        self.edit_workspaces(|s| {
-            if let Some(repo) = workspace.bad_repo() {
-                return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
+        let mut workspace = workspace.clamped();
+        if typed_tracker && workspace.tracker == Tracker::None {
+            return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
+        }
+        let mut settings = self.settings.clone();
+        let slot = settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("Not saved: that workspace is gone")?;
+        if workspace.name.is_empty() {
+            workspace.name.clone_from(&slot.name);
+        }
+        let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
+        let github_changed = slot.github != workspace.github;
+        let id = workspace.id.clone();
+        *slot = workspace;
+        self.store.save_settings(&settings).map_err(|e| format!("Not saved: {e}"))?;
+        self.settings = settings;
+        if let Some(state) = self.state_of(&id) {
+            if ado_changed {
+                state.baseline.remove(&Provider::Ado);
             }
-            let mut workspace = workspace.clamped();
-            if typed_tracker && workspace.tracker == Tracker::None {
-                return Err("Not saved: that isn't a Jira site or a Linear workspace".into());
+            if github_changed {
+                state.baseline.remove(&Provider::GitHub);
             }
-            let active = workspace.id == s.settings.active_workspace;
-            let slot = s.settings.workspaces.iter_mut().find(|w| w.id == workspace.id).ok_or("That workspace is gone")?;
-            if workspace.name.is_empty() {
-                workspace.name.clone_from(&slot.name);
-            }
-            let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
-            let github_changed = slot.github != workspace.github;
-            *slot = workspace;
-            let id = slot.id.clone();
-            if let Some(state) = s.state_of(&id) {
-                if ado_changed {
-                    state.baseline.remove(&Provider::Ado);
-                }
-                if github_changed {
-                    state.baseline.remove(&Provider::GitHub);
-                }
-            }
-            // Set before the save: even when it fails, the change stands for this run and needs a poll.
-            if active && (ado_changed || github_changed) {
-                s.generation += 1;
-                s.wake = true;
-            }
-            Ok(())
-        })
+        }
+        if id == self.settings.active_workspace && (ado_changed || github_changed) {
+            self.generation += 1;
+            self.wake = true;
+        }
+        Ok(())
     }
 
     pub fn switch(&mut self, id: &str) -> Result<(), String> {
@@ -899,13 +899,26 @@ mod tests {
     }
 
     #[test]
-    fn saveWorkspace_badRepo_isRefusedWithTheNotSavedPrefix() {
+    fn saveWorkspace_badRepo_changesNothing() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-bad");
         let mut changed = s.settings.workspaces[0].clone();
         changed.github.repos = vec!["not a repo".into()];
-        let error = s.save_workspace(changed).expect_err("refused");
-        assert!(error.starts_with("Not saved"), "workspaces.ts rolls back on this prefix: {error}");
+        s.save_workspace(changed).expect_err("refused");
         assert!(s.settings.workspaces[0].github.repos.is_empty());
+    }
+
+    #[test]
+    fn saveWorkspace_failedWrite_changesNothing_andNeedsNoPoll() {
+        let Fixture { mut s, dir, .. } = two_workspaces("save-workspace-unwritable");
+        // A folder where settings.json goes: the rename into place fails.
+        std::fs::create_dir_all(dir.0.join(crate::queue::SETTINGS_FILE)).expect("folder");
+        let generation = s.generation;
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.github.repos = vec!["owner/name".into()];
+        let error = s.save_workspace(changed).expect_err("not written");
+        assert!(error.starts_with("Not saved"), "{error}");
+        assert!(s.settings.workspaces[0].github.repos.is_empty());
+        assert_eq!((s.generation, s.take_wake()), (generation, false));
     }
 
     // Hiding.
