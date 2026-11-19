@@ -142,35 +142,38 @@ fn tools() -> Value {
 fn workspace_argument() -> Value {
     json!({
         "type": "string",
-        "description": "A workspace's name or id; the one active in Rado when left out. Pass it in a scheduled run, so \
-            a switch in Rado doesn't change which queue it reviews. Rado polls only the active workspace.",
+        "description": "The workspaceId (or name) your instructions name, or the workspaceId list_review_queue \
+            returned; the one active in Rado when left out. Never guess one. The id stays the same when the user \
+            renames the workspace.",
     })
 }
 
-/// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead. Every
-/// reply names the workspace it used, once that is known; tools reply with a JSON object for that.
+/// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
-    let name = params["name"].as_str().unwrap_or_default();
-    if !matches!(name, "list_review_queue" | "mark_drafted") {
-        return Err(format!("Unknown tool: {name}"));
-    }
     let args = &params["arguments"];
-    let outcome = workspace(root, args.get("workspace")).and_then(|ws| {
-        let reply = if name == "list_review_queue" { list(&ws, now) } else { mark_drafted(&ws, args) };
-        reply
-            .map(|mut reply| {
-                if let Some(fields) = reply.as_object_mut() {
-                    fields.insert("workspace".into(), json!(ws.name));
-                    fields.insert("workspaceId".into(), json!(ws.id));
-                }
-                reply
-            })
-            .map_err(|message| format!("Workspace {} (id {}): {message}", ws.name, ws.id))
-    });
+    let in_workspace = |tool: &dyn Fn(&Workspace) -> Result<Value, String>| workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)));
+    let outcome = match params["name"].as_str() {
+        Some("list_review_queue") => in_workspace(&|ws| list(ws, now)),
+        Some("mark_drafted") => in_workspace(&|ws| mark_drafted(ws, args)),
+        other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
+    };
     Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
     })
+}
+
+/// Names the workspace in a tool's reply, an object, or in its error.
+fn named(ws: &Workspace, outcome: Result<Value, String>) -> Result<Value, String> {
+    outcome
+        .map(|mut reply| {
+            if let Some(fields) = reply.as_object_mut() {
+                fields.insert("workspace".into(), json!(ws.name));
+                fields.insert("workspaceId".into(), json!(ws.id));
+            }
+            reply
+        })
+        .map_err(|message| format!("Workspace {} (id {}): {message}", ws.name, ws.id))
 }
 
 /// The error with what to do about it: a file another program holds needs only a retry, a damaged one `repair`.
@@ -195,7 +198,7 @@ impl Workspace {
         if self.active {
             if_active.into()
         } else {
-            format!("Rado polls only the active workspace: ask the user to switch to {} in Rado, and review nothing until then.", self.name)
+            format!("Rado polls only the active workspace: tell the user to switch to {} in Rado, and review nothing until then.", self.name)
         }
     }
 }
@@ -234,7 +237,10 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
     let listed = |workspaces: &[&Workspace]| workspaces.iter().map(|w| format!("{} (id {})", w.name, w.id)).collect::<Vec<_>>().join(", ");
     match named[..] {
         [ws] => Ok(ws.clone()),
-        [] => Err(format!("Rado has no workspace {requested:?}; pass one of {}", listed(&all.iter().collect::<Vec<_>>()))),
+        [] => Err(format!(
+            "Rado has no workspace {requested:?}; it has {}. Don't pick another: review nothing and tell the user.",
+            listed(&all.iter().collect::<Vec<_>>())
+        )),
         _ => Err(format!("{} workspaces are named {requested:?}; pass the id of one: {}", named.len(), listed(&named))),
     }
 }
@@ -704,7 +710,10 @@ mod tests {
 
         for requested in ["Gamma", "", "../..", "Escape"] {
             let text = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
-            assert_eq!(text, format!("Rado has no workspace {requested:?}; pass one of Alpha (id a1), Beta (id b2)"));
+            assert_eq!(
+                text,
+                format!("Rado has no workspace {requested:?}; it has Alpha (id a1), Beta (id b2). Don't pick another: review nothing and tell the user.")
+            );
         }
     }
 
@@ -731,7 +740,7 @@ mod tests {
     fn workspaceArgument_inactiveWorkspacesOldOrMissingQueue_saysToSwitchToIt() {
         let (root, _, b) = two_workspaces("inactive");
         settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
-        let switch = "Rado polls only the active workspace: ask the user to switch to Beta in Rado, and review nothing until then.";
+        let switch = "Rado polls only the active workspace: tell the user to switch to Beta in Rado, and review nothing until then.";
 
         let stale = error_text(&call_tool(&root.0, at(31), "list_review_queue", json!({ "workspace": "Beta" })));
         assert!(stale.starts_with("Workspace Beta (id b2): Rado's review queue is 31 minutes old") && stale.ends_with(switch), "{stale}");
