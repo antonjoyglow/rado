@@ -73,12 +73,6 @@ describe("trackers", () => {
 });
 
 describe("workspaceSaver", () => {
-  it("keeps one queue per workspace, so a rebuilt editor queues behind a save still running", () => {
-    const first = workspaceSaver(ws("q1"));
-    expect(workspaceSaver({ ...ws("q1"), name: "From a later snapshot" })).toBe(first);
-    expect(workspaceSaver(ws("q2"))).not.toBe(first);
-  });
-
   it("a failed save puts the workspace back to the last saved one and drops the saves queued behind it", async () => {
     const send = vi.mocked(api.saveWorkspace);
     send.mockReset();

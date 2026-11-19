@@ -281,16 +281,27 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     showTracker();
     // A failed save puts every field back to the last saved values; a field with focus once it loses it.
     saver.revert = (last) => {
+      const trackerBefore = JSON.stringify(workspace.tracker);
       Object.assign(workspace, last);
       whenBlurred(name, () => (name.value = workspace.name));
       whenBlurred(org, () => (org.value = workspace.azureDevOps.organization));
       whenBlurred(teams, () => (teams.value = workspace.azureDevOps.teams.join(", ")));
       whenBlurred(repos, () => (repos.value = workspace.github.repos.join(", ")));
-      kind = workspace.tracker.kind;
-      keys = trackerKeys(workspace.tracker);
-      whenBlurred(trackerField, () => (trackerField.value = trackerValue(workspace.tracker)));
-      whenBlurred(keysField, () => (keysField.value = keys.join(", ")));
-      showTracker();
+      // The tracker goes back as one block, and only when it changed, so a chosen kind with its field still empty
+      // survives another field's failure. A block being typed in goes back on blur, unless that blur saved anew.
+      if (JSON.stringify(workspace.tracker) === trackerBefore) return;
+      const reverted = workspace.tracker;
+      const showSaved = () => {
+        if (workspace.tracker !== reverted) return;
+        kind = reverted.kind;
+        keys = trackerKeys(reverted);
+        trackerField.value = trackerValue(reverted);
+        keysField.value = keys.join(", ");
+        showTracker();
+      };
+      const typing = [trackerField, keysField].find((f) => document.activeElement === f);
+      if (typing) whenBlurred(typing, showSaved);
+      else showSaved();
     };
 
     const removeSlot = h("span", { class: "inline" });
