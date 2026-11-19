@@ -49,3 +49,19 @@ export function lastingSaver<T>(initial: T, send: (value: T) => Promise<void>): 
   };
   return saver;
 }
+
+/**
+ * Saves a typed secret. One paste can commit twice: Enter runs its key handler and change, and a click on Save
+ * follows the change of leaving the field. Blank text, and text already being saved, are skipped. Resolves true
+ * once saved, false when skipped.
+ */
+export function secretSaver(store: (value: string) => Promise<void>): (value: string) => Promise<boolean> {
+  let saving: string | null = null;
+  return (value) => {
+    if (!value.trim() || value === saving) return Promise.resolve(false);
+    saving = value;
+    return store(value).then(() => true).finally(() => {
+      if (saving === value) saving = null;
+    });
+  };
+}

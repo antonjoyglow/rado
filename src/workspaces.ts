@@ -1,6 +1,6 @@
 import { api, type Saved, type Settings, type Snapshot, type Tracker, type Workspace } from "./api";
 import { h, whenBlurred } from "./dom";
-import { lastingSaver, type LastingSaver } from "./save";
+import { lastingSaver, secretSaver, type LastingSaver } from "./save";
 
 /** One save queue per workspace for the window's lifetime: an editor reopened while a save runs queues behind it. */
 const workspaceSavers = new Map<string, LastingSaver<Workspace>>();
@@ -216,15 +216,28 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
         h("button", { type: "button", onclick: () => askRemove(true) }, "Cancel"),
       );
       askRemove(isSaved);
-      const button = h("button", {
-        type: "button",
-        onclick: () => store(input.value).then(() => {
-          input.value = "";
+      const save = secretSaver(store);
+      const commit = () => {
+        const value = input.value;
+        save(value).then((saved) => {
+          if (!saved) return;
+          if (input.value === value) input.value = "";
           input.placeholder = SAVED;
           askRemove(true);
           ok(target, "Saved to Windows Credential Manager");
-        }, (e) => fail(target, e)),
-      }, "Save");
+        }, (e) => fail(target, e));
+      };
+      // Pressing Save leaves the field, which may have saved and emptied it before the click.
+      const commitOrAsk = () => {
+        if (input.value.trim()) commit();
+        else if (input.placeholder !== SAVED) fail(target, `Paste the ${label} first`);
+      };
+      input.onchange = commit;
+      // Change fires only for a new value, so Enter after a failed save retries here.
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") commitOrAsk();
+      };
+      const button = h("button", { type: "button", onclick: commitOrAsk }, "Save");
       return h("span", { class: "inline" }, input, button, removeSlot);
     };
     const org = h("input", {
