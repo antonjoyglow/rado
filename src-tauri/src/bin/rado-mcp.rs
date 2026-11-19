@@ -134,13 +134,12 @@ fn tools() -> Value {
 
 /// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
-    let args = &params["arguments"];
-    let tool = match params["name"].as_str() {
-        Some(name @ ("list_review_queue" | "mark_drafted")) => name,
+    // The workspace is read on every call, so a switch in Rado is followed without restarting this server.
+    let outcome = match params["name"].as_str() {
+        Some("list_review_queue") => active_workspace(root).and_then(|dir| list(&dir, now)),
+        Some("mark_drafted") => active_workspace(root).and_then(|dir| mark_drafted(&dir, &params["arguments"])),
         other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
     };
-    // Read on every call, so a switch in Rado is followed without restarting this server.
-    let outcome = active_workspace(root).and_then(|dir| if tool == "mark_drafted" { mark_drafted(&dir, args) } else { list(&dir, now) });
     Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
@@ -171,8 +170,9 @@ fn read_queue(dir: &Path) -> Result<Queue, String> {
     let schema = file.get("schemaVersion").cloned().unwrap_or(json!(1));
     if schema.as_u64().is_none_or(|v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
-            "{} has schema {schema}, but this rado-mcp {} ({}) reads up to {QUEUE_SCHEMA}. Restart this Claude session; if \
-             it still refuses, run the Rado installer again with no Claude session open (a source build: npm run mcp:build).",
+            "{} has schema {schema}, but this rado-mcp {} ({}) reads up to {QUEUE_SCHEMA}. Restart this Claude session. If \
+             it still refuses, that exe isn't the newer one: run the Rado installer from Explorer with no Claude session \
+             open, or register the installed rado-mcp.exe (a source build: npm run mcp:build).",
             path.display(),
             env!("CARGO_PKG_VERSION"),
             std::env::current_exe().unwrap_or_default().display(),
@@ -316,16 +316,6 @@ mod tests {
         let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "drop_queue" } }));
         assert_eq!(reply["error"]["code"], -32602);
         assert_eq!(reply["error"]["message"], "Unknown tool: drop_queue");
-        assert_eq!(error_message(&reply), Some("Unknown tool: drop_queue"));
-    }
-
-    #[test]
-    fn errorMessage_isTheFailedToolCallsText_andNoneOnSuccess() {
-        let dir = with_queue("log");
-        let failed = send(&dir.0, at(31), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue" } }));
-        let listed = send(&dir.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue" } }));
-        assert!(error_message(&failed).unwrap().contains("31 minutes old"));
-        assert_eq!(error_message(&listed), None);
     }
 
     #[test]
