@@ -29,13 +29,6 @@ pub fn workspace_dir(root: &Path, id: &str) -> PathBuf {
     root.join("workspaces").join(id)
 }
 
-/// The active workspace's folder, named by `activeWorkspace` in the settings file; None before the first one exists.
-pub fn active_workspace_dir(root: &Path) -> Result<Option<PathBuf>, ReadError> {
-    let settings: Option<serde_json::Value> = read_json_file(&root.join(SETTINGS_FILE))?;
-    let id = settings.as_ref().and_then(|s| s["activeWorkspace"].as_str()).filter(|id| is_workspace_id(id));
-    Ok(id.map(|id| workspace_dir(root, id)))
-}
-
 /// The PRs waiting on my review at the last successful poll: not hidden, and not my own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

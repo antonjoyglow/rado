@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError};
+use queue::{DRAFTS_FILE, DRAFTS_LOCK_FILE, Drafts, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, SETTINGS_FILE};
 
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
@@ -45,7 +45,7 @@ fn log(line: &str) {
 
 /// Logged at start, so a wrong data folder shows before the first tool call.
 fn startup(root: &Path) -> String {
-    let workspace = active_workspace(root).map_or_else(|e| e, |dir| format!("active workspace {}", dir.display()));
+    let workspace = workspace(root, None).map_or_else(|e| e, |ws| format!("active workspace {} ({})", ws.name, ws.dir.display()));
     format!("{} started; data folder {}; {workspace}", env!("CARGO_PKG_VERSION"), root.display())
 }
 
@@ -107,8 +107,13 @@ fn tools() -> Value {
                 labelled agent, ai, ai-generated or ai-assisted. A reReview PR with lastVotedCommit has new pushes since \
                 the user's vote, so review only what changed since that commit; without it, review the whole PR. \
                 missingSources names a provider whose last poll failed or came back partial: some of its PRs may be \
-                absent, which doesn't mean they are done. Fails when Rado's data is stale; then review nothing.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+                absent, which doesn't mean they are done. Fails when Rado's data is stale; then review nothing. The reply \
+                names the workspace and workspaceId it read: the one active in Rado, unless workspace picks another.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "workspace": workspace_argument() },
+                "additionalProperties": false,
+            },
             "annotations": { "title": "List review queue", "readOnlyHint": true, "openWorldHint": false },
         },
         {
@@ -117,12 +122,14 @@ fn tools() -> Value {
                 until someone pushes again. Call it once per PR, after the draft is published, with the prId (not the GitHub \
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
                 out of the queue is still accepted, unless the id is a queued PR's GitHub number at that commit. A queued PR at another \
-                commit is refused: list again. Changes nothing on Azure DevOps or GitHub.",
+                commit is refused: list again. Pass the workspaceId list_review_queue returned as workspace, so a switch \
+                in Rado between the two calls can't send the mark elsewhere. Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prId": { "type": "integer", "description": "The prId from list_review_queue." },
                     "commit": { "type": "string", "description": "The sourceCommit the draft reviewed." },
+                    "workspace": workspace_argument(),
                 },
                 "required": ["prId", "commit"],
                 "additionalProperties": false,
@@ -132,18 +139,64 @@ fn tools() -> Value {
     ])
 }
 
+fn workspace_argument() -> Value {
+    json!({
+        "type": "string",
+        "description": "The workspaceId (or name) your instructions name, or the workspaceId list_review_queue \
+            returned; the one active in Rado when left out. Never guess one. The id stays the same when the user \
+            renames the workspace.",
+    })
+}
+
 /// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
 fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
-    // The workspace is read on every call, so a switch in Rado is followed without restarting this server.
-    let outcome = match params["name"].as_str() {
-        Some("list_review_queue") => active_workspace(root).and_then(|dir| list(&dir, now)),
-        Some("mark_drafted") => active_workspace(root).and_then(|dir| mark_drafted(&dir, &params["arguments"])),
-        other => return Err(format!("Unknown tool: {}", other.unwrap_or_default())),
+    let args = &params["arguments"];
+    let name = params["name"].as_str().unwrap_or_default();
+    let in_workspace = |tool: &dyn Fn(&Workspace) -> Result<Value, String>| {
+        known_arguments(name, args)?;
+        workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)))
+    };
+    let outcome = match name {
+        "list_review_queue" => in_workspace(&|ws| list(ws, now)),
+        "mark_drafted" => in_workspace(&|ws| mark_drafted(ws, args)),
+        other => return Err(format!("Unknown tool: {other}")),
     };
     Ok(match outcome {
         Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
         Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
     })
+}
+
+/// Refuses an argument the tool's schema doesn't list: ignoring a misnamed `workspaceId` would use the active
+/// workspace instead of the one the agent meant.
+fn known_arguments(tool: &str, args: &Value) -> Result<(), String> {
+    let tools = tools();
+    let schema = tools.as_array().and_then(|all| all.iter().find(|t| t["name"] == tool));
+    let args = match args {
+        Value::Null => return Ok(()),
+        Value::Object(args) => args,
+        other => return Err(format!("{tool}'s arguments must be an object, not {other}")),
+    };
+    let Some(properties) = schema.and_then(|t| t["inputSchema"]["properties"].as_object()) else {
+        return Ok(());
+    };
+    match args.keys().find(|key| !properties.contains_key(*key)) {
+        Some(key) => Err(format!("{tool} takes no argument {key:?}; it takes {}", properties.keys().cloned().collect::<Vec<_>>().join(", "))),
+        None => Ok(()),
+    }
+}
+
+/// Names the workspace in a tool's reply, an object, or in its error.
+fn named(ws: &Workspace, outcome: Result<Value, String>) -> Result<Value, String> {
+    outcome
+        .map(|mut reply| {
+            if let Some(fields) = reply.as_object_mut() {
+                fields.insert("workspace".into(), json!(ws.name));
+                fields.insert("workspaceId".into(), json!(ws.id));
+            }
+            reply
+        })
+        .map_err(|message| format!("Workspace {} (id {}): {message}", ws.name, ws.id))
 }
 
 /// The error with what to do about it: a file another program holds needs only a retry, a damaged one `repair`.
@@ -154,19 +207,81 @@ fn advise(error: ReadError, repair: &str) -> String {
     }
 }
 
-fn active_workspace(root: &Path) -> Result<PathBuf, String> {
-    queue::active_workspace_dir(root).map_err(|e| advise(e, "Fix it, or change any setting in Rado while it runs. Starting Rado on a damaged file sets it aside as settings.unreadable-*.json and starts over with one empty workspace."))?.ok_or_else(|| {
-        format!("Rado has no active workspace in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display())
-    })
+#[derive(Clone)]
+struct Workspace {
+    id: String,
+    name: String,
+    dir: PathBuf,
+    active: bool,
+}
+
+impl Workspace {
+    /// What to do about a missing, damaged or old queue: `if_active`, since only the active workspace is polled.
+    fn poll_advice(&self, if_active: &str) -> String {
+        if self.active {
+            if_active.into()
+        } else {
+            format!("Rado polls only the active workspace: tell the user to switch to {} in Rado, and review nothing until then.", self.name)
+        }
+    }
+}
+
+/// The workspace `requested` names, by id first, then by name ignoring case; the active one when it is absent. Read
+/// on every call, so a switch in Rado is followed without restarting this server. Only ids the settings list are
+/// used, so the argument never becomes a path.
+fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String> {
+    let settings: Value = queue::read_json_file(&root.join(SETTINGS_FILE))
+        .map_err(|e| {
+            advise(e, "Fix it, or change any setting in Rado while it runs. Starting Rado on a damaged file sets it aside as settings.unreadable-*.json and starts over with one empty workspace.")
+        })?
+        .unwrap_or_default();
+    let active = settings["activeWorkspace"].as_str();
+    let all: Vec<Workspace> = (settings["workspaces"].as_array().into_iter().flatten())
+        .filter_map(|w| {
+            let id = w["id"].as_str().filter(|id| queue::is_workspace_id(id))?;
+            let name = w["name"].as_str().filter(|name| !name.trim().is_empty()).unwrap_or(id);
+            Some(Workspace { id: id.into(), name: name.into(), dir: queue::workspace_dir(root, id), active: active == Some(id) })
+        })
+        .collect();
+    let none = |what| format!("Rado has no {what} in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display());
+    let requested = match requested {
+        None | Some(Value::Null) => return all.into_iter().find(|w| w.active).ok_or_else(|| none("active workspace")),
+        Some(Value::String(requested)) => requested.trim(),
+        Some(other) => return Err(format!("workspace must be a workspace's name or id, not {other}")),
+    };
+    if all.is_empty() {
+        return Err(none("workspaces"));
+    }
+    if let Some(ws) = all.iter().find(|w| w.id == requested) {
+        return Ok(ws.clone());
+    }
+    let key = requested.to_lowercase();
+    let named: Vec<&Workspace> = all.iter().filter(|w| w.name.trim().to_lowercase() == key).collect();
+    let listed = |workspaces: &[&Workspace]| workspaces.iter().map(|w| format!("{} (id {})", w.name, w.id)).collect::<Vec<_>>().join(", ");
+    match named[..] {
+        [ws] => Ok(ws.clone()),
+        [] => Err(format!(
+            "Rado has no workspace {requested:?}; it has {}. Don't pick another: review nothing and tell the user.",
+            listed(&all.iter().collect::<Vec<_>>())
+        )),
+        _ => Err(format!(
+            "{} workspaces are named {requested:?}: {}. Don't pick one: review nothing and tell the user to name a workspaceId in your instructions.",
+            named.len(),
+            listed(&named)
+        )),
+    }
 }
 
 /// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
-fn read_queue(dir: &Path) -> Result<Queue, String> {
-    let path = dir.join(QUEUE_FILE);
-    let rewrite = |e| advise(e, "Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running.");
-    let file: Value = queue::read_json_file(&path).map_err(rewrite)?.ok_or_else(|| {
-        format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
-    })?;
+fn read_queue(ws: &Workspace) -> Result<Queue, String> {
+    let path = ws.dir.join(QUEUE_FILE);
+    let rewrite = |e| advise(e, &ws.poll_advice("Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running."));
+    let file: Value = queue::read_json_file(&path)
+        .map_err(rewrite)?
+        .ok_or_else(|| {
+            let advice = ws.poll_advice("Start Rado, add a token to the workspace, and wait for one refresh.");
+            format!("Rado has not written a review queue to {}. {advice}", ws.dir.display())
+        })?;
     let schema = file.get("schemaVersion").cloned().unwrap_or(json!(1));
     if schema.as_u64().is_none_or(|v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
@@ -189,17 +304,15 @@ fn read_drafts(path: &Path) -> Result<Drafts, String> {
         .map_err(|e| advise(e, "Delete it to start over; the PRs drafted so far will then be listed again."))
 }
 
-fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
-    let queue = read_queue(dir)?;
+fn list(ws: &Workspace, now: DateTime<Utc>) -> Result<Value, String> {
+    let queue = read_queue(ws)?;
     let age = (now - queue.refreshed).num_minutes();
     let limit = queue::stale_after_minutes(queue.poll_minutes);
     if age > limit {
-        return Err(format!(
-            "Rado's review queue is {age} minutes old (the limit is {limit}): Rado is not running or cannot reach \
-             Azure DevOps or GitHub. Review nothing from it; start Rado and run again."
-        ));
+        let advice = ws.poll_advice("Rado is not running or cannot reach Azure DevOps or GitHub; start Rado and run again.");
+        return Err(format!("Rado's review queue is {age} minutes old (the limit is {limit}). Review nothing from it. {advice}"));
     }
-    let drafts = read_drafts(&dir.join(DRAFTS_FILE))?;
+    let drafts = read_drafts(&ws.dir.join(DRAFTS_FILE))?;
     Ok(json!({
         "organization": queue.organization,
         "refreshedMinutesAgo": age,
@@ -208,10 +321,11 @@ fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
     }))
 }
 
-fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
+fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let pr_id = args["prId"].as_i64().ok_or("prId (an integer) is required")?;
     let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
-    let queue = read_queue(dir)?;
+    let queue = read_queue(ws)?;
+    let dir = &ws.dir;
     // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
     // source is missing, a PR listed before it dropped out is accepted, since a draft hides a PR only at this id and
     // commit; a GitHub PR number passed as the id is still refused.
@@ -271,12 +385,18 @@ mod tests {
         make_queue(vec![]).refreshed + chrono::Duration::minutes(minutes_after_refresh)
     }
 
-    /// A data folder whose active workspace `w1` has a queue.
+    /// Writes the settings file as Rado does: `workspaces` as (id, name), and the active one's id.
+    fn settings(root: &Path, active: &str, workspaces: &[(&str, &str)]) {
+        let workspaces: Vec<Value> = workspaces.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
+        write_json_atomic(&root.join(SETTINGS_FILE), &json!({ "activeWorkspace": active, "workspaces": workspaces })).unwrap();
+    }
+
+    /// A data folder whose active workspace `w1`, named Work, has a queue.
     fn with_queue(name: &str) -> TempDir {
         let dir = TempDir::new(name);
         let workspace = queue::workspace_dir(&dir.0, "w1");
         std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"w1"}"#).unwrap();
+        settings(&dir.0, "w1", &[("w1", "Work")]);
         let q = make_queue(vec![Branch { branch: "ABC-1".into(), prs: vec![pr(1, "c1"), pr(2, "c2")] }]);
         write_json_atomic(&workspace.join(QUEUE_FILE), &q).unwrap();
         dir
@@ -321,7 +441,7 @@ mod tests {
     #[test]
     fn startup_namesTheDataFolderAndWhatIsWrongWithIt() {
         let dir = with_queue("startup");
-        assert!(startup(&dir.0).ends_with(&format!("active workspace {}", queue::workspace_dir(&dir.0, "w1").display())));
+        assert!(startup(&dir.0).ends_with(&format!("active workspace Work ({})", queue::workspace_dir(&dir.0, "w1").display())));
 
         let empty = TempDir::new("startup-empty");
         let line = startup(&empty.0);
@@ -360,6 +480,7 @@ mod tests {
         assert_eq!(body["branches"][0]["prs"][1]["sourceCommit"], "c2");
         assert_eq!(body["branches"][0]["prs"][1]["provider"], "azureDevOps");
         assert_eq!(body["missingSources"], json!([]));
+        assert_eq!((&body["workspace"], &body["workspaceId"]), (&json!("Work"), &json!("w1")));
     }
 
     #[test]
@@ -405,8 +526,8 @@ mod tests {
         for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), r#""2""#.to_string())] {
             std::fs::write(&path, json!({ "schemaVersion": schema, "queue": [] }).to_string()).unwrap();
 
-            for tool in ["list_review_queue", "mark_drafted"] {
-                let result = call_tool(&dir.0, at(1), tool, json!({ "prId": 1, "commit": "c1" }));
+            for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
+                let result = call_tool(&dir.0, at(1), tool, arguments);
                 assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {shown}")), "{tool}: {result}");
             }
         }
@@ -447,7 +568,7 @@ mod tests {
         let dir = TempDir::new("parallel");
         let workspace = queue::workspace_dir(&dir.0, "w1");
         std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"w1"}"#).unwrap();
+        settings(&dir.0, "w1", &[("w1", "Work")]);
         let prs = (1..=AGENTS * MARKS_EACH).map(|id| pr(id, &format!("c{id}"))).collect();
         write_json_atomic(&workspace.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs }])).unwrap();
         let start = std::sync::Barrier::new(AGENTS as usize);
@@ -483,7 +604,7 @@ mod tests {
         drop(held);
 
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("Cannot read") && text.ends_with("Try again."), "{result}");
+        assert!(text.starts_with("Workspace Work (id w1): Cannot read") && text.ends_with("Try again."), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
     }
 
@@ -563,15 +684,26 @@ mod tests {
         assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
     }
 
-    #[test]
-    fn activeWorkspace_listsAndMarksInItsOwnFolder() {
-        let root = TempDir::new("workspaces");
+    /// Workspaces `a1` (Alpha) and `b2` (Beta), each queueing one PR at commit `c`: PR 1 and PR 2.
+    fn two_workspaces(name: &str) -> (TempDir, PathBuf, PathBuf) {
+        let root = TempDir::new(name);
         let (a, b) = (queue::workspace_dir(&root.0, "a1"), queue::workspace_dir(&root.0, "b2"));
         for (dir, id) in [(&a, 1), (&b, 2)] {
             std::fs::create_dir_all(dir).unwrap();
             write_json_atomic(&dir.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs: vec![pr(id, "c")] }])).unwrap();
         }
-        let activate = |id: &str| std::fs::write(root.0.join(queue::SETTINGS_FILE), json!({ "activeWorkspace": id }).to_string()).unwrap();
+        (root, a, b)
+    }
+
+    fn error_text(result: &Value) -> String {
+        assert_eq!(result["isError"], true, "{result}");
+        result["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn activeWorkspace_listsAndMarksInItsOwnFolder() {
+        let (root, a, b) = two_workspaces("workspaces");
+        let activate = |id: &str| settings(&root.0, id, &[("a1", "Alpha"), ("b2", "Beta")]);
 
         activate("b2");
         assert_eq!(text(&call_tool(&root.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 2);
@@ -583,16 +715,104 @@ mod tests {
     }
 
     #[test]
+    fn workspaceArgument_byIdOrName_usesThatOneWhileAnotherIsActive() {
+        let (root, a, b) = two_workspaces("pick");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+
+        for requested in ["b2", " b2 ", "Beta", " beta "] {
+            let body = text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
+            assert_eq!((&body["workspace"], &body["workspaceId"]), (&json!("Beta"), &json!("b2")), "{requested}");
+            assert_eq!(body["branches"][0]["prs"][0]["prId"], 2);
+        }
+        let marked = text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspace": "b2" })));
+
+        assert_eq!(marked["workspaceId"], "b2");
+        assert!(b.join(DRAFTS_FILE).exists() && !a.join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn workspaceArgument_unknown_isAnErrorListingTheWorkspaces() {
+        let (root, _, _) = two_workspaces("unknown-ws");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta"), ("../..", "Escape")]);
+
+        for requested in ["Gamma", "", "../..", "Escape"] {
+            let text = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
+            assert_eq!(
+                text,
+                format!("Rado has no workspace {requested:?}; it has Alpha (id a1), Beta (id b2). Don't pick another: review nothing and tell the user.")
+            );
+        }
+    }
+
+    #[test]
+    fn workspaceArgument_nameTwoWorkspacesShare_asksForTheId() {
+        let (root, a, b) = two_workspaces("shared-name");
+        settings(&root.0, "a1", &[("a1", "Work"), ("b2", "work")]);
+
+        let text = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "Work" })));
+
+        assert_eq!(
+            text,
+            r#"2 workspaces are named "Work": Work (id a1), work (id b2). Don't pick one: review nothing and tell the user to name a workspaceId in your instructions."#
+        );
+        assert!(!a.join(DRAFTS_FILE).exists() && !b.join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn unknownArgument_isAnErrorNotTheActiveWorkspace() {
+        let (root, a, _) = two_workspaces("unknown-arg");
+        let q = Queue { missing_sources: vec![queue::GITHUB.into()], ..make_queue(vec![]) };
+        write_json_atomic(&a.join(QUEUE_FILE), &q).unwrap();
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+
+        let listed = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspaceId": "b2" })));
+        let marked = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspaceId": "b2" })));
+
+        assert_eq!(listed, r#"list_review_queue takes no argument "workspaceId"; it takes workspace"#);
+        assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, prId, workspace"#);
+        assert!(!a.join(DRAFTS_FILE).exists());
+
+        let not_an_object = send(&root.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue", "arguments": "b2" } }));
+        assert_eq!(error_text(&not_an_object["result"]), r#"list_review_queue's arguments must be an object, not "b2""#);
+    }
+
+    #[test]
+    fn workspaceArgument_notAString_isAnErrorNotTheActiveWorkspace() {
+        let dir = with_queue("not-a-string");
+        let text = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "workspace": 1 })));
+        assert_eq!(text, "workspace must be a workspace's name or id, not 1");
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn workspaceArgument_inactiveWorkspacesOldOrMissingQueue_saysToSwitchToIt() {
+        let (root, _, b) = two_workspaces("inactive");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+        let switch = "Rado polls only the active workspace: tell the user to switch to Beta in Rado, and review nothing until then.";
+
+        let stale = error_text(&call_tool(&root.0, at(31), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(stale.starts_with("Workspace Beta (id b2): Rado's review queue is 31 minutes old") && stale.ends_with(switch), "{stale}");
+
+        std::fs::write(b.join(QUEUE_FILE), "{").unwrap();
+        let damaged = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(damaged.contains("is not valid") && damaged.ends_with(switch), "{damaged}");
+
+        std::fs::remove_file(b.join(QUEUE_FILE)).unwrap();
+        let missing = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(missing.contains("has not written a review queue") && missing.ends_with(switch), "{missing}");
+    }
+
+    #[test]
     fn activeWorkspace_missingOrUnsafe_isAnError() {
-        for settings in [None, Some(r#"{"activeWorkspace":"../.."}"#)] {
+        let cases = [None, Some(json!({ "activeWorkspace": "../.." })), Some(json!({ "activeWorkspace": "../..", "workspaces": [{ "id": "../..", "name": "x" }] }))];
+        for file in cases {
             let dir = TempDir::new("unsafe");
             write_json_atomic(&dir.0.join(QUEUE_FILE), &make_queue(vec![])).unwrap();
-            if let Some(settings) = settings {
-                std::fs::write(dir.0.join(queue::SETTINGS_FILE), settings).unwrap();
+            if let Some(file) = &file {
+                write_json_atomic(&dir.0.join(SETTINGS_FILE), file).unwrap();
             }
             let result = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
-            assert_eq!(result["isError"], true, "{settings:?}");
-            assert!(result["content"][0]["text"].as_str().unwrap().contains("no active workspace"));
+            assert!(error_text(&result).contains("no active workspace"), "{file:?}");
         }
     }
 
