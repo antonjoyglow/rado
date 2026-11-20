@@ -1056,6 +1056,15 @@ mod tests {
     }
 
     #[test]
+    fn activeWorkspace_settingsWithAByteOrderMark_isRead() {
+        let dir = with_queue("bom-settings");
+        let path = settings_path(&dir.0);
+        let file = std::fs::read(&path).unwrap();
+        std::fs::write(&path, [b"\xEF\xBB\xBF".as_slice(), &file].concat()).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "list_review_queue", json!({})).get("isError"), None);
+    }
+
+    #[test]
     fn batch_isRefusedWithOneError() {
         let dir = TempDir::new("batch");
         let reply = send(&dir.0, at(0), json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]));
