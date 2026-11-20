@@ -1,4 +1,4 @@
-import { createGrouper } from "./grouping.js";
+import { createGrouper, groupOpenTabs } from "./grouping.js";
 
 const onTab = createGrouper(chrome);
 
@@ -8,3 +8,4 @@ chrome.tabs.onCreated.addListener((tab) => onTab(tab, tab.pendingUrl || tab.url)
 chrome.tabs.onUpdated.addListener((_tabId, change, tab) => {
   if (change.url) onTab(tab, change.url);
 });
+void groupOpenTabs(chrome, onTab);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createGrouper, groupColor, groupTitle } from "./grouping.js";
+import { createGrouper, groupColor, groupOpenTabs, groupTitle } from "./grouping.js";
 
-function fakeChrome() {
+function fakeChrome(openTabs = []) {
   const groups = [];
   const membership = new Map();
   let nextId = 100;
@@ -10,6 +10,7 @@ function fakeChrome() {
     groups,
     membership,
     tabGroups: {
+      TAB_GROUP_ID_NONE: -1,
       async query({ title, windowId }) {
         await delay();
         return groups.filter((g) => g.title === title && g.windowId === windowId);
@@ -20,6 +21,10 @@ function fakeChrome() {
       },
     },
     tabs: {
+      async query({ groupId }) {
+        await delay();
+        return openTabs.filter((t) => (membership.get(t.id) ?? -1) === groupId);
+      },
       async group({ groupId, tabIds, createProperties }) {
         await delay();
         const id = groupId ?? nextId++;
@@ -76,6 +81,21 @@ describe("createGrouper", () => {
     await onTab({ id: 2, windowId: 7 }, "https://x/2#rado=a&group");
     expect(chrome.groups).toHaveLength(1);
     expect(chrome.membership.size).toBe(1);
+  });
+
+  it("tabsLoadedBeforeTheWorkerListened_areGroupedOnceWhenItStarts", async () => {
+    const chrome = fakeChrome([
+      { id: 1, windowId: 7, url: "https://x/1#rado=a&group" },
+      { id: 2, windowId: 7, url: "", pendingUrl: "https://x/2#rado=a&group" },
+      { id: 3, windowId: 7, url: "https://x/3" },
+    ]);
+    const onTab = createGrouper(chrome);
+    const started = groupOpenTabs(chrome, onTab);
+    // The same tab's own event racing the startup pass.
+    onTab({ id: 2, windowId: 7 }, "https://x/2#rado=a&group");
+    await started;
+    expect(chrome.groups).toHaveLength(1);
+    expect([...chrome.membership.entries()].sort()).toEqual([[1, 100], [2, 100]]);
   });
 
   it("groupInAnotherWindow_isNotReused", async () => {
