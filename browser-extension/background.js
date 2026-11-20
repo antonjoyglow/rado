@@ -8,6 +8,10 @@ chrome.tabs.onCreated.addListener((tab) => onTab(tab, tab.pendingUrl || tab.url)
 chrome.tabs.onUpdated.addListener((_tabId, change, tab) => {
   if (change.url) onTab(tab, change.url);
 });
+// From title.js, which sees the tag before Azure DevOps drops it from the URL.
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (sender.tab && typeof message?.radoUrl === "string") onTab(sender.tab, message.radoUrl);
+});
 // Only when the browser or the extension starts, not on every wake of this worker: a tab the user dragged out of
 // its group must stay out.
 chrome.runtime.onStartup.addListener(() => groupOpenTabs(chrome, onTab));
