@@ -328,7 +328,7 @@ impl Store {
         let mut warnings = Vec::new();
         let path = self.settings_path();
         let file = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(queue::without_bom(&bytes)) {
                 Ok(value @ Value::Object(_)) => Some(value),
                 _ => {
                     warnings.push(self.keep_unreadable(&path));
@@ -705,6 +705,16 @@ pub(crate) mod tests {
         assert_eq!(copies.len(), 1);
         assert_eq!(std::fs::read_to_string(dir.0.join(&copies[0])).unwrap(), "{ not json");
         assert_eq!(secrets.get(&pat_key(&loaded.settings.active_workspace)).as_deref(), Some("pat"));
+    }
+
+    #[test]
+    fn load_fileWithAByteOrderMark_keepsTheWorkspaces() {
+        let dir = TempDir::new("bom");
+        std::fs::write(dir.0.join("settings.json"), "\u{feff}{\"workspaces\":[{\"id\":\"a1\",\"name\":\"Acme\"}],\"activeWorkspace\":\"a1\"}").unwrap();
+
+        let loaded = store(&dir, &MemorySecrets::default()).load();
+
+        assert_eq!((loaded.warning, loaded.settings.active_workspace.as_str(), loaded.settings.workspaces.len()), (None, "a1", 1));
     }
 
     #[test]
