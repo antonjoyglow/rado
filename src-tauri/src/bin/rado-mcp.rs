@@ -83,10 +83,13 @@ fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
         return Some(error(Value::Null, -32600, "a request must be a JSON object"));
     };
     // A response from the client is answered with nothing, as a notification is.
-    let id = message.get("id").filter(|_| !message.contains_key("result") && !message.contains_key("error")).cloned()?;
-    let Some(method) = request["method"].as_str() else {
-        return Some(error(id, -32600, "a request needs a method"));
+    if message.contains_key("result") || message.contains_key("error") {
+        return None;
+    }
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return Some(error(message.get("id").cloned().unwrap_or(Value::Null), -32600, "a request needs a method"));
     };
+    let id = message.get("id").cloned()?;
     let params = request.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
         "initialize" => json!({
@@ -575,7 +578,7 @@ mod tests {
     #[test]
     fn notAnObject_orNoMethod_isInvalidRequest_andAClientResponseGetsNoReply() {
         let dir = TempDir::new("invalid");
-        for line in ["5", r#""x""#, "null", "true"] {
+        for line in ["5", r#""x""#, "null", "true", r#"{"foo":"boo"}"#, r#"{"jsonrpc":"2.0","method":1,"params":"bar"}"#] {
             let reply = handle(&dir.0, at(0), line).unwrap_or_else(|| panic!("no reply to {line}"));
             assert_eq!((reply["id"].clone(), reply["error"]["code"].clone()), (Value::Null, json!(-32600)), "{line}");
         }
