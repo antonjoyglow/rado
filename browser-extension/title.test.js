@@ -3,7 +3,18 @@ import { describe, expect, it } from "vitest";
 
 // title.js is a classic content script with no exports; load its functions without running main().
 const source = readFileSync(new URL("./title.js", import.meta.url), "utf8");
-const { radoTabTitle, prPath } = new Function(`${source}; return { radoTabTitle, prPath };`)();
+const { radoTabTitle, prPath, asksToGroup } = new Function(`${source}; return { radoTabTitle, prPath, asksToGroup };`)();
+
+describe("asksToGroup", () => {
+  it.each([
+    ["#rado=feature%2Fx&group", "navigate", true],
+    ["#rado=feature%2Fx", "navigate", true],
+    ["#rado=feature%2Fx&group", "reload", false],
+    ["#rado=feature%2Fx&group", "back_forward", false],
+    ["#other=1", "navigate", false],
+    ["", "navigate", false],
+  ])("%s %s -> %s", (hash, type, asks) => expect(asksToGroup(hash, type)).toBe(asks));
+});
 
 describe("radoTabTitle", () => {
   it.each([

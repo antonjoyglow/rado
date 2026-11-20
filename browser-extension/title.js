@@ -19,7 +19,18 @@ function prPath(pathname) {
   return /^.*\/pullrequest\/\d+/.exec(pathname)?.[0] ?? /^\/[^/]+\/[^/]+\/pull\/\d+/.exec(pathname)?.[0] ?? null;
 }
 
+/** Whether this page load should ask for its tab group: a Rado-tagged link opened, not reloaded or revisited, so a
+ * tab the user took out of its group stays out. */
+function asksToGroup(hash, navigationType) {
+  return hash.startsWith("#rado=") && navigationType === "navigate";
+}
+
 function main() {
+  // Azure DevOps drops the fragment once its page runs, so a tab that loaded before the worker listened would show
+  // no tag to it later. Sending the URL now also wakes a stopped worker.
+  if (asksToGroup(location.hash, performance.getEntriesByType("navigation")[0]?.type)) {
+    chrome.runtime.sendMessage({ radoUrl: location.href }).catch(() => {});
+  }
   const KEY = "rado-tab-title";
   const fresh = radoTabTitle(location.pathname, location.hash);
   if (fresh) sessionStorage.setItem(KEY, JSON.stringify({ path: prPath(location.pathname), title: fresh }));
