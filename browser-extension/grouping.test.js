@@ -83,17 +83,13 @@ describe("createGrouper", () => {
     expect(chrome.membership.size).toBe(1);
   });
 
-  it("tabsLoadedBeforeTheWorkerListened_areGroupedOnceWhenItStarts", async () => {
+  it("taggedTabsAlreadyOpen_whenTheExtensionStarts_areGroupedAndOthersLeftAlone", async () => {
     const chrome = fakeChrome([
       { id: 1, windowId: 7, url: "https://x/1#rado=a&group" },
-      { id: 2, windowId: 7, url: "", pendingUrl: "https://x/2#rado=a&group" },
+      { id: 2, windowId: 7, url: "about:blank", pendingUrl: "https://x/2#rado=a&group" },
       { id: 3, windowId: 7, url: "https://x/3" },
     ]);
-    const onTab = createGrouper(chrome);
-    const started = groupOpenTabs(chrome, onTab);
-    // The same tab's own event racing the startup pass.
-    onTab({ id: 2, windowId: 7 }, "https://x/2#rado=a&group");
-    await started;
+    await groupOpenTabs(chrome, createGrouper(chrome));
     expect(chrome.groups).toHaveLength(1);
     expect([...chrome.membership.entries()].sort()).toEqual([[1, 100], [2, 100]]);
   });

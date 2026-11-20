@@ -8,4 +8,7 @@ chrome.tabs.onCreated.addListener((tab) => onTab(tab, tab.pendingUrl || tab.url)
 chrome.tabs.onUpdated.addListener((_tabId, change, tab) => {
   if (change.url) onTab(tab, change.url);
 });
-void groupOpenTabs(chrome, onTab);
+// Only when the browser or the extension starts, not on every wake of this worker: a tab the user dragged out of
+// its group must stay out.
+chrome.runtime.onStartup.addListener(() => groupOpenTabs(chrome, onTab));
+chrome.runtime.onInstalled.addListener(() => groupOpenTabs(chrome, onTab));

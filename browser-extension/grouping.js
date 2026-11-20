@@ -27,7 +27,7 @@ export function groupColor(title) {
  */
 export async function groupOpenTabs(chrome, onTab) {
   const tabs = await chrome.tabs.query({ groupId: chrome.tabGroups.TAB_GROUP_ID_NONE });
-  await Promise.all(tabs.map((tab) => onTab(tab, tab.url || tab.pendingUrl)));
+  await Promise.all(tabs.map((tab) => onTab(tab, tab.pendingUrl || tab.url)));
 }
 
 /** Builds the tab handler; `chrome` is injected so tests can pass a fake. */
