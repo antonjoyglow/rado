@@ -29,7 +29,11 @@ function main() {
   // Azure DevOps drops the fragment once its page runs, so a tab that loaded before the worker listened would show
   // no tag to it later. Sending the URL now also wakes a stopped worker.
   if (asksToGroup(location.hash, performance.getEntriesByType("navigation")[0]?.type)) {
-    chrome.runtime.sendMessage({ radoUrl: location.href }).catch(() => {});
+    const radoUrl = location.href;
+    const send = () => chrome.runtime.sendMessage({ radoUrl }).catch(() => {});
+    // A prerendered page's tab is the one still on screen until the page is shown.
+    if (document.prerendering) document.addEventListener("prerenderingchange", send, { once: true });
+    else send();
   }
   const KEY = "rado-tab-title";
   const fresh = radoTabTitle(location.pathname, location.hash);
