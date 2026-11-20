@@ -6,6 +6,7 @@
 #[path = "../queue.rs"]
 mod queue;
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -23,12 +24,14 @@ fn main() {
     let dir = data_dir();
     log(&startup(&dir));
     let mut stdout = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines() {
+    for line in std::io::stdin().lock().split(b'\n') {
         let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(response) = handle(&dir, Utc::now(), &line) {
+        let reply = match String::from_utf8(line) {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => handle(&dir, Utc::now(), &line),
+            Err(_) => Some(error(Value::Null, -32700, "parse error: the line is not UTF-8")),
+        };
+        if let Some(response) = reply {
             if let Some(message) = error_message(&response) {
                 log(message);
             }
@@ -55,11 +58,16 @@ fn error_message(response: &Value) -> Option<&str> {
     response["error"]["message"].as_str().or_else(|| tool_error.then(|| response["result"]["content"][0]["text"].as_str()).flatten())
 }
 
-/// Rado's data folder, `%APPDATA%\dev.antonis.rado`; `RADO_DATA_DIR` overrides it.
 fn data_dir() -> PathBuf {
-    std::env::var_os("RADO_DATA_DIR")
+    chosen_data_dir(std::env::var_os("RADO_DATA_DIR"), std::env::var_os("APPDATA"))
+}
+
+/// Rado's data folder, `%APPDATA%\dev.antonis.rado`; a non-empty `RADO_DATA_DIR` overrides it.
+fn chosen_data_dir(rado_data_dir: Option<OsString>, appdata: Option<OsString>) -> PathBuf {
+    rado_data_dir
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("dev.antonis.rado"))
+        .unwrap_or_else(|| PathBuf::from(appdata.unwrap_or_default()).join("dev.antonis.rado"))
 }
 
 /// One JSON-RPC message in, at most one out; notifications get no reply.
@@ -71,9 +79,16 @@ fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
     if request.is_array() {
         return Some(error(Value::Null, -32600, "batches are not supported; send one request per line"));
     }
-    let id = request.get("id").cloned()?;
+    let Some(message) = request.as_object() else {
+        return Some(error(Value::Null, -32600, "a request must be a JSON object"));
+    };
+    // A response from the client is answered with nothing, as a notification is.
+    let id = message.get("id").filter(|_| !message.contains_key("result") && !message.contains_key("error")).cloned()?;
+    let Some(method) = request["method"].as_str() else {
+        return Some(error(id, -32600, "a request needs a method"));
+    };
     let params = request.get("params").cloned().unwrap_or(Value::Null);
-    let result = match request["method"].as_str().unwrap_or_default() {
+    let result = match method {
         "initialize" => json!({
             "protocolVersion": params["protocolVersion"].as_str().filter(|v| PROTOCOLS.contains(v)).unwrap_or(PROTOCOL),
             "capabilities": { "tools": {} },
@@ -555,6 +570,27 @@ mod tests {
     fn notification_getsNoReply() {
         let dir = TempDir::new("notify");
         assert_eq!(handle(&dir.0, at(0), r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
+    }
+
+    #[test]
+    fn notAnObject_orNoMethod_isInvalidRequest_andAClientResponseGetsNoReply() {
+        let dir = TempDir::new("invalid");
+        for line in ["5", r#""x""#, "null", "true"] {
+            let reply = handle(&dir.0, at(0), line).unwrap_or_else(|| panic!("no reply to {line}"));
+            assert_eq!((reply["id"].clone(), reply["error"]["code"].clone()), (Value::Null, json!(-32600)), "{line}");
+        }
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 1 }));
+        assert_eq!((reply["id"].clone(), reply["error"]["code"].clone()), (json!(1), json!(-32600)));
+        assert_eq!(handle(&dir.0, at(0), r#"{"jsonrpc":"2.0","id":1,"result":{}}"#), None);
+    }
+
+    #[test]
+    fn dataDir_anEmptyRadoDataDir_isNotAFolder() {
+        let appdata = Some(OsString::from(r"C:\Users\x\AppData\Roaming"));
+        let rado = PathBuf::from(r"C:\Users\x\AppData\Roaming").join("dev.antonis.rado");
+        assert_eq!(chosen_data_dir(Some(OsString::new()), appdata.clone()), rado);
+        assert_eq!(chosen_data_dir(None, appdata.clone()), rado);
+        assert_eq!(chosen_data_dir(Some(OsString::from(r"D:\data")), appdata), PathBuf::from(r"D:\data"));
     }
 
     #[test]
