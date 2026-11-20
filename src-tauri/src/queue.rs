@@ -217,7 +217,12 @@ pub fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Optio
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(ReadError::Unreadable(format!("Cannot read {}: {e}", path.display()))),
     };
-    serde_json::from_slice(&bytes).map(Some).map_err(|e| ReadError::Invalid(format!("{} is not valid: {e}", path.display())))
+    serde_json::from_slice(without_bom(&bytes)).map(Some).map_err(|e| ReadError::Invalid(format!("{} is not valid: {e}", path.display())))
+}
+
+/// The bytes after a UTF-8 byte order mark, which Notepad can put at the start of a file edited by hand.
+pub fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
 }
 
 /// Writes to a temporary file and renames it over the target, so a reader never sees half a file. The temporary name
