@@ -666,11 +666,21 @@ impl Session {
             workspace.name.clone_from(&slot.name);
         }
         let ado_changed = slot.azure_dev_ops != workspace.azure_dev_ops;
+        // Organization names ignore case; teams only filter which PRs are listed.
+        let org_changed = !slot.azure_dev_ops.organization.eq_ignore_ascii_case(&workspace.azure_dev_ops.organization);
         let github_changed = slot.github != workspace.github;
         let id = workspace.id.clone();
         *slot = workspace;
         self.store.save_settings(&settings).map_err(|e| format!("Not saved: {e}"))?;
         self.settings = settings;
+        if org_changed {
+            // PR ids repeat across organizations: my vote on the old one's PR would mark the new one's as re-review.
+            // Saved here too, so a workspace not loaded this run doesn't read the old votes back.
+            let _ = self.store.save_memory(&id, &VoteMemory::default());
+            if let Some(state) = self.state_of(&id) {
+                state.memory.clear();
+            }
+        }
         if let Some(state) = self.state_of(&id) {
             if ado_changed {
                 state.baseline.remove(&Provider::Ado);
@@ -1292,6 +1302,38 @@ mod tests {
         s.save_workspace(changed).expect("saved");
 
         assert_eq!(s.ws.items.iter().map(|i| (i.id, i.comments)).collect::<Vec<_>>(), [(1, None), (2, Some(known))]);
+    }
+
+    #[test]
+    fn saveWorkspace_newOrganization_forgetsMyVotes_butNewTeamsKeepThem() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-org-votes");
+        let voted = VoteMemory::from([(101, score::VotedAt { vote: 10, commit: "sha0".into() })]);
+        s.ws.memory = voted.clone();
+        s.store.save_memory("a", &voted).expect("saved");
+        s.store.save_memory("b", &voted).expect("saved");
+
+        let mut changed = s.settings.workspaces[0].clone();
+        changed.azure_dev_ops.organization = "acme".into();
+        s.save_workspace(changed.clone()).expect("saved");
+        assert_eq!((&s.ws.memory, s.store.memory("a")), (&VoteMemory::new(), VoteMemory::new()), "a new organization forgets");
+
+        s.ws.memory = voted.clone();
+        s.store.save_memory("a", &voted).expect("saved");
+        changed.azure_dev_ops.organization = "ACME".into();
+        changed.azure_dev_ops.teams = vec!["Team".into()];
+        s.save_workspace(changed.clone()).expect("saved");
+        assert_eq!((&s.ws.memory, s.store.memory("a")), (&voted, voted.clone()), "the same organization in another case, or new teams, keep my votes");
+
+        changed.azure_dev_ops.organization = "other".into();
+        s.save_workspace(changed).expect("saved");
+        // The new organization's PR 101 is another PR, which I approved at its head.
+        file(&mut s, ado(vec![ado_pr(101, "c", Some(10))]), Poll::Off);
+        assert_eq!(s.ws.items[0].state, ReviewState::Approved);
+
+        let mut unloaded = s.settings.workspaces[1].clone();
+        unloaded.azure_dev_ops.organization = "other".into();
+        s.save_workspace(unloaded).expect("saved");
+        assert!(s.store.memory("b").is_empty(), "a workspace not loaded this run doesn't read the old votes back");
     }
 
     #[test]
