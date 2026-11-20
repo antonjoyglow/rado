@@ -79,7 +79,7 @@ pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<Strin
     let bytes = branch.as_bytes();
     let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
     (0..bytes.len()).find_map(|start| {
-        if !bytes[start].is_ascii_alphabetic() || (start > 0 && alnum(start - 1)) {
+        if !bytes[start].is_ascii_alphabetic() || branch[..start].chars().next_back().is_some_and(char::is_alphanumeric) {
             return None;
         }
         let mut i = start;
@@ -96,7 +96,7 @@ pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<Strin
             end += 1;
         }
         // `CVE-2024-3094`: a second dash and digits make an id, not a key.
-        if end == digits || alnum(end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
+        if end == digits || letter_or_digit_at(branch, end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
             return None;
         }
         let upper = !prefix.bytes().any(|b| b.is_ascii_lowercase());
@@ -128,8 +128,14 @@ fn team_key(branch: &str, keys: &[String]) -> Option<String> {
         while bytes.get(end).is_some_and(u8::is_ascii_digit) {
             end += 1;
         }
-        (end > digits && !alnum(end)).then(|| branch[start..end].to_ascii_uppercase())
+        (end > digits && !letter_or_digit_at(branch, end)).then(|| branch[start..end].to_ascii_uppercase())
     })
+}
+
+/// Whether the character starting at byte `at` is a letter or digit in any script, so `ABC-12ä` holds no key.
+/// `at` must be a char boundary.
+fn letter_or_digit_at(branch: &str, at: usize) -> bool {
+    branch[at..].chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// Groups my ranked PRs by source branch, adds the related PRs on those branches, and orders rows by score.
@@ -557,6 +563,10 @@ mod tests {
             ("release-2026", None),
             ("feature/MYABC-12x", None),
             ("featureABC-12", None),
+            ("feature/HÖO-12", None),
+            ("ÄBC-12", None),
+            ("feature/über-ABC-12", Some("ABC-12")),
+            ("feature/ABC-12ä", None),
             ("main", None),
         ] {
             assert_eq!(ticket_key(branch, false, &[]).as_deref(), key, "{branch}");
@@ -631,6 +641,7 @@ mod tests {
             ("bugfix/HOO-7_null-check", Some("HOO-7")),
             ("feature/über-hoo-5", Some("HOO-5")),
             ("feature/ühoo-5", None),
+            ("feature/hoo-12ü", None),
             ("feature/login-abc-12", Some("ABC-12")),
             ("feature/x_Hoo-7", Some("HOO-7")),
             ("chore/node-18-upgrade", None),
