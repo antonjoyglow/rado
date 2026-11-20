@@ -21,6 +21,15 @@ export function groupColor(title) {
   return COLORS[hash % COLORS.length];
 }
 
+/**
+ * Passes the ungrouped tabs already open to `onTab`. When Rado's links start the browser, a tab can finish loading
+ * before this worker listens, and then no event for it ever arrives.
+ */
+export async function groupOpenTabs(chrome, onTab) {
+  const tabs = await chrome.tabs.query({ groupId: chrome.tabGroups.TAB_GROUP_ID_NONE });
+  await Promise.all(tabs.map((tab) => onTab(tab, tab.pendingUrl || tab.url)));
+}
+
 /** Builds the tab handler; `chrome` is injected so tests can pass a fake. */
 export function createGrouper(chrome) {
   const handled = new Set();
