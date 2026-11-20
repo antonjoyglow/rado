@@ -145,10 +145,13 @@ fn github_repo(typed: &str) -> Option<String> {
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
+/// Empty when it holds anything but letters, digits, `-`, `.` and a `:` port, since it goes into a URL that the
+/// chosen browser gets on its command line.
 fn jira_host(site: &str) -> String {
     let site = site.trim();
     let without_scheme = site.find("://").map_or(site, |i| &site[i + 3..]);
-    without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default().to_string()
+    let host = without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default();
+    if host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':')) { host.to_string() } else { String::new() }
 }
 
 /// The slug of a typed Linear workspace: `https://linear.app/Acme/issue/ABC-1` and ` acme ` give `acme`.
@@ -284,6 +287,12 @@ mod tests {
             ("https://acme.atlassian.net/jira/software/projects/X", jira("acme.atlassian.net")),
             ("https://acme.atlassian.net?atlOrigin=x#top", jira("acme.atlassian.net")),
             (r"acme.atlassian.net\", jira("acme.atlassian.net")),
+            ("jira.acme.example:8443/browse", jira("jira.acme.example:8443")),
+            ("acme corp.atlassian.net", Tracker::None),
+            ("acme.atlassian.net\"--incognito", Tracker::None),
+            ("user@acme.atlassian.net", Tracker::None),
+            ("acme.atlassian.net@evil.example", Tracker::None),
+            ("äcme.atlassian.net", Tracker::None),
             ("https://", Tracker::None),
             ("  ", Tracker::None),
         ] {

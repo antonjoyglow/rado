@@ -23,6 +23,8 @@ struct WorkspaceState {
     urls: HashMap<i64, String>,
     /// Each listed PR's head commit, which a draft mark must match.
     commits: HashMap<i64, String>,
+    /// Each listed PR's head commit when its threads last loaded: an approved or hidden Azure DevOps PR is settled there.
+    threads_at: HashMap<i64, String>,
     /// The listed PRs an agent drafted at their head commit, with the draft's link; read at each poll.
     agent_drafts: HashMap<i64, Option<String>>,
     memory: VoteMemory,
@@ -340,6 +342,7 @@ impl Session {
             ws.items.clear();
             ws.urls.clear();
             ws.commits.clear();
+            ws.threads_at.clear();
             ws.agent_drafts.clear();
             ws.related.clear();
             ws.source_refreshed.clear();
@@ -355,7 +358,7 @@ impl Session {
             .items
             .iter()
             .filter(|i| i.provider == Provider::Ado && (i.hidden || i.state == score::ReviewState::Approved) && i.comments.is_some())
-            .filter_map(|i| Some((i.id, self.ws.commits.get(&i.id)?.clone())))
+            .filter_map(|i| Some((i.id, self.ws.threads_at.get(&i.id)?.clone())))
             .collect();
         // The slack lets the poll that wakes for a next try make it even if the clock moved back a little; a rate
         // limit gets none, since a request inside it can extend it.
@@ -410,10 +413,12 @@ impl Session {
         let interval = self.settings.poll_interval();
         let ws = &mut self.ws;
         let (old_items, old_urls, old_commits) = (std::mem::take(&mut ws.items), std::mem::take(&mut ws.urls), std::mem::take(&mut ws.commits));
+        let old_threads_at = std::mem::take(&mut ws.threads_at);
         let previous = |provider: Provider| -> HashMap<i64, &ReviewItem> { old_items.iter().filter(|i| i.provider == provider).map(|i| (i.id, i)).collect() };
         let mut items = Vec::new();
         let mut urls = HashMap::new();
         let mut commits = HashMap::new();
+        let mut threads_at = HashMap::new();
         let mut errors = Vec::new();
         let mut fresh_sources = Vec::new();
         // Sources whose full list is in hand (fresh without a warning), and sources with no token saved.
@@ -455,6 +460,9 @@ impl Session {
                         if let Some(commit) = old_commits.get(&item.id) {
                             commits.insert(item.id, commit.clone());
                         }
+                        if let Some(commit) = old_threads_at.get(&item.id).filter(|_| provider == Provider::Ado) {
+                            threads_at.insert(item.id, commit.clone());
+                        }
                         items.push(item.clone());
                     }
                 }
@@ -475,6 +483,16 @@ impl Session {
                         applied.memory = Some(ws.memory.clone());
                     }
                     score::attach_threads(&mut poll.items, &poll.threads, &previous(provider), now);
+                    if provider == Provider::Ado {
+                        threads_at.extend(poll.items.iter().filter_map(|i| {
+                            let at = if poll.threads.contains_key(&i.id) {
+                                poll.queue_refs.get(&i.id)?.source_commit.clone()
+                            } else {
+                                old_threads_at.get(&i.id).cloned()
+                            };
+                            Some((i.id, at?))
+                        }));
+                    }
                     ws.related.retain(|r| r.provider != provider);
                     ws.related.extend(poll.related);
                     urls.extend(poll.urls);
@@ -489,6 +507,7 @@ impl Session {
         ws.urls = urls;
         ws.agent_drafts = self.store.agent_drafts(&self.settings.active_workspace, &commits);
         ws.commits = commits;
+        ws.threads_at = threads_at;
         self.polling = false;
         ws.error = (!errors.is_empty()).then(|| errors.join(" · "));
         for (source, _) in &fresh_sources {
@@ -670,6 +689,7 @@ impl Session {
                 for item in state.items.iter_mut().filter(|i| i.provider == Provider::Ado) {
                     (item.comments, item.updated_at) = (None, None);
                 }
+                state.threads_at.clear();
             }
             if github_changed {
                 state.baseline.remove(&Provider::GitHub);
@@ -1218,6 +1238,30 @@ mod tests {
         file(&mut s, ado(prs), Poll::Off);
         let comments: HashMap<i64, Option<score::CommentStats>> = s.ws.items.iter().map(|i| (i.id, i.comments)).collect();
         assert_eq!(comments, HashMap::from([(1, Some(known.comments)), (2, Some(known.comments)), (3, Some(known.comments)), (4, None)]));
+    }
+
+    #[test]
+    fn beginPoll_pushedWhileItsThreadsFailed_settlesAtTheCommitWhoseThreadsLoaded() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("settled-push");
+        let known = score::PrThreads { comments: score::CommentStats { total: 3, open_threads: 1 }, last_activity: None };
+        s.ws.hidden.insert(1);
+        let Poll::Fresh(mut fetched) = ado(vec![ado_pr(1, "b1", Some(0))]) else { unreachable!() };
+        fetched.threads = HashMap::from([(1, known)]);
+        file(&mut s, Poll::Fresh(fetched), Poll::Off);
+
+        // Pushed, and the threads request for the new head fails: the old comments stay, but not as the new head's.
+        let pushed = || ado::PullRequest { last_merge_source_commit: Some(ado::Commit { commit_id: "sha2".into() }), ..ado_pr(1, "b1", Some(0)) };
+        file(&mut s, ado(vec![pushed()]), Poll::Off);
+        assert_eq!(s.ws.items[0].comments, Some(known.comments));
+        assert_eq!(s.begin_poll(Utc::now()).expect("a ticket").settled, HashMap::from([(1, "sha1".to_string())]));
+
+        file(&mut s, Poll::Failed("Azure DevOps: HTTP 502".into()), Poll::Off);
+        assert_eq!(s.begin_poll(Utc::now()).expect("a ticket").settled, HashMap::from([(1, "sha1".to_string())]));
+
+        let Poll::Fresh(mut fetched) = ado(vec![pushed()]) else { unreachable!() };
+        fetched.threads = HashMap::from([(1, known)]);
+        file(&mut s, Poll::Fresh(fetched), Poll::Off);
+        assert_eq!(s.begin_poll(Utc::now()).expect("a ticket").settled, HashMap::from([(1, "sha2".to_string())]));
     }
 
     // Saving a workspace.
