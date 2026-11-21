@@ -308,7 +308,7 @@ impl Workspace {
 fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String> {
     let settings: Value = queue::read_json_file(&settings_path(root))
         .map_err(|e| {
-            advise(e, "Fix it, or change any setting in Rado while it runs. Starting Rado on a damaged file sets it aside as settings.unreadable-*.json and starts over with one empty workspace.")
+            advise(e, "Tell the user to fix it, or put back a good copy, and restart Rado, or to change any setting in Rado if it was running before the file was damaged. A Rado started on the damaged file keeps a copy as settings.unreadable-*.json and saves no settings or tokens until it restarts on a good file.")
         })?
         .unwrap_or_default();
     let active = settings["activeWorkspace"].as_str();
@@ -1127,7 +1127,7 @@ mod tests {
         let dir = TempDir::new("bad-settings");
         std::fs::write(settings_path(&dir.0), "{").unwrap();
         let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
-        assert!(text.contains("settings.json is not valid") && text.contains("change any setting in Rado while it runs."), "{text}");
+        assert!(text.contains("settings.json is not valid") && text.contains("and restart Rado"), "{text}");
     }
 
     #[test]
