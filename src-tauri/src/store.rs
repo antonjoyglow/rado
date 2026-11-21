@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -308,7 +310,8 @@ pub struct Store {
     /// Settings, workspaces and the queue `rado-mcp` reads: one folder, so both binaries agree on the layout.
     data_dir: PathBuf,
     secrets: Box<dyn Secrets>,
-    /// Set when the settings file couldn't be copied aside, so that saving would destroy the only copy.
+    /// Set when settings.json couldn't be read or backed up: saving would replace the user's workspaces, and the
+    /// fresh workspace this run uses has an id that is never saved, so a token stored under it would be stranded.
     frozen: AtomicBool,
 }
 
@@ -328,18 +331,19 @@ impl Store {
         let mut warnings = Vec::new();
         let path = self.settings_path();
         let file = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(queue::without_bom(&bytes)) {
-                Ok(value @ Value::Object(_)) => Some(value),
-                _ => {
-                    warnings.push(self.keep_unreadable(&path));
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            read => match read.map_err(|e| e.to_string()).and_then(|bytes| {
+                match serde_json::from_slice::<Value>(queue::without_bom(&bytes)).map_err(|e| e.to_string())? {
+                    value @ Value::Object(_) => Ok(value),
+                    _ => Err("it isn't a JSON object".into()),
+                }
+            }) {
+                Ok(value) => Some(value),
+                Err(reason) => {
+                    warnings.push(self.keep_unreadable(&path, &reason));
                     None
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => {
-                warnings.push(self.keep_unreadable(&path));
-                None
-            }
         };
         let mut settings = file.as_ref().map(Settings::lenient).unwrap_or_default();
         let mut dirty = false;
@@ -352,13 +356,15 @@ impl Store {
             settings.migrating_to = Some(id);
             if file.is_some() && let Err(e) = self.back_up(&path) {
                 self.frozen.store(true, Ordering::Relaxed);
-                warnings.push(e);
-                return Loaded { settings: settings.clamped(), warning: Some(warnings.join(" · ")) };
+                warnings.push(format!("{e}. Rado saves no settings or tokens this run; restart it to retry."));
             }
             dirty = true;
         }
         dirty |= workspace::normalize(&mut settings.workspaces, &mut settings.active_workspace, workspace::new_id);
         let mut settings = settings.clamped();
+        if self.frozen.load(Ordering::Relaxed) {
+            return Loaded { settings, warning: Some(warnings.join(" · ")) };
+        }
         if dirty && let Err(e) = self.save_settings(&settings) {
             warnings.push(e);
             return Loaded { settings, warning: Some(warnings.join(" · ")) };
@@ -378,15 +384,15 @@ impl Store {
         Loaded { settings, warning: (!warnings.is_empty()).then(|| warnings.join(" · ")) }
     }
 
-    fn keep_unreadable(&self, path: &Path) -> String {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let copy = self.data_dir.join(format!("settings.unreadable-{secs}.json"));
-        match std::fs::copy(path, &copy) {
-            Ok(_) => format!("settings.json couldn't be read; kept it as {} and started with defaults", copy.display()),
-            Err(e) => {
-                self.frozen.store(true, Ordering::Relaxed);
-                format!("settings.json couldn't be read or copied ({e}); running on defaults without saving over it")
-            }
+    fn keep_unreadable(&self, path: &Path, reason: &str) -> String {
+        self.frozen.store(true, Ordering::Relaxed);
+        let problem = format!("settings.json couldn't be read ({reason}). Rado runs on defaults and saves no settings or tokens this run");
+        match copy_aside(path, &self.data_dir, "settings.unreadable") {
+            Ok(copy) => format!(
+                "{problem}: fix or restore settings.json and restart Rado, or delete it to start over. A copy is kept as {}.",
+                copy.display()
+            ),
+            Err(e) => format!("{problem}, and it couldn't be copied aside either ({e}): fix or restore it and restart Rado, keeping a copy of it until then."),
         }
     }
 
@@ -423,10 +429,15 @@ impl Store {
 
     /// Written whole and renamed into place: `rado-mcp` reads the active workspace from it.
     pub fn save_settings(&self, settings: &Settings) -> Result<(), String> {
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err("settings.json couldn't be copied aside, so Rado won't save over it this run".into());
-        }
+        self.writable()?;
         queue::write_json_atomic(&self.settings_path(), settings)
+    }
+
+    fn writable(&self) -> Result<(), String> {
+        if self.frozen.load(Ordering::Relaxed) {
+            return Err("Rado saves no settings or tokens this run, to leave settings.json as it was (see the warning in the status line)".into());
+        }
+        Ok(())
     }
 
     fn workspace_dir(&self, id: &str) -> PathBuf {
@@ -489,10 +500,12 @@ impl Store {
     }
 
     pub fn save_pat(&self, id: &str, pat: &str) -> Result<(), String> {
+        self.writable()?;
         self.secrets.set(&workspace::pat_key(id), pat)
     }
 
     pub fn save_github_token(&self, id: &str, token: &str) -> Result<(), String> {
+        self.writable()?;
         self.secrets.set(&workspace::github_key(id), token)
     }
 
@@ -522,6 +535,24 @@ impl Store {
             _ => Ok(()),
         }
     }
+}
+
+/// Copies `file` into `dir` as `<stem>-<hash of its bytes>.json`: copies of different contents get different names,
+/// a file still damaged at every start is kept once, and an existing file is never overwritten.
+fn copy_aside(file: &Path, dir: &Path, stem: &str) -> std::io::Result<PathBuf> {
+    let bytes = std::fs::read(file)?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let copy = dir.join(format!("{stem}-{:016x}.json", hasher.finish()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
+        // A half-written copy would pass for a whole one at the next start.
+        Ok(mut out) => out.write_all(&bytes).inspect_err(|_| {
+            let _ = std::fs::remove_file(&copy);
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    Ok(copy)
 }
 
 #[cfg(test)]
@@ -688,23 +719,51 @@ pub(crate) mod tests {
         assert_eq!(secrets.keys(), [github_key(&loaded.settings.active_workspace)]);
     }
 
-    #[test]
-    fn load_corruptFile_isKeptAsACopyAndTheSecretsStillMove() {
-        let dir = TempDir::new("corrupt");
-        std::fs::write(dir.0.join("settings.json"), "{ not json").unwrap();
-        let secrets = MemorySecrets::with(&[(LEGACY_PAT_KEY, "pat")]);
-
-        let loaded = store(&dir, &secrets).load();
-
-        assert!(loaded.warning.unwrap().contains("couldn't be read"));
-        let copies: Vec<String> = std::fs::read_dir(&dir.0)
+    fn unreadable_copies(dir: &TempDir) -> Vec<String> {
+        let mut copies: Vec<String> = std::fs::read_dir(&dir.0)
             .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("settings.unreadable-"))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.unreadable-"))
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
             .collect();
-        assert_eq!(copies.len(), 1);
-        assert_eq!(std::fs::read_to_string(dir.0.join(&copies[0])).unwrap(), "{ not json");
-        assert_eq!(secrets.get(&pat_key(&loaded.settings.active_workspace)).as_deref(), Some("pat"));
+        copies.sort();
+        copies
+    }
+
+    #[test]
+    fn load_corruptFile_isKeptAsACopyAndNothingIsSavedOverOrMoved() {
+        let good = r#"{"workspaces":[{"id":"w1","name":"Work"}],"activeWorkspace":"w1"}"#;
+        for (i, damaged) in [&good[..good.len() - 10], "", "[]", "null", "\"x\""].into_iter().enumerate() {
+            let dir = TempDir::new(&format!("corrupt-{i}"));
+            std::fs::write(dir.0.join("settings.json"), damaged).unwrap();
+            let secrets = MemorySecrets::with(&[(LEGACY_PAT_KEY, "pat"), ("ado-pat:w1", "w1")]);
+            let first = store(&dir, &secrets);
+
+            let loaded = first.load();
+
+            assert!(loaded.warning.unwrap().contains("restart Rado"), "{damaged:?}");
+            assert_eq!(unreadable_copies(&dir), [damaged], "{damaged:?}");
+            assert_eq!(std::fs::read_to_string(dir.0.join("settings.json")).unwrap(), damaged);
+            let id = &loaded.settings.active_workspace;
+            assert!(first.save_settings(&loaded.settings).is_err());
+            assert!(first.save_pat(id, "p").is_err());
+            assert!(first.save_github_token(id, "g").is_err());
+            assert_eq!(secrets.keys(), [LEGACY_PAT_KEY, "ado-pat:w1"], "{damaged:?}");
+
+            std::fs::write(dir.0.join("settings.json"), good).unwrap();
+            let restored = store(&dir, &secrets).load();
+            assert_eq!((restored.warning, restored.settings.active_workspace.as_str()), (None, "w1"));
+        }
+    }
+
+    #[test]
+    fn load_corruptFileTwice_keepsEachDifferentFileOnce() {
+        let dir = TempDir::new("corrupt-twice");
+        for damaged in ["{ first", "{ second", "{ second"] {
+            std::fs::write(dir.0.join("settings.json"), damaged).unwrap();
+            store(&dir, &MemorySecrets::default()).load();
+        }
+        assert_eq!(unreadable_copies(&dir), ["{ first", "{ second"]);
     }
 
     #[test]
@@ -772,7 +831,7 @@ pub(crate) mod tests {
 
         let loaded = store.load();
 
-        assert!(loaded.warning.unwrap().contains("without saving over it"));
+        assert!(loaded.warning.unwrap().contains("couldn't be copied aside either"));
         assert_eq!(loaded.settings.workspaces.len(), 1);
         // With the obstacle gone, only the guard stops the save.
         std::fs::remove_dir_all(dir.0.join("settings.json")).unwrap();
