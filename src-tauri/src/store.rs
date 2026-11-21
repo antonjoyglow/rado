@@ -15,6 +15,7 @@ const KEYRING_SERVICE: &str = "review-bracket";
 const MEMORY_FILE: &str = "votes.json";
 const HIDDEN_FILE: &str = "hidden.json";
 const HIDDEN_SOURCES_FILE: &str = "hidden-sources.json";
+const VOTES_ORGANIZATION_FILE: &str = "votes-organization.json";
 /// A copy of the settings file from before workspaces, written once and never overwritten.
 const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 
@@ -471,6 +472,20 @@ impl Store {
         let sources: HashMap<i64, Provider> = hidden.iter().filter_map(|(id, source)| Some((*id, (*source)?))).collect();
         self.write_in(id, HIDDEN_SOURCES_FILE, &sources)?;
         self.write_in(id, HIDDEN_FILE, &ids)
+    }
+
+    /// The Azure DevOps organization the votes and the Azure DevOps hidden PRs belong to. A file of its own, so the
+    /// shapes 0.10.0 reads stay as they are. An error while it can't be read; a damaged one counts as none.
+    pub fn vote_organization(&self, id: &str) -> Result<Option<String>, String> {
+        match queue::read_json_file(&self.workspace_dir(id).join(VOTES_ORGANIZATION_FILE)) {
+            Ok(organization) => Ok(organization),
+            Err(queue::ReadError::Unreadable(e)) => Err(e),
+            Err(queue::ReadError::Invalid(_)) => Ok(None),
+        }
+    }
+
+    pub fn save_vote_organization(&self, id: &str, organization: &str) -> Result<(), String> {
+        self.write_in(id, VOTES_ORGANIZATION_FILE, &organization)
     }
 
     /// For the MCP server (`rado-mcp`), which reads it and never touches the PAT.
