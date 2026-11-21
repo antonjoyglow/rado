@@ -36,7 +36,7 @@ fn rado_mcp_logs_to_stderr_and_keeps_stdout_for_the_protocol() {
 }
 
 #[test]
-fn rado_mcp_answers_a_line_that_isnt_utf8_and_keeps_serving() {
+fn rado_mcp_reads_a_first_line_after_a_bom_and_answers_a_line_that_isnt_utf8() {
     let data = std::env::temp_dir().join(format!("rado-mcp-stdio-utf8-{}", std::process::id()));
     std::fs::create_dir_all(&data).unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_rado-mcp"))
@@ -47,6 +47,7 @@ fn rado_mcp_answers_a_line_that_isnt_utf8_and_keeps_serving() {
         .spawn()
         .unwrap();
     let mut stdin = server.stdin.take().unwrap();
+    stdin.write_all(b"\xEF\xBB\xBF{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n").unwrap();
     stdin.write_all(b"\xff\xfe\n").unwrap();
     stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\r\n").unwrap();
     drop(stdin);
@@ -56,7 +57,8 @@ fn rado_mcp_answers_a_line_that_isnt_utf8_and_keeps_serving() {
 
     let replies: Vec<serde_json::Value> =
         String::from_utf8(output.stdout).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-    assert_eq!(replies.len(), 2, "{replies:?}");
-    assert_eq!((replies[0]["id"].clone(), replies[0]["error"]["code"].clone()), (serde_json::Value::Null, serde_json::json!(-32700)));
-    assert_eq!((replies[1]["id"].clone(), replies[1]["result"].clone()), (serde_json::json!(2), serde_json::json!({})));
+    assert_eq!(replies.len(), 3, "{replies:?}");
+    assert_eq!((replies[0]["id"].clone(), replies[0]["result"]["serverInfo"]["name"].clone()), (serde_json::json!(1), serde_json::json!("rado")));
+    assert_eq!((replies[1]["id"].clone(), replies[1]["error"]["code"].clone()), (serde_json::Value::Null, serde_json::json!(-32700)));
+    assert_eq!((replies[2]["id"].clone(), replies[2]["result"].clone()), (serde_json::json!(2), serde_json::json!({})));
 }

@@ -24,11 +24,13 @@ fn main() {
     let dir = data_dir();
     log(&startup(&dir));
     let mut stdout = std::io::stdout().lock();
-    for line in std::io::stdin().lock().split(b'\n') {
+    for (index, line) in std::io::stdin().lock().split(b'\n').enumerate() {
         let Ok(line) = line else { break };
-        let reply = match String::from_utf8(line) {
+        // A writer such as PowerShell can start the stream with a byte order mark.
+        let line = if index == 0 { queue::without_bom(&line) } else { &line };
+        let reply = match std::str::from_utf8(line) {
             Ok(line) if line.trim().is_empty() => continue,
-            Ok(line) => handle(&dir, Utc::now(), &line),
+            Ok(line) => handle(&dir, Utc::now(), line),
             Err(_) => Some(error(Value::Null, -32700, "parse error: the line is not UTF-8")),
         };
         if let Some(response) = reply {
@@ -43,7 +45,21 @@ fn main() {
 
 /// Stdout carries the protocol, so the log goes to stderr, which Claude Code keeps in its MCP logs.
 fn log(line: &str) {
-    let _ = writeln!(std::io::stderr(), "rado-mcp: {line}");
+    let _ = writeln!(std::io::stderr(), "{}", log_line(line));
+}
+
+/// One entry per line, whatever a workspace name or path holds: control characters and Unicode line separators are
+/// escaped.
+fn log_line(line: &str) -> String {
+    let mut entry = String::from("rado-mcp: ");
+    for c in line.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            entry.extend(c.escape_default());
+        } else {
+            entry.push(c);
+        }
+    }
+    entry
 }
 
 /// Logged at start, so a wrong data folder shows before the first tool call.
@@ -332,7 +348,8 @@ fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String
     }
 }
 
-/// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged.
+/// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged. A schema that
+/// isn't a non-negative integer is left to the shape check, which reports the file as damaged.
 fn read_queue(ws: &Workspace) -> Result<Queue, String> {
     let path = ws.dir.join(QUEUE_FILE);
     let rewrite = |e| advise(e, &ws.poll_advice("Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running."));
@@ -342,8 +359,7 @@ fn read_queue(ws: &Workspace) -> Result<Queue, String> {
             let advice = ws.poll_advice("Start Rado, add a token to the workspace, and wait for one refresh.");
             format!("Rado has not written a review queue to {}. {advice}", ws.dir.display())
         })?;
-    let schema = file.get("schemaVersion").cloned().unwrap_or(json!(1));
-    if schema.as_u64().is_none_or(|v| v > u64::from(QUEUE_SCHEMA)) {
+    if let Some(schema) = file.get("schemaVersion").and_then(Value::as_u64).filter(|&v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
             "{} has schema {schema}, but this rado-mcp {} ({}) reads up to {QUEUE_SCHEMA}. Restart this Claude session. If \
              it still refuses, that exe isn't the newer one: run the Rado installer from Explorer with no Claude session \
@@ -793,14 +809,34 @@ mod tests {
     fn listReviewQueue_newerSchema_isRefusedAsNewerEvenWhenItsShapeChanged() {
         let dir = with_queue("newer");
         let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
-        for (schema, shown) in [(json!(QUEUE_SCHEMA + 1), (QUEUE_SCHEMA + 1).to_string()), (json!("2"), r#""2""#.to_string())] {
-            std::fs::write(&path, json!({ "schemaVersion": schema, "queue": [] }).to_string()).unwrap();
+        std::fs::write(&path, json!({ "schemaVersion": QUEUE_SCHEMA + 1, "queue": [] }).to_string()).unwrap();
+
+        for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
+            let result = call_tool(&dir.0, at(1), tool, arguments);
+            assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {}", QUEUE_SCHEMA + 1)), "{tool}: {result}");
+        }
+    }
+
+    #[test]
+    fn listReviewQueue_schemaThatIsntANonNegativeInteger_isDamagedRatherThanNewer() {
+        let dir = with_queue("bad-schema");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let mut file: Value = queue::read_json(&path).unwrap();
+        for schema in [json!(-1), json!("abc"), json!(1.0), json!("2"), Value::Null] {
+            file["schemaVersion"] = schema;
+            std::fs::write(&path, file.to_string()).unwrap();
 
             for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
                 let result = call_tool(&dir.0, at(1), tool, arguments);
-                assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {shown}")), "{tool}: {result}");
+                let text = result["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("is not valid") && text.contains("next poll") && !text.contains("has schema"), "{tool}, {}: {text}", file["schemaVersion"]);
             }
         }
+    }
+
+    #[test]
+    fn logLine_keepsAnEntryOnOneLine() {
+        assert_eq!(log_line("Workspace Work\r\nHome\u{85}\u{2028}x: C:\\data"), r"rado-mcp: Workspace Work\r\nHome\u{85}\u{2028}x: C:\data");
     }
 
     #[test]
