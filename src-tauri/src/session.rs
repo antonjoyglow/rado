@@ -29,6 +29,9 @@ struct WorkspaceState {
     agent_drafts: HashMap<i64, Option<String>>,
     memory: VoteMemory,
     hidden: HashSet<i64>,
+    /// The organization `memory` and the Azure DevOps hidden PRs belong to, once one answered in this run: ahead of
+    /// the saved record while saving it fails.
+    organization: Option<String>,
     related: Vec<group::Related>,
     last_refreshed: Option<DateTime<Utc>>,
     error: Option<String>,
@@ -427,15 +430,17 @@ impl Session {
             Poll::Fresh(fetched) => match self.store.vote_organization(&self.settings.active_workspace) {
                 Err(e) => Poll::Failed(format!("Azure DevOps: {e}").into()),
                 Ok(recorded) => {
-                    if !recorded.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&organization)) {
-                        forget = recorded.is_some();
-                        // Before digesting, which reads them: PR ids repeat across organizations, so my vote on the old
-                        // one's PR would mark the new one's as re-review.
-                        if forget {
-                            ws.memory.clear();
-                        }
+                    let current = |o: &String| o.eq_ignore_ascii_case(&organization);
+                    forget = ws.organization.as_ref().or(recorded.as_ref()).is_some_and(|o| !current(o));
+                    // Before digesting, which reads them: PR ids repeat across organizations, so my vote on the old
+                    // one's PR would mark the new one's as re-review.
+                    if forget {
+                        ws.memory.clear();
+                    }
+                    if !recorded.as_ref().is_some_and(current) {
                         applied.organization = Some(organization.clone());
                     }
+                    ws.organization = Some(organization.clone());
                     Poll::Fresh(fetched)
                 }
             },
@@ -554,7 +559,8 @@ impl Session {
             ws.hidden_source.retain(|_, source| *source == Provider::GitHub);
             ws.hidden.retain(|id| ws.hidden_source.contains_key(id));
         }
-        if pruned || forget {
+        // Saved whenever the record is, which vouches for it, so a save that failed is tried again.
+        if pruned || applied.organization.is_some() {
             applied.hidden = Some(hidden_file(ws));
         }
         mark_hidden(ws);
@@ -1413,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn applyPoll_votesNotSaved_leavesTheOldOrganizationRecorded() {
+    fn applyPoll_votesNotSaved_leavesTheOldOrganizationRecorded_butForgetsOnlyOnce() {
         let Fixture { mut s, dir, .. } = two_workspaces("org-change-unsaved");
         on_acme(&mut s, "a");
         set_organization(&mut s, "a", "other");
@@ -1422,19 +1428,27 @@ mod tests {
         std::fs::remove_file(&votes).expect("removed");
         std::fs::create_dir_all(&votes).expect("folder");
         apply_ado(&mut s, approved_101());
-        assert_eq!(recorded(&s, "a").as_deref(), Some("acme"), "the next poll forgets again");
+        assert_eq!(recorded(&s, "a").as_deref(), Some("acme"));
+
+        let mut pushed = ado_pr(101, "c", Some(10));
+        pushed.last_merge_source_commit = Some(ado::Commit { commit_id: "sha2".into() });
+        apply_ado(&mut s, ado(vec![pushed]));
+        assert_eq!(s.ws.items[0].state, ReviewState::ReReview, "my vote in the new organization stays");
     }
 
     #[test]
     fn applyPoll_anotherOrganizationAnswers_forgetsTheOldOnesVotesAndAzureDevOpsHiddenPrs() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("org-change");
         let voted = on_acme(&mut s, "a");
-        // Hidden before sources were saved.
-        s.ws.hidden.insert(102);
+        // Hidden before sources were saved: 102 is listed by the new organization, 103 by nobody.
+        s.ws.hidden.extend([102, 103]);
         set_organization(&mut s, "a", "other");
         assert_eq!((&s.ws.memory, s.store.memory("a")), (&voted, voted.clone()), "nothing goes before the new organization answers");
 
-        apply_ado(&mut s, ado(vec![ado_pr(101, "c", Some(10)), ado_pr(102, "d", Some(0))]));
+        // With GitHub failing, pruning keeps 103, whose source could be GitHub's.
+        let generation = s.generation;
+        let answer = ado(vec![ado_pr(101, "c", Some(10)), ado_pr(102, "d", Some(0))]);
+        s.apply_poll(generation, answer, Poll::Failed("GitHub: HTTP 503".into()), Utc::now());
         // The new organization's PRs 101 and 102 are other PRs; I approved 101 at its head.
         let state = |id: i64| s.ws.items.iter().find(|i| i.id == id).map(|i| (i.state, i.hidden));
         assert_eq!((state(101), state(102)), (Some((ReviewState::Approved, false)), Some((ReviewState::NeedsReview, false))));
