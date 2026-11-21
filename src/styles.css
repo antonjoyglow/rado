@@ -320,3 +320,14 @@ header { position: relative; }
 .ws-editor { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .ws-editor h2 { margin: 6px 0 0; font-size: calc(13px * var(--text-scale, 1)); color: var(--fg); }
 .settings button.danger { border-color: var(--urgent); color: var(--urgent); }
+
+/* Windows contrast themes (forced colours) paint every background in the theme's background colour and drop
+   box-shadows; only system colours survive. The SVG bird is exempt (preserve-parent-color), so it would keep Rado's
+   colours, which its glow and fade in bird.ts read too. The dots keep Rado's tier colours, so the ring makes them
+   show on the theme's background. */
+@media (forced-colors: active) {
+  header .bird { --fg: CanvasText; --accent: Highlight; }
+  .row .dot { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .tab .next-dot { background: Highlight; }
+  .row[data-next="true"] { border-left: 3px solid Highlight; padding-left: calc(14px - 3px); }
+}
