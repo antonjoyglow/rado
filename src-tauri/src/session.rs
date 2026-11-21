@@ -560,7 +560,7 @@ impl Session {
             ws.hidden.retain(|id| ws.hidden_source.contains_key(id));
         }
         // Saved whenever the record is, which vouches for it, so a save that failed is tried again.
-        if pruned || applied.organization.is_some() {
+        if pruned || forget || applied.organization.is_some() {
             applied.hidden = Some(hidden_file(ws));
         }
         mark_hidden(ws);
@@ -713,9 +713,13 @@ impl Session {
         let github_changed = slot.github != workspace.github;
         let id = workspace.id.clone();
         *slot = workspace;
-        // Before the settings: once they name the new organization, the votes would otherwise be taken to be its.
-        if org_changed && self.store.vote_organization(&id).map_err(|e| format!("Not saved: {e}"))?.is_none() {
-            self.store.save_vote_organization(&id, &old_org).map_err(|e| format!("Not saved: {e}"))?;
+        // Before the settings, which would otherwise make the votes pass for the new organization's after a restart.
+        if org_changed {
+            let recorded = self.store.vote_organization(&id).map_err(|e| format!("Not saved: {e}"))?;
+            let owner = self.state_of(&id).and_then(|s| s.organization.clone()).or_else(|| recorded.clone()).unwrap_or(old_org);
+            if !recorded.is_some_and(|r| r.eq_ignore_ascii_case(&owner)) {
+                self.store.save_vote_organization(&id, &owner).map_err(|e| format!("Not saved: {e}"))?;
+            }
         }
         self.store.save_settings(&settings).map_err(|e| format!("Not saved: {e}"))?;
         self.settings = settings;
@@ -1434,6 +1438,22 @@ mod tests {
         pushed.last_merge_source_commit = Some(ado::Commit { commit_id: "sha2".into() });
         apply_ado(&mut s, ado(vec![pushed]));
         assert_eq!(s.ws.items[0].state, ReviewState::ReReview, "my vote in the new organization stays");
+    }
+
+    #[test]
+    fn saveWorkspace_backToTheRecordedOrganization_afterAnotherAnsweredUnrecorded_recordsThatOne() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("org-back-unrecorded");
+        on_acme(&mut s, "a");
+        s.store.save_vote_organization("a", "acme").expect("saved");
+        // `other` answered, but saving the record failed.
+        s.settings.workspaces[0].azure_dev_ops.organization = "other".into();
+        s.ws.organization = Some("other".into());
+        set_organization(&mut s, "a", "acme");
+        assert_eq!(recorded(&s, "a").as_deref(), Some("other"), "a restart must not take other's votes for acme's");
+        apply_ado(&mut s, approved_101());
+        assert_eq!((s.ws.items[0].state, s.ws.items[0].hidden), (ReviewState::Approved, false));
+        assert_eq!(s.store.hidden("a"), store::Hidden::from([(7, Some(Provider::GitHub))]));
+        assert_eq!(recorded(&s, "a").as_deref(), Some("acme"));
     }
 
     #[test]
