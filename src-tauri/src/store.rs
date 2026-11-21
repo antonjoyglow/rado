@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::queue::{self, Queue};
+use crate::queue::{self, Queue, ReadError};
 use crate::score::{Provider, VoteMemory};
 use crate::workspace::{self, Legacy, Workspace};
 
@@ -330,20 +329,12 @@ impl Store {
     pub fn load(&self) -> Loaded {
         let mut warnings = Vec::new();
         let path = self.settings_path();
-        let file = match std::fs::read(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            read => match read.map_err(|e| e.to_string()).and_then(|bytes| {
-                match serde_json::from_slice::<Value>(queue::without_bom(&bytes)).map_err(|e| e.to_string())? {
-                    value @ Value::Object(_) => Ok(value),
-                    _ => Err("it isn't a JSON object".into()),
-                }
-            }) {
-                Ok(value) => Some(value),
-                Err(reason) => {
-                    warnings.push(self.keep_unreadable(&path, &reason));
-                    None
-                }
-            },
+        let file = match queue::read_json_file::<serde_json::Map<String, Value>>(&path) {
+            Ok(file) => file.map(Value::Object),
+            Err(e) => {
+                warnings.push(self.keep_unreadable(&path, e));
+                None
+            }
         };
         let mut settings = file.as_ref().map(Settings::lenient).unwrap_or_default();
         let mut dirty = false;
@@ -356,7 +347,7 @@ impl Store {
             settings.migrating_to = Some(id);
             if file.is_some() && let Err(e) = self.back_up(&path) {
                 self.frozen.store(true, Ordering::Relaxed);
-                warnings.push(format!("{e}. Rado saves no settings or tokens this run; restart it to retry."));
+                warnings.push(format!("{e}. Rado saves no settings or tokens this run; restart Rado to retry."));
             }
             dirty = true;
         }
@@ -384,15 +375,21 @@ impl Store {
         Loaded { settings, warning: (!warnings.is_empty()).then(|| warnings.join(" · ")) }
     }
 
-    fn keep_unreadable(&self, path: &Path, reason: &str) -> String {
+    /// Runs this session on defaults without saving: a file held by another program needs only a restart, and a
+    /// damaged one is copied aside, since the user may delete or rewrite it to recover.
+    fn keep_unreadable(&self, path: &Path, error: ReadError) -> String {
         self.frozen.store(true, Ordering::Relaxed);
-        let problem = format!("settings.json couldn't be read ({reason}). Rado runs on defaults and saves no settings or tokens this run");
-        match copy_aside(path, &self.data_dir, "settings.unreadable") {
-            Ok(copy) => format!(
-                "{problem}: fix or restore settings.json and restart Rado, or delete it to start over. A copy is kept as {}.",
-                copy.display()
-            ),
-            Err(e) => format!("{problem}, and it couldn't be copied aside either ({e}): fix or restore it and restart Rado, keeping a copy of it until then."),
+        const FROZEN: &str = "Rado runs on defaults and saves no settings or tokens this run, so your workspaces are kept";
+        let message = match error {
+            ReadError::Unreadable(message) => return format!("{message}. {FROZEN}: restart Rado once nothing else holds the file."),
+            ReadError::Invalid(message) => message,
+        };
+        let advice = format!(
+            "{message}. {FROZEN}: fix settings.json, or put back a good copy of it, and restart Rado. Deleting it starts over without your workspaces."
+        );
+        match std::fs::read(path).and_then(|bytes| copy_aside(&bytes, &self.data_dir, "settings.unreadable")) {
+            Ok(copy) => format!("{advice} A copy is kept as {}.", copy.display()),
+            Err(e) => format!("{advice} It couldn't be copied aside ({e}), so copy it yourself before you change it."),
         }
     }
 
@@ -537,21 +534,13 @@ impl Store {
     }
 }
 
-/// Copies `file` into `dir` as `<stem>-<hash of its bytes>.json`: copies of different contents get different names,
-/// a file still damaged at every start is kept once, and an existing file is never overwritten.
-fn copy_aside(file: &Path, dir: &Path, stem: &str) -> std::io::Result<PathBuf> {
-    let bytes = std::fs::read(file)?;
+/// Writes `bytes` into `dir` as `<stem>-<hash of the bytes>.json`, so copies of different files made in the same
+/// second don't replace each other, and a file still damaged at every start is kept once.
+fn copy_aside(bytes: &[u8], dir: &Path, stem: &str) -> std::io::Result<PathBuf> {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     let copy = dir.join(format!("{stem}-{:016x}.json", hasher.finish()));
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
-        // A half-written copy would pass for a whole one at the next start.
-        Ok(mut out) => out.write_all(&bytes).inspect_err(|_| {
-            let _ = std::fs::remove_file(&copy);
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
+    std::fs::write(&copy, bytes)?;
     Ok(copy)
 }
 
@@ -823,7 +812,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn load_fileThatCannotBeReadOrCopied_isNeverSavedOver() {
+    fn load_fileThatCannotBeRead_isNeverSavedOverOrCopied() {
         let dir = TempDir::new("uncopyable");
         std::fs::create_dir(dir.0.join("settings.json")).unwrap();
         std::fs::write(dir.0.join("settings.json").join("inside"), "keep").unwrap();
@@ -831,7 +820,8 @@ pub(crate) mod tests {
 
         let loaded = store.load();
 
-        assert!(loaded.warning.unwrap().contains("couldn't be copied aside either"));
+        assert!(loaded.warning.unwrap().contains("restart Rado once nothing else holds the file"));
+        assert!(unreadable_copies(&dir).is_empty());
         assert_eq!(loaded.settings.workspaces.len(), 1);
         // With the obstacle gone, only the guard stops the save.
         std::fs::remove_dir_all(dir.0.join("settings.json")).unwrap();
