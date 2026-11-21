@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -535,12 +536,19 @@ impl Store {
 }
 
 /// Writes `bytes` into `dir` as `<stem>-<hash of the bytes>.json`, so copies of different files made in the same
-/// second don't replace each other, and a file still damaged at every start is kept once.
+/// second don't replace each other, and a file still damaged at every start is kept once. An existing copy is never
+/// rewritten: the user may be fixing it.
 fn copy_aside(bytes: &[u8], dir: &Path, stem: &str) -> std::io::Result<PathBuf> {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     let copy = dir.join(format!("{stem}-{:016x}.json", hasher.finish()));
-    std::fs::write(&copy, bytes)?;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
+        Ok(mut file) => file.write_all(bytes).inspect_err(|_| {
+            let _ = std::fs::remove_file(&copy);
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
     Ok(copy)
 }
 
@@ -746,13 +754,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn load_corruptFileTwice_keepsEachDifferentFileOnce() {
+    fn load_corruptFileTwice_keepsEachDifferentFileOnceAndNeverRewritesACopy() {
         let dir = TempDir::new("corrupt-twice");
         for damaged in ["{ first", "{ second", "{ second"] {
             std::fs::write(dir.0.join("settings.json"), damaged).unwrap();
             store(&dir, &MemorySecrets::default()).load();
         }
         assert_eq!(unreadable_copies(&dir), ["{ first", "{ second"]);
+
+        let warning = store(&dir, &MemorySecrets::default()).load().warning.unwrap();
+        let copy = warning.rsplit_once("A copy is kept as ").unwrap().1.trim_end_matches('.');
+        std::fs::write(copy, "being fixed").unwrap();
+        store(&dir, &MemorySecrets::default()).load();
+        assert_eq!(unreadable_copies(&dir), ["being fixed", "{ first"]);
     }
 
     #[test]
