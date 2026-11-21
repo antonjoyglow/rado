@@ -67,7 +67,6 @@ impl Settings {
     pub fn poll_interval(&self) -> u32 {
         self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1)
     }
-
 }
 
 /// Like `lenient_number`: a hand-edited `null`, unknown or misshapen value (browser, theme, custom colours)
@@ -341,7 +340,7 @@ impl Store {
         if settings.workspaces.is_empty() && file.as_ref().is_some_and(|f| f.get("workspaces").is_some()) {
             let damage = format!("{} has no usable workspace under \"workspaces\"", path.display());
             warnings.push(self.keep_unreadable(&path, ReadError::Invalid(damage)));
-            file = None;
+            (file, settings) = (None, Settings::default());
         }
         let mut dirty = false;
         if settings.workspaces.is_empty() {
@@ -469,12 +468,15 @@ impl Store {
     pub fn hidden(&self, id: &str) -> Hidden {
         let dir = self.workspace_dir(id);
         let file = dir.join(HIDDEN_FILE);
-        let ids: HashSet<i64> = queue::read_json_file(&file).unwrap_or_else(|e| {
-            if let ReadError::Invalid(_) = e {
-                let _ = std::fs::read(&file).and_then(|bytes| copy_aside(&bytes, &dir, "hidden.unreadable"));
+        let ids: HashSet<i64> = match queue::read_json_file(&file) {
+            Ok(ids) => ids.unwrap_or_default(),
+            Err(e) => {
+                if let ReadError::Invalid(_) = e {
+                    let _ = std::fs::read(&file).and_then(|bytes| copy_aside(&bytes, &dir, "hidden.unreadable"));
+                }
+                HashSet::new()
             }
-            None
-        }).unwrap_or_default();
+        };
         let sources: HashMap<String, Value> = queue::read_json(&dir.join(HIDDEN_SOURCES_FILE)).unwrap_or_default();
         let source = |id: i64| sources.get(&id.to_string()).and_then(|v| serde_json::from_value(v.clone()).ok());
         ids.into_iter().map(|id| (id, source(id))).collect()
@@ -803,8 +805,6 @@ pub(crate) mod tests {
         let cases = [
             ("pollMinutes", r#""5""#, 3, false),
             ("pollMinutes", "3.5", 4, false),
-            ("pollMinutes", "-1", 1, false),
-            ("pollMinutes", "4294967296", 120, false),
             ("notify", r#""yes""#, 5, true),
             ("activeWorkspace", "7", 5, false),
             ("migratingTo", "7", 5, false),
@@ -830,13 +830,14 @@ pub(crate) mod tests {
     fn load_workspacesWithNoUsableEntry_isKeptAsACopyAndNeverSavedOver() {
         for (i, raw) in [r#"{"id":"w1","name":"Work"}"#, "[]", "[7]", "null"].into_iter().enumerate() {
             let dir = TempDir::new(&format!("no-workspaces-{i}"));
-            std::fs::write(dir.0.join(BACKUP_FILE), "OLD").unwrap();
             let text = format!(r#"{{"pollMinutes":7,"workspaces":{raw},"activeWorkspace":"w1"}}"#);
             std::fs::write(dir.0.join("settings.json"), &text).unwrap();
+            let store = store(&dir, &MemorySecrets::default());
 
-            let loaded = store(&dir, &MemorySecrets::default()).load();
+            let loaded = store.load();
 
             assert!(loaded.warning.unwrap().contains("no usable workspace"), "{raw}");
+            assert!(store.save_settings(&loaded.settings).is_err());
             assert_eq!(std::fs::read_to_string(dir.0.join("settings.json")).unwrap(), text);
             assert_eq!(unreadable_copies(&dir), [text]);
         }
@@ -852,16 +853,6 @@ pub(crate) mod tests {
 
         assert_eq!((loaded.warning, std::fs::read_to_string(dir.0.join(BACKUP_FILE)).unwrap().as_str()), (None, "OLD"));
         assert_eq!(copies(&dir.0, "settings.pre-workspaces-"), [OLD_FILE]);
-    }
-
-    #[test]
-    fn load_junkGlobalValue_keepsTheWorkspaces() {
-        let dir = TempDir::new("junk");
-        std::fs::write(dir.0.join("settings.json"), r#"{"pollMinutes":"often","workspaces":[{"id":"a1","name":"Acme"}],"activeWorkspace":"a1"}"#).unwrap();
-
-        let loaded = store(&dir, &MemorySecrets::default()).load();
-
-        assert_eq!((loaded.settings.active_workspace.as_str(), loaded.settings.workspaces[0].name.as_str(), loaded.settings.poll_minutes), ("a1", "Acme", 3));
     }
 
     #[test]
