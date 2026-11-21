@@ -466,9 +466,13 @@ impl Store {
     }
 
     /// The Azure DevOps organization the votes and the Azure DevOps hidden PRs belong to. A file of its own, so the
-    /// shapes 0.10.0 reads stay as they are.
-    pub fn vote_organization(&self, id: &str) -> Option<String> {
-        queue::read_json(&self.workspace_dir(id).join(VOTES_ORGANIZATION_FILE))
+    /// shapes 0.10.0 reads stay as they are. An error while it can't be read; a damaged one counts as none.
+    pub fn vote_organization(&self, id: &str) -> Result<Option<String>, String> {
+        match queue::read_json_file(&self.workspace_dir(id).join(VOTES_ORGANIZATION_FILE)) {
+            Ok(organization) => Ok(organization),
+            Err(queue::ReadError::Unreadable(e)) => Err(e),
+            Err(queue::ReadError::Invalid(_)) => Ok(None),
+        }
     }
 
     pub fn save_vote_organization(&self, id: &str, organization: &str) -> Result<(), String> {
