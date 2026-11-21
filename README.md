@@ -270,7 +270,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 - Everything else is under `%APPDATA%\dev.antonis.rado\`:
   - `settings.json`: settings and workspaces, with the active one
   - `.window-state.json`: the counter's position
-  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed) with `hidden-sources.json` (which source each came from), `votes-organization.json` (the Azure DevOps organization those votes and hidden PRs belong to), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits, oldest first) with `agent-draft-links.json` (where each draft can be read) and `agent-drafts.lock` (held while one is recorded)
+  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed) with `hidden-sources.json` (which source each came from), `votes-organization.json` (the Azure DevOps organization those votes and the Azure DevOps hidden PRs belong to), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits, oldest first) with `agent-draft-links.json` (where each draft can be read) and `agent-drafts.lock` (held while one is recorded)
 
 ### Settings
 
