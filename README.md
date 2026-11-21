@@ -103,6 +103,7 @@ One score per PR. Needs review: 50; re-review: 45. Required: +25. Target `master
 - A workspace is a named set of sources (an Azure DevOps organization with its PAT and teams, a GitHub token, or both) and a tracker.
 - The order doesn't wrap: Ctrl+→ on the last workspace does nothing. The keys don't switch while you type in a field.
 - A switch drops any poll still running for the old workspace and refreshes the new one at once. Each workspace keeps its own list, votes, hidden PRs and notification baseline, so switching back shows its last list and only reviews that are new since its last poll notify. A workspace's first poll since Rado started records its reviews without notifying.
+- Changing a workspace's Azure DevOps organization (ignoring case) forgets your votes and its Azure DevOps hidden PRs once the new organization answers, since PR ids repeat across organizations. Correcting a mistyped name before then keeps them, since a name that doesn't exist never answers.
 - Deleting a workspace (after a confirm) removes its tokens and data. The last workspace can't be deleted.
 - Upgrading from before 0.8.0 turns your settings into one workspace named after your organization (or *GitHub* with only a GitHub token, else *Default*). The old file is kept as `settings.pre-workspaces.json` (as `settings.pre-workspaces-<hash>.json` when that name is taken), and the PAT and token move to the workspace's own keyring entries; the old entries are deleted once the new ones read back.
 
@@ -269,7 +270,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 - Everything else is under `%APPDATA%\dev.antonis.rado\`:
   - `settings.json`: settings and workspaces, with the active one. If it is damaged or lists no usable workspace, Rado keeps a copy as `settings.unreadable-<hash>.json`, runs on defaults and saves no settings or tokens that run, so your workspaces are kept: fix it, or put back a good copy, and restart Rado. Deleting it starts over without your workspaces.
   - `.window-state.json`: the counter's position
-  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed; a damaged one is copied aside as `hidden.unreadable-<hash>.json` before it is replaced) with `hidden-sources.json` (which source each came from), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits, oldest first) with `agent-draft-links.json` (where each draft can be read) and `agent-drafts.lock` (held while one is recorded)
+  - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed; a damaged one is copied aside as `hidden.unreadable-<hash>.json` before it is replaced) with `hidden-sources.json` (which source each came from), `votes-organization.json` (the Azure DevOps organization those votes and the Azure DevOps hidden PRs belong to), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits, oldest first) with `agent-draft-links.json` (where each draft can be read) and `agent-drafts.lock` (held while one is recorded)
 
 ### Settings
 
