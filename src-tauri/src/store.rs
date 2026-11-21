@@ -21,7 +21,9 @@ const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    #[serde(deserialize_with = "lenient_number::<_, 3>")]
     pub poll_minutes: u32,
+    #[serde(deserialize_with = "lenient_notify")]
     pub notify: bool,
     /// Size of the `reviews <bird> mine` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
@@ -48,9 +50,10 @@ pub struct Settings {
     pub counter: CounterStyle,
     #[serde(deserialize_with = "workspace::lenient_workspaces")]
     pub workspaces: Vec<Workspace>,
+    #[serde(deserialize_with = "lenient_choice")]
     pub active_workspace: String,
     /// The workspace made from the pre-workspace settings, while their secrets and files still need moving into it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_choice")]
     #[ts(skip)]
     pub migrating_to: Option<String>,
 }
@@ -65,15 +68,6 @@ impl Settings {
         self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1)
     }
 
-    /// A file with a junk global value still keeps its workspaces; losing them would strand their secrets.
-    fn lenient(file: &Value) -> Self {
-        serde_json::from_value(file.clone()).unwrap_or_else(|_| Self {
-            workspaces: workspace::lenient_workspaces(file.get("workspaces").cloned().unwrap_or(Value::Null)).unwrap_or_default(),
-            active_workspace: file["activeWorkspace"].as_str().unwrap_or_default().to_string(),
-            migrating_to: file["migratingTo"].as_str().map(str::to_string),
-            ..Self::default()
-        })
-    }
 }
 
 /// Like `lenient_number`: a hand-edited `null`, unknown or misshapen value (browser, theme, custom colours)
@@ -81,6 +75,11 @@ impl Settings {
 fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(deserializer: D) -> Result<T, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// `lenient_choice` would fall back to `false`, but notifications are on by default.
+fn lenient_notify<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool().unwrap_or(true))
 }
 
 /// Where Rado opens links.
@@ -330,14 +329,20 @@ impl Store {
     pub fn load(&self) -> Loaded {
         let mut warnings = Vec::new();
         let path = self.settings_path();
-        let file = match queue::read_json_file::<serde_json::Map<String, Value>>(&path) {
+        let mut file = match queue::read_json_file::<serde_json::Map<String, Value>>(&path) {
             Ok(file) => file.map(Value::Object),
             Err(e) => {
                 warnings.push(self.keep_unreadable(&path, e));
                 None
             }
         };
-        let mut settings = file.as_ref().map(Settings::lenient).unwrap_or_default();
+        let mut settings: Settings = file.as_ref().map(|f| serde_json::from_value(f.clone()).unwrap_or_default()).unwrap_or_default();
+        // Rado never saves an empty list, and migrating would give the workspaces new ids, stranding their tokens.
+        if settings.workspaces.is_empty() && file.as_ref().is_some_and(|f| f.get("workspaces").is_some()) {
+            let damage = format!("{} has no usable workspace under \"workspaces\"", path.display());
+            warnings.push(self.keep_unreadable(&path, ReadError::Invalid(damage)));
+            file = None;
+        }
         let mut dirty = false;
         if settings.workspaces.is_empty() {
             let legacy = Legacy::read(file.as_ref().unwrap_or(&Value::Null));
@@ -394,12 +399,15 @@ impl Store {
         }
     }
 
+    /// Copies the file about to be migrated; when an earlier migration's backup exists, beside it under another name.
     fn back_up(&self, path: &Path) -> Result<(), String> {
         let backup = self.data_dir.join(BACKUP_FILE);
-        if backup.exists() {
-            return Ok(());
-        }
-        std::fs::copy(path, &backup).map(|_| ()).map_err(|e| format!("Couldn't back up settings.json, so it was left as it was: {e}"))
+        let copied = if backup.exists() {
+            std::fs::read(path).and_then(|bytes| copy_aside(&bytes, &self.data_dir, "settings.pre-workspaces")).map(|_| ())
+        } else {
+            std::fs::copy(path, &backup).map(|_| ())
+        };
+        copied.map_err(|e| format!("Couldn't back up settings.json, so it was left as it was: {e}"))
     }
 
     /// Moves the pre-workspace data files and secrets into workspace `id`; a secret saved there since wins.
@@ -457,9 +465,16 @@ impl Store {
     }
 
     /// Hidden PR ids, each with the source it came from; `None` when none is recorded or the entry is unreadable.
+    /// A damaged `hidden.json` is copied aside first, since the next save replaces it.
     pub fn hidden(&self, id: &str) -> Hidden {
         let dir = self.workspace_dir(id);
-        let ids: HashSet<i64> = queue::read_json(&dir.join(HIDDEN_FILE)).unwrap_or_default();
+        let file = dir.join(HIDDEN_FILE);
+        let ids: HashSet<i64> = queue::read_json_file(&file).unwrap_or_else(|e| {
+            if let ReadError::Invalid(_) = e {
+                let _ = std::fs::read(&file).and_then(|bytes| copy_aside(&bytes, &dir, "hidden.unreadable"));
+            }
+            None
+        }).unwrap_or_default();
         let sources: HashMap<String, Value> = queue::read_json(&dir.join(HIDDEN_SOURCES_FILE)).unwrap_or_default();
         let source = |id: i64| sources.get(&id.to_string()).and_then(|v| serde_json::from_value(v.clone()).ok());
         ids.into_iter().map(|id| (id, source(id))).collect()
@@ -717,10 +732,14 @@ pub(crate) mod tests {
     }
 
     fn unreadable_copies(dir: &TempDir) -> Vec<String> {
-        let mut copies: Vec<String> = std::fs::read_dir(&dir.0)
+        copies(&dir.0, "settings.unreadable-")
+    }
+
+    fn copies(dir: &Path, prefix: &str) -> Vec<String> {
+        let mut copies: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.unreadable-"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
             .map(|e| std::fs::read_to_string(e.path()).unwrap())
             .collect();
         copies.sort();
@@ -777,6 +796,62 @@ pub(crate) mod tests {
         let loaded = store(&dir, &MemorySecrets::default()).load();
 
         assert_eq!((loaded.warning, loaded.settings.active_workspace.as_str(), loaded.settings.workspaces.len()), (None, "a1", 1));
+    }
+
+    #[test]
+    fn load_wrongTypedGlobalValue_keepsTheOtherSettings() {
+        let cases = [
+            ("pollMinutes", r#""5""#, 3, false),
+            ("pollMinutes", "3.5", 4, false),
+            ("pollMinutes", "-1", 1, false),
+            ("pollMinutes", "4294967296", 120, false),
+            ("notify", r#""yes""#, 5, true),
+            ("activeWorkspace", "7", 5, false),
+            ("migratingTo", "7", 5, false),
+        ];
+        for (i, (field, raw, poll_minutes, notify)) in cases.into_iter().enumerate() {
+            let dir = TempDir::new(&format!("wrong-type-{i}"));
+            let mut file: Value = serde_json::from_str(r#"{"pollMinutes":5,"notify":false,"theme":"dark","pillScale":150,"workspaces":[{"id":"a1","name":"Acme"}],"activeWorkspace":"a1"}"#).unwrap();
+            file[field] = serde_json::from_str(raw).unwrap();
+            std::fs::write(dir.0.join("settings.json"), file.to_string()).unwrap();
+
+            let loaded = store(&dir, &MemorySecrets::default()).load();
+
+            let s = &loaded.settings;
+            assert_eq!(
+                (s.poll_minutes, s.notify, s.theme, s.pill_scale, s.active_workspace.as_str(), loaded.warning),
+                (poll_minutes, notify, Theme::Dark, 150, "a1", None),
+                "{field} {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_workspacesWithNoUsableEntry_isKeptAsACopyAndNeverSavedOver() {
+        for (i, raw) in [r#"{"id":"w1","name":"Work"}"#, "[]", "[7]", "null"].into_iter().enumerate() {
+            let dir = TempDir::new(&format!("no-workspaces-{i}"));
+            std::fs::write(dir.0.join(BACKUP_FILE), "OLD").unwrap();
+            let text = format!(r#"{{"pollMinutes":7,"workspaces":{raw},"activeWorkspace":"w1"}}"#);
+            std::fs::write(dir.0.join("settings.json"), &text).unwrap();
+
+            let loaded = store(&dir, &MemorySecrets::default()).load();
+
+            assert!(loaded.warning.unwrap().contains("no usable workspace"), "{raw}");
+            assert_eq!(std::fs::read_to_string(dir.0.join("settings.json")).unwrap(), text);
+            assert_eq!(unreadable_copies(&dir), [text]);
+        }
+    }
+
+    #[test]
+    fn load_oldFileWithAnEarlierBackup_isCopiedBesideIt() {
+        let dir = TempDir::new("earlier-backup");
+        std::fs::write(dir.0.join(BACKUP_FILE), "OLD").unwrap();
+        std::fs::write(dir.0.join("settings.json"), OLD_FILE).unwrap();
+
+        let loaded = store(&dir, &MemorySecrets::default()).load();
+
+        assert_eq!((loaded.warning, std::fs::read_to_string(dir.0.join(BACKUP_FILE)).unwrap().as_str()), (None, "OLD"));
+        assert_eq!(copies(&dir.0, "settings.pre-workspaces-"), [OLD_FILE]);
     }
 
     #[test]
@@ -853,6 +928,21 @@ pub(crate) mod tests {
 
         assert_eq!(secrets.keys(), ["ado-pat:a1"]);
         assert_eq!(secrets.get("ado-pat:a1").as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn hidden_damagedFile_isCopiedAsideBeforeTheNextSaveReplacesIt() {
+        let dir = TempDir::new("hidden-damaged");
+        let store = store(&dir, &MemorySecrets::default());
+        let folder = queue::workspace_dir(&dir.0, "a1");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(HIDDEN_FILE), "[11, 12").unwrap();
+
+        assert_eq!(store.hidden("a1"), Hidden::new());
+        store.save_hidden("a1", &Hidden::from([(7, None)])).unwrap();
+
+        assert_eq!(store.hidden("a1"), Hidden::from([(7, None)]));
+        assert_eq!(copies(&folder, "hidden.unreadable-"), ["[11, 12"]);
     }
 
     #[test]
