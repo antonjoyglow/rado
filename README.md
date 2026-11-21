@@ -268,7 +268,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 
 - Tokens: Windows Credential Manager, service `review-bracket`, users `ado-pat:<workspace id>` and `github-token:<workspace id>`. The id never changes, so renaming keeps the tokens. `RADO_KEYRING_SERVICE` overrides the service name, for a dev build that must not touch your real tokens.
 - Everything else is under `%APPDATA%\dev.antonis.rado\`:
-  - `settings.json`: settings and workspaces, with the active one
+  - `settings.json`: settings and workspaces, with the active one. If it is damaged, Rado keeps a copy as `settings.unreadable-<hash>.json`, runs on defaults and saves no settings or tokens that run, so your workspaces are kept: fix it, or put back a good copy, and restart Rado. Deleting it starts over without your workspaces.
   - `.window-state.json`: the counter's position
   - `workspaces\<workspace id>\`: `votes.json` (the source commit at your last vote), `hidden.json` (hidden PRs, dropped once closed) with `hidden-sources.json` (which source each came from), `votes-organization.json` (the Azure DevOps organization those votes and the Azure DevOps hidden PRs belong to), `queue.json` (the MCP queue) and `agent-drafts.json` (PRs the agent drafted, with their commits, oldest first) with `agent-draft-links.json` (where each draft can be read) and `agent-drafts.lock` (held while one is recorded)
 
