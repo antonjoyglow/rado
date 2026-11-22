@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::queue::{self, Queue};
+use crate::queue::{self, Queue, ReadError};
 use crate::score::{Provider, VoteMemory};
 use crate::workspace::{self, Legacy, Workspace};
 
@@ -13,13 +15,16 @@ const KEYRING_SERVICE: &str = "review-bracket";
 const MEMORY_FILE: &str = "votes.json";
 const HIDDEN_FILE: &str = "hidden.json";
 const HIDDEN_SOURCES_FILE: &str = "hidden-sources.json";
+const VOTES_ORGANIZATION_FILE: &str = "votes-organization.json";
 /// A copy of the settings file from before workspaces, written once and never overwritten.
 const BACKUP_FILE: &str = "settings.pre-workspaces.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    #[serde(deserialize_with = "lenient_number::<_, 3>")]
     pub poll_minutes: u32,
+    #[serde(deserialize_with = "lenient_notify")]
     pub notify: bool,
     /// Size of the `reviews <bird> mine` counter, in percent of the 16 px original.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
@@ -27,7 +32,7 @@ pub struct Settings {
     /// Text size of the review list, in percent.
     #[serde(deserialize_with = "lenient_number::<_, 100>")]
     pub text_scale: u32,
-    /// Size of the review list, in percent of the work area of the counter's screen. Files from 0.9.0 and
+    /// Size of the review list, in percent of the work area of the counter's screen, never under 360 px wide. Files from 0.9.0 and
     /// earlier hold `listWidth` / `listHeight` in pixels instead; those are ignored.
     #[serde(deserialize_with = "lenient_number::<_, 33>")]
     pub list_width_percent: u32,
@@ -46,9 +51,11 @@ pub struct Settings {
     pub counter: CounterStyle,
     #[serde(deserialize_with = "workspace::lenient_workspaces")]
     pub workspaces: Vec<Workspace>,
+    #[serde(deserialize_with = "lenient_choice")]
     pub active_workspace: String,
     /// The workspace made from the pre-workspace settings, while their secrets and files still need moving into it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "lenient_choice")]
+    #[ts(skip)]
     pub migrating_to: Option<String>,
 }
 
@@ -57,14 +64,9 @@ impl Settings {
         self.workspaces.iter().find(|w| w.id == self.active_workspace)
     }
 
-    /// A file with a junk global value still keeps its workspaces; losing them would strand their secrets.
-    fn lenient(file: &Value) -> Self {
-        serde_json::from_value(file.clone()).unwrap_or_else(|_| Self {
-            workspaces: workspace::lenient_workspaces(file.get("workspaces").cloned().unwrap_or(Value::Null)).unwrap_or_default(),
-            active_workspace: file["activeWorkspace"].as_str().unwrap_or_default().to_string(),
-            migrating_to: file["migratingTo"].as_str().map(str::to_string),
-            ..Self::default()
-        })
+    /// Minutes between polls, within the allowed range.
+    pub fn poll_interval(&self) -> u32 {
+        self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1)
     }
 }
 
@@ -75,8 +77,13 @@ fn lenient_choice<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwn
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
+/// `lenient_choice` would fall back to `false`, but notifications are on by default.
+fn lenient_notify<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(deserializer)?.as_bool().unwrap_or(true))
+}
+
 /// Where Rado opens links.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Browser {
     Edge,
@@ -86,7 +93,7 @@ pub enum Browser {
 }
 
 /// Colours of the review list. `System` follows Windows' light or dark app mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum Theme {
     #[default]
@@ -98,7 +105,7 @@ pub enum Theme {
 }
 
 /// The three colours a custom theme is picked from, as `#rrggbb`; the list derives the rest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CustomTheme {
     pub background: String,
@@ -126,7 +133,7 @@ impl CustomTheme {
 }
 
 /// The counter's look. A number colour of `None` is heat: blue at 0 through to red at 10 or more.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CounterStyle {
     #[serde(deserialize_with = "lenient_choice")]
@@ -196,17 +203,19 @@ fn lenient_number<'de, D: serde::Deserializer<'de>, const DEFAULT: u32>(deserial
 /// Smallest and largest counter size, in percent. Below 75% the numbers stop being readable;
 /// above 200% the counter starts to cover what it floats over.
 pub const PILL_SCALE_RANGE: (u32, u32) = (75, 200);
-/// Smallest and largest list text size, in percent, matching `TEXT_SCALE` in `format.ts`.
+/// Smallest and largest list text size, in percent.
 pub const TEXT_SCALE_RANGE: (u32, u32) = (80, 150);
-/// Smallest and largest review list, in percent of its screen, matching `LIST_*_PERCENT` in `format.ts`.
+/// Smallest and largest review list, in percent of its screen.
 pub const LIST_WIDTH_PERCENT_RANGE: (u32, u32) = (20, 100);
 pub const LIST_HEIGHT_PERCENT_RANGE: (u32, u32) = (25, 100);
+/// Shortest and longest time between polls, in minutes.
+pub const POLL_MINUTES_RANGE: (u32, u32) = (1, 120);
 
 impl Settings {
     /// Pulls values typed or edited by hand back into their allowed ranges.
     pub fn clamped(self) -> Self {
         Self {
-            poll_minutes: self.poll_minutes.clamp(1, 120),
+            poll_minutes: self.poll_minutes.clamp(POLL_MINUTES_RANGE.0, POLL_MINUTES_RANGE.1),
             pill_scale: self.pill_scale.clamp(PILL_SCALE_RANGE.0, PILL_SCALE_RANGE.1),
             text_scale: self.text_scale.clamp(TEXT_SCALE_RANGE.0, TEXT_SCALE_RANGE.1),
             list_width_percent: self.list_width_percent.clamp(LIST_WIDTH_PERCENT_RANGE.0, LIST_WIDTH_PERCENT_RANGE.1),
@@ -297,22 +306,22 @@ pub struct Loaded {
 pub type Hidden = HashMap<i64, Option<Provider>>;
 
 pub struct Store {
-    config_dir: PathBuf,
+    /// Settings, workspaces and the queue `rado-mcp` reads: one folder, so both binaries agree on the layout.
     data_dir: PathBuf,
     secrets: Box<dyn Secrets>,
-    /// Set when the settings file couldn't be copied aside, so that saving would destroy the only copy.
+    /// Set when settings.json couldn't be read or backed up: saving would replace the user's workspaces, and the
+    /// fresh workspace this run uses has an id that is never saved, so a token stored under it would be stranded.
     frozen: AtomicBool,
 }
 
 impl Store {
-    pub fn new(config_dir: &Path, data_dir: &Path, secrets: Box<dyn Secrets>) -> Self {
-        let _ = std::fs::create_dir_all(config_dir);
+    pub fn new(data_dir: &Path, secrets: Box<dyn Secrets>) -> Self {
         let _ = std::fs::create_dir_all(data_dir);
-        Self { config_dir: config_dir.into(), data_dir: data_dir.into(), secrets, frozen: AtomicBool::new(false) }
+        Self { data_dir: data_dir.into(), secrets, frozen: AtomicBool::new(false) }
     }
 
     fn settings_path(&self) -> PathBuf {
-        self.config_dir.join(queue::SETTINGS_FILE)
+        queue::settings_path(&self.data_dir)
     }
 
     /// Reads the settings, turning a file from before workspaces into one workspace. Every step can be re-run: the
@@ -320,21 +329,20 @@ impl Store {
     pub fn load(&self) -> Loaded {
         let mut warnings = Vec::new();
         let path = self.settings_path();
-        let file = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value @ Value::Object(_)) => Some(value),
-                _ => {
-                    warnings.push(self.keep_unreadable(&path));
-                    None
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => {
-                warnings.push(self.keep_unreadable(&path));
+        let mut file = match queue::read_json_file::<serde_json::Map<String, Value>>(&path) {
+            Ok(file) => file.map(Value::Object),
+            Err(e) => {
+                warnings.push(self.keep_unreadable(&path, e));
                 None
             }
         };
-        let mut settings = file.as_ref().map(Settings::lenient).unwrap_or_default();
+        let mut settings: Settings = file.as_ref().map(|f| serde_json::from_value(f.clone()).unwrap_or_default()).unwrap_or_default();
+        // Rado never saves an empty list, and migrating would give the workspaces new ids, stranding their tokens.
+        if settings.workspaces.is_empty() && file.as_ref().is_some_and(|f| f.get("workspaces").is_some()) {
+            let damage = format!("{} has no usable workspace under \"workspaces\"", path.display());
+            warnings.push(self.keep_unreadable(&path, ReadError::Invalid(damage)));
+            (file, settings) = (None, Settings::default());
+        }
         let mut dirty = false;
         if settings.workspaces.is_empty() {
             let legacy = Legacy::read(file.as_ref().unwrap_or(&Value::Null));
@@ -345,13 +353,15 @@ impl Store {
             settings.migrating_to = Some(id);
             if file.is_some() && let Err(e) = self.back_up(&path) {
                 self.frozen.store(true, Ordering::Relaxed);
-                warnings.push(e);
-                return Loaded { settings: settings.clamped(), warning: Some(warnings.join(" · ")) };
+                warnings.push(format!("{e}. Rado saves no settings or tokens this run; restart Rado to retry."));
             }
             dirty = true;
         }
         dirty |= workspace::normalize(&mut settings.workspaces, &mut settings.active_workspace, workspace::new_id);
         let mut settings = settings.clamped();
+        if self.frozen.load(Ordering::Relaxed) {
+            return Loaded { settings, warning: Some(warnings.join(" · ")) };
+        }
         if dirty && let Err(e) = self.save_settings(&settings) {
             warnings.push(e);
             return Loaded { settings, warning: Some(warnings.join(" · ")) };
@@ -371,24 +381,33 @@ impl Store {
         Loaded { settings, warning: (!warnings.is_empty()).then(|| warnings.join(" · ")) }
     }
 
-    fn keep_unreadable(&self, path: &Path) -> String {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let copy = self.config_dir.join(format!("settings.unreadable-{secs}.json"));
-        match std::fs::copy(path, &copy) {
-            Ok(_) => format!("settings.json couldn't be read; kept it as {} and started with defaults", copy.display()),
-            Err(e) => {
-                self.frozen.store(true, Ordering::Relaxed);
-                format!("settings.json couldn't be read or copied ({e}); running on defaults without saving over it")
-            }
+    /// Runs this session on defaults without saving: a file held by another program needs only a restart, and a
+    /// damaged one is copied aside, since the user may delete or rewrite it to recover.
+    fn keep_unreadable(&self, path: &Path, error: ReadError) -> String {
+        self.frozen.store(true, Ordering::Relaxed);
+        const FROZEN: &str = "Rado runs on defaults and saves no settings or tokens this run, so your workspaces are kept";
+        let message = match error {
+            ReadError::Unreadable(message) => return format!("{message}. {FROZEN}: restart Rado once nothing else holds the file."),
+            ReadError::Invalid(message) => message,
+        };
+        let advice = format!(
+            "{message}. {FROZEN}: fix settings.json, or put back a good copy of it, and restart Rado. Deleting it starts over without your workspaces."
+        );
+        match std::fs::read(path).and_then(|bytes| copy_aside(&bytes, &self.data_dir, "settings.unreadable")) {
+            Ok(copy) => format!("{advice} A copy is kept as {}.", copy.display()),
+            Err(e) => format!("{advice} It couldn't be copied aside ({e}), so copy it yourself before you change it."),
         }
     }
 
+    /// Copies the file about to be migrated; when an earlier migration's backup exists, beside it under another name.
     fn back_up(&self, path: &Path) -> Result<(), String> {
-        let backup = self.config_dir.join(BACKUP_FILE);
-        if backup.exists() {
-            return Ok(());
-        }
-        std::fs::copy(path, &backup).map(|_| ()).map_err(|e| format!("Couldn't back up settings.json, so it was left as it was: {e}"))
+        let backup = self.data_dir.join(BACKUP_FILE);
+        let copied = if backup.exists() {
+            std::fs::read(path).and_then(|bytes| copy_aside(&bytes, &self.data_dir, "settings.pre-workspaces")).map(|_| ())
+        } else {
+            std::fs::copy(path, &backup).map(|_| ())
+        };
+        copied.map_err(|e| format!("Couldn't back up settings.json, so it was left as it was: {e}"))
     }
 
     /// Moves the pre-workspace data files and secrets into workspace `id`; a secret saved there since wins.
@@ -416,10 +435,15 @@ impl Store {
 
     /// Written whole and renamed into place: `rado-mcp` reads the active workspace from it.
     pub fn save_settings(&self, settings: &Settings) -> Result<(), String> {
-        if self.frozen.load(Ordering::Relaxed) {
-            return Err("settings.json couldn't be copied aside, so Rado won't save over it this run".into());
-        }
+        self.writable()?;
         queue::write_json_atomic(&self.settings_path(), settings)
+    }
+
+    fn writable(&self) -> Result<(), String> {
+        if self.frozen.load(Ordering::Relaxed) {
+            return Err("Rado saves no settings or tokens this run, to leave settings.json as it was (see the warning in the status line)".into());
+        }
+        Ok(())
     }
 
     fn workspace_dir(&self, id: &str) -> PathBuf {
@@ -441,9 +465,19 @@ impl Store {
     }
 
     /// Hidden PR ids, each with the source it came from; `None` when none is recorded or the entry is unreadable.
+    /// A damaged `hidden.json` is copied aside first, since the next save replaces it.
     pub fn hidden(&self, id: &str) -> Hidden {
         let dir = self.workspace_dir(id);
-        let ids: HashSet<i64> = queue::read_json(&dir.join(HIDDEN_FILE)).unwrap_or_default();
+        let file = dir.join(HIDDEN_FILE);
+        let ids: HashSet<i64> = match queue::read_json_file(&file) {
+            Ok(ids) => ids.unwrap_or_default(),
+            Err(e) => {
+                if let ReadError::Invalid(_) = e {
+                    let _ = std::fs::read(&file).and_then(|bytes| copy_aside(&bytes, &dir, "hidden.unreadable"));
+                }
+                HashSet::new()
+            }
+        };
         let sources: HashMap<String, Value> = queue::read_json(&dir.join(HIDDEN_SOURCES_FILE)).unwrap_or_default();
         let source = |id: i64| sources.get(&id.to_string()).and_then(|v| serde_json::from_value(v.clone()).ok());
         ids.into_iter().map(|id| (id, source(id))).collect()
@@ -457,9 +491,33 @@ impl Store {
         self.write_in(id, HIDDEN_FILE, &ids)
     }
 
+    /// The Azure DevOps organization the votes and the Azure DevOps hidden PRs belong to. A file of its own, so the
+    /// shapes 0.10.0 reads stay as they are. An error while it can't be read; a damaged one counts as none.
+    pub fn vote_organization(&self, id: &str) -> Result<Option<String>, String> {
+        match queue::read_json_file(&self.workspace_dir(id).join(VOTES_ORGANIZATION_FILE)) {
+            Ok(organization) => Ok(organization),
+            Err(queue::ReadError::Unreadable(e)) => Err(e),
+            Err(queue::ReadError::Invalid(_)) => Ok(None),
+        }
+    }
+
+    pub fn save_vote_organization(&self, id: &str, organization: &str) -> Result<(), String> {
+        self.write_in(id, VOTES_ORGANIZATION_FILE, &organization)
+    }
+
     /// For the MCP server (`rado-mcp`), which reads it and never touches the PAT.
     pub fn save_queue(&self, id: &str, queue: &Queue) -> Result<(), String> {
         self.write_in(id, queue::QUEUE_FILE, queue)
+    }
+
+    /// The PRs `rado-mcp` marked drafted at the commit `commits` gives them, with the draft's link. Read only: a
+    /// missing or damaged file means no marker, and the server reports the damage to the agent.
+    pub fn agent_drafts(&self, id: &str, commits: &HashMap<i64, String>) -> HashMap<i64, Option<String>> {
+        let dir = self.workspace_dir(id);
+        // Marks before links: rado-mcp writes links first, so a new mark is never read with an old link.
+        let drafts = queue::read_json(&dir.join(queue::DRAFTS_FILE)).unwrap_or_default();
+        let links = queue::read_json(&dir.join(queue::DRAFT_LINKS_FILE)).unwrap_or_default();
+        queue::agent_drafts(commits, &drafts, &links)
     }
 
     /// The PAT, `None` when none is saved, or the error when Credential Manager couldn't be read.
@@ -472,10 +530,12 @@ impl Store {
     }
 
     pub fn save_pat(&self, id: &str, pat: &str) -> Result<(), String> {
+        self.writable()?;
         self.secrets.set(&workspace::pat_key(id), pat)
     }
 
     pub fn save_github_token(&self, id: &str, token: &str) -> Result<(), String> {
+        self.writable()?;
         self.secrets.set(&workspace::github_key(id), token)
     }
 
@@ -507,6 +567,23 @@ impl Store {
     }
 }
 
+/// Writes `bytes` into `dir` as `<stem>-<hash of the bytes>.json`, so copies of different files made in the same
+/// second don't replace each other, and a file still damaged at every start is kept once. An existing copy is never
+/// rewritten: the user may be fixing it.
+fn copy_aside(bytes: &[u8], dir: &Path, stem: &str) -> std::io::Result<PathBuf> {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let copy = dir.join(format!("{stem}-{:016x}.json", hasher.finish()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&copy) {
+        Ok(mut file) => file.write_all(bytes).inspect_err(|_| {
+            let _ = std::fs::remove_file(&copy);
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    Ok(copy)
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 pub(crate) mod tests {
@@ -515,6 +592,30 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::workspace::{LEGACY_GITHUB_KEY, LEGACY_PAT_KEY, Tracker, github_key, pat_key};
+
+    /// Writes the limits and defaults the frontend imports next to the ts-rs types; CI fails when the
+    /// committed file differs, so the two sides can't drift apart.
+    #[test]
+    fn export_limits() {
+        let range = |name: &str, (min, max): (u32, u32)| format!("export const {name}: readonly [number, number] = [{min}, {max}];\n");
+        let defaults = Settings::default();
+        let text = [
+            "// Generated from the Rust constants by `cargo test` (store.rs, `export_limits`). Do not edit this file manually.\n".to_string(),
+            "import type { CounterStyle } from \"./CounterStyle\";\n\n".to_string(),
+            range("POLL_MINUTES", POLL_MINUTES_RANGE),
+            range("PILL_SCALE", PILL_SCALE_RANGE),
+            range("TEXT_SCALE", TEXT_SCALE_RANGE),
+            range("LIST_WIDTH_PERCENT", LIST_WIDTH_PERCENT_RANGE),
+            range("LIST_HEIGHT_PERCENT", LIST_HEIGHT_PERCENT_RANGE),
+            range("COUNTER_REST_OPACITY", COUNTER_REST_RANGE),
+            range("COUNTER_HOVER_OPACITY", COUNTER_HOVER_RANGE),
+            format!("export const DEFAULT_PILL_SCALE = {};\n", defaults.pill_scale),
+            format!("export const COUNTER_DEFAULT: Readonly<CounterStyle> = {};\n", serde_json::to_string(&defaults.counter).unwrap()),
+        ]
+        .concat();
+        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR, set in .cargo/config.toml");
+        std::fs::write(std::path::Path::new(&dir).join("limits.ts"), text).unwrap();
+    }
 
     #[derive(Clone, Default)]
     pub struct MemorySecrets {
@@ -528,6 +629,11 @@ pub(crate) mod tests {
             let secrets = Self::default();
             secrets.entries.lock().unwrap().extend(entries.iter().map(|(k, v)| (k.to_string(), v.to_string())));
             secrets
+        }
+
+        /// Makes every read fail, as a locked Credential Manager does.
+        pub fn fail_reads(&self, fail: bool) {
+            *self.fail_reads.lock().unwrap() = fail;
         }
 
         fn keys(&self) -> Vec<String> {
@@ -577,7 +683,17 @@ pub(crate) mod tests {
     }
 
     fn store(dir: &TempDir, secrets: &MemorySecrets) -> Store {
-        Store::new(&dir.0, &dir.0, Box::new(secrets.clone()))
+        Store::new(&dir.0, Box::new(secrets.clone()))
+    }
+
+    #[test]
+    fn saveSettings_landsWhereRadoMcpReadsTheWorkspaces() {
+        let dir = TempDir::new("settings-path");
+        let settings = Settings { active_workspace: "w1".into(), ..Settings::default() };
+        store(&dir, &MemorySecrets::default()).save_settings(&settings).unwrap();
+        // Spelled out, not through settings_path: installed rado-mcp builds and the README rely on this exact place.
+        let read: serde_json::Value = queue::read_json_file(&dir.0.join("settings.json")).unwrap().expect("written");
+        assert_eq!(read["activeWorkspace"], "w1");
     }
 
     const OLD_FILE: &str = r#"{"organization":"contoso","pollMinutes":5,"notify":false,"teams":["TeamAlpha"],"pillScale":120,"jiraSite":"acme.atlassian.net"}"#;
@@ -632,33 +748,126 @@ pub(crate) mod tests {
         assert_eq!(secrets.keys(), [github_key(&loaded.settings.active_workspace)]);
     }
 
-    #[test]
-    fn load_corruptFile_isKeptAsACopyAndTheSecretsStillMove() {
-        let dir = TempDir::new("corrupt");
-        std::fs::write(dir.0.join("settings.json"), "{ not json").unwrap();
-        let secrets = MemorySecrets::with(&[(LEGACY_PAT_KEY, "pat")]);
+    fn unreadable_copies(dir: &TempDir) -> Vec<String> {
+        copies(&dir.0, "settings.unreadable-")
+    }
 
-        let loaded = store(&dir, &secrets).load();
-
-        assert!(loaded.warning.unwrap().contains("couldn't be read"));
-        let copies: Vec<String> = std::fs::read_dir(&dir.0)
+    fn copies(dir: &Path, prefix: &str) -> Vec<String> {
+        let mut copies: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("settings.unreadable-"))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
             .collect();
-        assert_eq!(copies.len(), 1);
-        assert_eq!(std::fs::read_to_string(dir.0.join(&copies[0])).unwrap(), "{ not json");
-        assert_eq!(secrets.get(&pat_key(&loaded.settings.active_workspace)).as_deref(), Some("pat"));
+        copies.sort();
+        copies
     }
 
     #[test]
-    fn load_junkGlobalValue_keepsTheWorkspaces() {
-        let dir = TempDir::new("junk");
-        std::fs::write(dir.0.join("settings.json"), r#"{"pollMinutes":"often","workspaces":[{"id":"a1","name":"Acme"}],"activeWorkspace":"a1"}"#).unwrap();
+    fn load_corruptFile_isKeptAsACopyAndNothingIsSavedOverOrMoved() {
+        let good = r#"{"workspaces":[{"id":"w1","name":"Work"}],"activeWorkspace":"w1"}"#;
+        for (i, damaged) in [&good[..good.len() - 10], "", "[]", "null", "\"x\""].into_iter().enumerate() {
+            let dir = TempDir::new(&format!("corrupt-{i}"));
+            std::fs::write(dir.0.join("settings.json"), damaged).unwrap();
+            let secrets = MemorySecrets::with(&[(LEGACY_PAT_KEY, "pat"), ("ado-pat:w1", "w1")]);
+            let first = store(&dir, &secrets);
+
+            let loaded = first.load();
+
+            assert!(loaded.warning.unwrap().contains("restart Rado"), "{damaged:?}");
+            assert_eq!(unreadable_copies(&dir), [damaged], "{damaged:?}");
+            assert_eq!(std::fs::read_to_string(dir.0.join("settings.json")).unwrap(), damaged);
+            let id = &loaded.settings.active_workspace;
+            assert!(first.save_settings(&loaded.settings).is_err());
+            assert!(first.save_pat(id, "p").is_err());
+            assert!(first.save_github_token(id, "g").is_err());
+            assert_eq!(secrets.keys(), [LEGACY_PAT_KEY, "ado-pat:w1"], "{damaged:?}");
+
+            std::fs::write(dir.0.join("settings.json"), good).unwrap();
+            let restored = store(&dir, &secrets).load();
+            assert_eq!((restored.warning, restored.settings.active_workspace.as_str()), (None, "w1"));
+        }
+    }
+
+    #[test]
+    fn load_corruptFileTwice_keepsEachDifferentFileOnceAndNeverRewritesACopy() {
+        let dir = TempDir::new("corrupt-twice");
+        for damaged in ["{ first", "{ second", "{ second"] {
+            std::fs::write(dir.0.join("settings.json"), damaged).unwrap();
+            store(&dir, &MemorySecrets::default()).load();
+        }
+        assert_eq!(unreadable_copies(&dir), ["{ first", "{ second"]);
+
+        let warning = store(&dir, &MemorySecrets::default()).load().warning.unwrap();
+        let copy = warning.rsplit_once("A copy is kept as ").unwrap().1.trim_end_matches('.');
+        std::fs::write(copy, "being fixed").unwrap();
+        store(&dir, &MemorySecrets::default()).load();
+        assert_eq!(unreadable_copies(&dir), ["being fixed", "{ first"]);
+    }
+
+    #[test]
+    fn load_fileWithAByteOrderMark_keepsTheWorkspaces() {
+        let dir = TempDir::new("bom");
+        std::fs::write(dir.0.join("settings.json"), "\u{feff}{\"workspaces\":[{\"id\":\"a1\",\"name\":\"Acme\"}],\"activeWorkspace\":\"a1\"}").unwrap();
 
         let loaded = store(&dir, &MemorySecrets::default()).load();
 
-        assert_eq!((loaded.settings.active_workspace.as_str(), loaded.settings.workspaces[0].name.as_str(), loaded.settings.poll_minutes), ("a1", "Acme", 3));
+        assert_eq!((loaded.warning, loaded.settings.active_workspace.as_str(), loaded.settings.workspaces.len()), (None, "a1", 1));
+    }
+
+    #[test]
+    fn load_wrongTypedGlobalValue_keepsTheOtherSettings() {
+        let cases = [
+            ("pollMinutes", r#""5""#, 3, false),
+            ("pollMinutes", "3.5", 4, false),
+            ("notify", r#""yes""#, 5, true),
+            ("activeWorkspace", "7", 5, false),
+            ("migratingTo", "7", 5, false),
+        ];
+        for (i, (field, raw, poll_minutes, notify)) in cases.into_iter().enumerate() {
+            let dir = TempDir::new(&format!("wrong-type-{i}"));
+            let mut file: Value = serde_json::from_str(r#"{"pollMinutes":5,"notify":false,"theme":"dark","pillScale":150,"workspaces":[{"id":"a1","name":"Acme"}],"activeWorkspace":"a1"}"#).unwrap();
+            file[field] = serde_json::from_str(raw).unwrap();
+            std::fs::write(dir.0.join("settings.json"), file.to_string()).unwrap();
+
+            let loaded = store(&dir, &MemorySecrets::default()).load();
+
+            let s = &loaded.settings;
+            assert_eq!(
+                (s.poll_minutes, s.notify, s.theme, s.pill_scale, s.active_workspace.as_str(), loaded.warning),
+                (poll_minutes, notify, Theme::Dark, 150, "a1", None),
+                "{field} {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_workspacesWithNoUsableEntry_isKeptAsACopyAndNeverSavedOver() {
+        for (i, raw) in [r#"{"id":"w1","name":"Work"}"#, "[]", "[7]", "null"].into_iter().enumerate() {
+            let dir = TempDir::new(&format!("no-workspaces-{i}"));
+            let text = format!(r#"{{"pollMinutes":7,"workspaces":{raw},"activeWorkspace":"w1"}}"#);
+            std::fs::write(dir.0.join("settings.json"), &text).unwrap();
+            let store = store(&dir, &MemorySecrets::default());
+
+            let loaded = store.load();
+
+            assert!(loaded.warning.unwrap().contains("no usable workspace"), "{raw}");
+            assert!(store.save_settings(&loaded.settings).is_err());
+            assert_eq!(std::fs::read_to_string(dir.0.join("settings.json")).unwrap(), text);
+            assert_eq!(unreadable_copies(&dir), [text]);
+        }
+    }
+
+    #[test]
+    fn load_oldFileWithAnEarlierBackup_isCopiedBesideIt() {
+        let dir = TempDir::new("earlier-backup");
+        std::fs::write(dir.0.join(BACKUP_FILE), "OLD").unwrap();
+        std::fs::write(dir.0.join("settings.json"), OLD_FILE).unwrap();
+
+        let loaded = store(&dir, &MemorySecrets::default()).load();
+
+        assert_eq!((loaded.warning, std::fs::read_to_string(dir.0.join(BACKUP_FILE)).unwrap().as_str()), (None, "OLD"));
+        assert_eq!(copies(&dir.0, "settings.pre-workspaces-"), [OLD_FILE]);
     }
 
     #[test]
@@ -698,7 +907,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn load_fileThatCannotBeReadOrCopied_isNeverSavedOver() {
+    fn load_fileThatCannotBeRead_isNeverSavedOverOrCopied() {
         let dir = TempDir::new("uncopyable");
         std::fs::create_dir(dir.0.join("settings.json")).unwrap();
         std::fs::write(dir.0.join("settings.json").join("inside"), "keep").unwrap();
@@ -706,7 +915,8 @@ pub(crate) mod tests {
 
         let loaded = store.load();
 
-        assert!(loaded.warning.unwrap().contains("without saving over it"));
+        assert!(loaded.warning.unwrap().contains("restart Rado once nothing else holds the file"));
+        assert!(unreadable_copies(&dir).is_empty());
         assert_eq!(loaded.settings.workspaces.len(), 1);
         // With the obstacle gone, only the guard stops the save.
         std::fs::remove_dir_all(dir.0.join("settings.json")).unwrap();
@@ -724,6 +934,21 @@ pub(crate) mod tests {
 
         assert_eq!(secrets.keys(), ["ado-pat:a1"]);
         assert_eq!(secrets.get("ado-pat:a1").as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn hidden_damagedFile_isCopiedAsideBeforeTheNextSaveReplacesIt() {
+        let dir = TempDir::new("hidden-damaged");
+        let store = store(&dir, &MemorySecrets::default());
+        let folder = queue::workspace_dir(&dir.0, "a1");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(HIDDEN_FILE), "[11, 12").unwrap();
+
+        assert_eq!(store.hidden("a1"), Hidden::new());
+        store.save_hidden("a1", &Hidden::from([(7, None)])).unwrap();
+
+        assert_eq!(store.hidden("a1"), Hidden::from([(7, None)]));
+        assert_eq!(copies(&folder, "hidden.unreadable-"), ["[11, 12"]);
     }
 
     #[test]

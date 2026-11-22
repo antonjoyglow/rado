@@ -1,19 +1,36 @@
 //! The review queue that Rado exports for its MCP server (`src/bin/rado-mcp.rs`). This file uses only serde,
-//! serde_json and chrono, so the server can include it without Tauri.
+//! serde_json, chrono and indexmap, so the server can include it without Tauri.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 pub const QUEUE_FILE: &str = "queue.json";
 pub const DRAFTS_FILE: &str = "agent-drafts.json";
-pub const SETTINGS_FILE: &str = "settings.json";
+/// Held while a draft is recorded, so two agents marking at once don't drop each other's mark.
+pub const DRAFTS_LOCK_FILE: &str = "agent-drafts.lock";
+/// Where each draft can be read, beside `DRAFTS_FILE` rather than in it, so an older `rado-mcp` still reads the marks.
+pub const DRAFT_LINKS_FILE: &str = "agent-draft-links.json";
+/// The drafts file keeps the newest marks only, so it stays small.
+pub const MAX_DRAFTS: usize = 500;
+pub const MAX_DRAFT_URL: usize = 2048;
+const SETTINGS_FILE: &str = "settings.json";
+/// The queue file's schema. Bump it only for a change an older `rado-mcp` would misread: readers ignore fields they
+/// don't know, so an added field needs no bump.
+pub const QUEUE_SCHEMA: u32 = 1;
 
 /// Letters, digits and dashes only, so an id read from a hand-edited file can't point outside the data folder.
 pub fn is_workspace_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Where the app saves its settings and `rado-mcp` finds the workspaces: in the data folder itself.
+pub fn settings_path(root: &Path) -> PathBuf {
+    root.join(SETTINGS_FILE)
 }
 
 /// Where a workspace keeps its queue, drafts, votes and hidden PRs.
@@ -21,23 +38,19 @@ pub fn workspace_dir(root: &Path, id: &str) -> PathBuf {
     root.join("workspaces").join(id)
 }
 
-/// The active workspace's folder, named by `activeWorkspace` in the settings file; None before the first one exists.
-pub fn active_workspace_dir(root: &Path) -> Option<PathBuf> {
-    let settings: serde_json::Value = read_json(&root.join(SETTINGS_FILE))?;
-    let id = settings["activeWorkspace"].as_str().filter(|id| is_workspace_id(id))?;
-    Some(workspace_dir(root, id))
-}
-
 /// The PRs waiting on my review at the last successful poll: not hidden, and not my own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Queue {
+    /// `QUEUE_SCHEMA` when written; files from before 0.11.0 have none and are schema 1.
+    #[serde(default = "first_schema")]
+    pub schema_version: u32,
     pub refreshed: DateTime<Utc>,
     /// The Azure DevOps organization; empty for a workspace with GitHub only.
     pub organization: String,
     pub poll_minutes: u32,
     /// Sources whose last poll failed or came back partial (`azureDevOps`, `gitHub`): some of their PRs may be missing
-    /// from `branches`, so their drafts are not pruned.
+    /// from `branches`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_sources: Vec<String>,
     /// Best-ranked first. One branch is one change, even when it spans several repos.
@@ -93,14 +106,13 @@ fn azure_dev_ops() -> String {
     AZURE_DEV_OPS.into()
 }
 
-/// The source commit at which the agent last drafted a review, keyed by PR id.
-pub type Drafts = HashMap<i64, String>;
-
-impl Queue {
-    pub fn contains(&self, pr_id: i64) -> bool {
-        self.branches.iter().flat_map(|b| &b.prs).any(|p| p.pr_id == pr_id)
-    }
+fn first_schema() -> u32 {
+    1
 }
+
+/// The source commit at which the agent last drafted a review, keyed by PR id, oldest mark first. Still a plain JSON
+/// object, so older `rado-mcp` copies read it.
+pub type Drafts = IndexMap<i64, String>;
 
 /// How old the queue may be before an agent must not trust it: three missed polls, and never less than 30 minutes.
 pub fn stale_after_minutes(poll_minutes: u32) -> i64 {
@@ -109,11 +121,20 @@ pub fn stale_after_minutes(poll_minutes: u32) -> i64 {
 
 /// The queue without the PRs already drafted at their current source commit; a new push brings a PR back.
 pub fn pending(queue: &Queue, drafts: &Drafts) -> Vec<Branch> {
+    branches_where(queue, |p| !is_drafted(p, drafts))
+}
+
+/// The queued PRs a draft at their current source commit leaves out of `pending`.
+pub fn drafted(queue: &Queue, drafts: &Drafts) -> Vec<Branch> {
+    branches_where(queue, |p| is_drafted(p, drafts))
+}
+
+fn branches_where(queue: &Queue, keep: impl Fn(&QueuedPr) -> bool) -> Vec<Branch> {
     queue
         .branches
         .iter()
         .filter_map(|b| {
-            let prs: Vec<QueuedPr> = b.prs.iter().filter(|p| !is_drafted(p, drafts)).cloned().collect();
+            let prs: Vec<QueuedPr> = b.prs.iter().filter(|p| keep(p)).cloned().collect();
             (!prs.is_empty()).then(|| Branch { branch: b.branch.clone(), prs })
         })
         .collect()
@@ -123,21 +144,97 @@ fn is_drafted(pr: &QueuedPr, drafts: &Drafts) -> bool {
     pr.source_commit.as_ref().is_some_and(|c| drafts.get(&pr.pr_id) == Some(c))
 }
 
-/// Forgets drafts for PRs that have left the queue.
-pub fn prune(drafts: &mut Drafts, queue: &Queue) {
-    drafts.retain(|id, _| queue.contains(*id));
+/// Records a draft as the newest mark and forgets the oldest past `MAX_DRAFTS`. A PR that leaves the queue keeps its
+/// draft, so it isn't drafted again when it comes back at the same commit.
+pub fn record_draft(drafts: &mut Drafts, pr_id: i64, commit: &str) {
+    drafts.shift_remove(&pr_id);
+    drafts.insert(pr_id, commit.to_string());
+    let excess = drafts.len().saturating_sub(MAX_DRAFTS);
+    drafts.drain(..excess);
 }
 
+/// Where the agent saved the draft it marked at `commit`, by PR id.
+pub type DraftLinks = IndexMap<i64, DraftLink>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftLink {
+    pub commit: String,
+    pub url: String,
+}
+
+/// An http or https link: the list opens it in a browser, so nothing else may get there from a hand-edited file. A
+/// browser chosen in settings gets it as its raw command line, so no whitespace or quote may split it into flags.
+/// Printable ASCII only, with no `\` anywhere and no `@` in the host, so the host the list shows is the one the browser opens.
+pub fn is_draft_url(url: &str) -> bool {
+    let authority = url_authority(url);
+    !authority.is_empty()
+        && !authority.contains('@')
+        && url.len() <= MAX_DRAFT_URL
+        && url.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+}
+
+/// The part between `http(s)://` and the path, shown before a draft opens; empty when it isn't an http link.
+pub fn url_authority(url: &str) -> &str {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or_default();
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
+}
+
+/// Keeps the links whose PR is still marked at the link's commit, which also bounds them by `MAX_DRAFTS`.
+pub fn prune_links(links: &mut DraftLinks, drafts: &Drafts) {
+    links.retain(|id, link| drafts.get(id) == Some(&link.commit));
+}
+
+/// The PRs drafted at the commit `commits` gives them, with the draft's link when it has a valid one.
+pub fn agent_drafts(commits: &HashMap<i64, String>, drafts: &Drafts, links: &DraftLinks) -> HashMap<i64, Option<String>> {
+    commits
+        .iter()
+        .filter(|(id, commit)| drafts.get(*id) == Some(*commit))
+        .map(|(id, commit)| {
+            let url = links.get(id).filter(|l| &l.commit == commit && is_draft_url(&l.url)).map(|l| l.url.clone());
+            (*id, url)
+        })
+        .collect()
+}
+
+/// The file's contents, or None when it is missing, unreadable or not valid.
 pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    read_json_file(path).ok().flatten()
 }
 
-/// Writes to a temporary file and renames it over the target, so a reader never sees half a file.
+/// Why a file that exists couldn't be used; each message names the file.
+#[derive(Debug)]
+pub enum ReadError {
+    /// Held by another program, most likely for a moment.
+    Unreadable(String),
+    /// Damaged, or not the expected shape.
+    Invalid(String),
+}
+
+/// The file's contents, or None when it doesn't exist.
+pub fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, ReadError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ReadError::Unreadable(format!("Cannot read {}: {e}", path.display()))),
+    };
+    serde_json::from_slice(without_bom(&bytes)).map(Some).map_err(|e| ReadError::Invalid(format!("{} is not valid: {e}", path.display())))
+}
+
+/// The bytes after a UTF-8 byte order mark, which Notepad can put at the start of a file edited by hand.
+pub fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
+}
+
+/// Writes to a temporary file and renames it over the target, so a reader never sees half a file. The temporary name
+/// is unique to this write, so writers in other processes or threads don't collide on it.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, bytes).map_err(|e| format!("{}: {e}", temp.display()))?;
-    std::fs::rename(&temp, path).map_err(|e| format!("{}: {e}", path.display()))
+    let temp = path.with_extension(format!("json.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&temp, bytes).and_then(|()| std::fs::rename(&temp, path)).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("{}: {e}", path.display())
+    })
 }
 
 #[cfg(test)]
@@ -170,7 +267,7 @@ pub(crate) mod tests {
     }
 
     pub fn queue(branches: Vec<Branch>) -> Queue {
-        Queue { refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, missing_sources: vec![], branches }
+        Queue { schema_version: QUEUE_SCHEMA, refreshed: "2026-11-10T09:00:00Z".parse().unwrap(), organization: "org".into(), poll_minutes: 3, missing_sources: vec![], branches }
     }
 
     #[test]
@@ -181,6 +278,29 @@ pub(crate) mod tests {
         let q: Queue = serde_json::from_str(old).unwrap();
         let pr = &q.branches[0].prs[0];
         assert_eq!((pr.provider.as_str(), pr.pr_id, pr.agent_authored, q.missing_sources.len()), (AZURE_DEV_OPS, 7, false, 0));
+    }
+
+    /// 0.10.0's `Queue`, as an older `rado-mcp` still reads it; `Branch` and `QueuedPr` are unchanged since then.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
+    struct QueueBeforeSchema {
+        refreshed: DateTime<Utc>,
+        organization: String,
+        poll_minutes: u32,
+        #[serde(default)]
+        missing_sources: Vec<String>,
+        branches: Vec<Branch>,
+    }
+
+    #[test]
+    fn queue_withASchema_staysReadableByOlderServers() {
+        let q = queue(vec![branch("a", vec![pr(1, "c1")])]);
+        let json = serde_json::to_string(&q).unwrap();
+
+        assert!(json.contains(r#""schemaVersion":1"#), "{json}");
+        let old: QueueBeforeSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!((old.refreshed, old.branches), (q.refreshed, q.branches));
     }
 
     fn branch(name: &str, prs: Vec<QueuedPr>) -> Branch {
@@ -198,6 +318,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn drafted_isWhatPendingLeavesOut() {
+        let q = queue(vec![branch("a", vec![pr(1, "c1"), pr(2, "c2")]), branch("b", vec![pr(3, "new")])]);
+        let drafts = Drafts::from([(1, "c1".to_string()), (3, "old".to_string())]);
+
+        assert_eq!(drafted(&q, &drafts), vec![branch("a", vec![pr(1, "c1")])]);
+    }
+
+    #[test]
     fn pending_newPushSinceDraft_comesBack() {
         let q = queue(vec![branch("a", vec![pr(1, "c2")])]);
         let drafts = Drafts::from([(1, "c1".to_string())]);
@@ -206,25 +334,75 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn prune_prLeftTheQueue_isForgotten() {
-        let q = queue(vec![branch("a", vec![pr(1, "c1")])]);
-        let mut drafts = Drafts::from([(1, "c1".to_string()), (9, "c9".to_string())]);
+    fn recordDraft_pastTheCap_forgetsTheOldestMark() {
+        let mut drafts: Drafts = (0..MAX_DRAFTS as i64).map(|id| (id, "c".to_string())).collect();
+        record_draft(&mut drafts, 0, "new");
 
-        prune(&mut drafts, &q);
+        record_draft(&mut drafts, 9999, "c9999");
 
-        assert_eq!(drafts, Drafts::from([(1, "c1".to_string())]));
+        assert_eq!(drafts.len(), MAX_DRAFTS);
+        assert!(!drafts.contains_key(&1), "1 is now the oldest mark");
+        assert_eq!(drafts.get(&0).map(String::as_str), Some("new"), "marking again made 0 the newest, not the oldest");
+        assert_eq!(drafts.last(), Some((&9999, &"c9999".to_string())));
+    }
+
+    #[test]
+    fn drafts_roundTripInOrder_andStayReadableAsAPlainMap() {
+        let drafts = Drafts::from([(42, "abc".to_string()), (7, "def".to_string())]);
+        let json = serde_json::to_string(&drafts).unwrap();
+
+        assert_eq!(json, r#"{"42":"abc","7":"def"}"#);
+        assert_eq!(serde_json::from_str::<Drafts>(&json).unwrap(), drafts);
+        let old = serde_json::from_str::<std::collections::HashMap<i64, String>>(&json).unwrap();
+        assert_eq!(old, std::collections::HashMap::from([(42, "abc".to_string()), (7, "def".to_string())]));
+    }
+
+    fn link(commit: &str, url: &str) -> DraftLink {
+        DraftLink { commit: commit.into(), url: url.into() }
+    }
+
+    #[test]
+    fn isDraftUrl_takesHttpLinksOnly() {
+        for good in ["https://github.com/o/r/pull/1#pullrequestreview-9", "http://localhost:8080/drafts/1"] {
+            assert!(is_draft_url(good), "{good}");
+        }
+        let long = format!("https://x/{}", "a".repeat(MAX_DRAFT_URL));
+        for bad in ["https://", "https:///path", "file:///C:/Windows/System32/calc.exe", "C:\\drafts\\1.md", "javascript:alert(1)", "https://x/a b", "https://x/\" --flag", "https://x/\n", "https://evil.example\\@github.com/x", "https://github.com@evil.example/", "https://g\u{0456}thub.com/", "https://x/\u{200B}", "HTTPS://x", &long] {
+            assert!(!is_draft_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn urlAuthority_isWhatComesBeforeThePath() {
+        assert_eq!(url_authority("https://github.com/o/r/pull/1"), "github.com");
+        assert_eq!(url_authority("http://localhost:8080?x"), "localhost:8080");
+        assert_eq!(url_authority("file:///x"), "");
+    }
+
+    #[test]
+    fn agentDrafts_onlyAtTheCurrentCommit_andALinkOnlyFromThatCommit() {
+        let commits = HashMap::from([(1, "c1".to_string()), (2, "c2".to_string()), (3, "c3".to_string()), (4, "c4".to_string())]);
+        let drafts = Drafts::from([(1, "c1".to_string()), (2, "c2".to_string()), (3, "old".to_string()), (4, "c4".to_string())]);
+        let links = DraftLinks::from([(1, link("c1", "https://d/1")), (2, link("old", "https://d/2")), (4, link("c4", "file:///x"))]);
+
+        let found = agent_drafts(&commits, &drafts, &links);
+
+        assert_eq!(found, HashMap::from([(1, Some("https://d/1".to_string())), (2, None), (4, None)]));
+    }
+
+    #[test]
+    fn pruneLinks_dropsLinksWhoseMarkMovedOrWent() {
+        let drafts = Drafts::from([(1, "c1".to_string()), (2, "new".to_string())]);
+        let mut links = DraftLinks::from([(1, link("c1", "https://d/1")), (2, link("old", "https://d/2")), (3, link("c3", "https://d/3"))]);
+
+        prune_links(&mut links, &drafts);
+
+        assert_eq!(links, DraftLinks::from([(1, link("c1", "https://d/1"))]));
     }
 
     #[test]
     fn staleAfterMinutes_isThreePollsWithA30MinuteFloor() {
         assert_eq!(stale_after_minutes(3), 30);
         assert_eq!(stale_after_minutes(20), 60);
-    }
-
-    #[test]
-    fn drafts_roundTripThroughJson() {
-        let drafts = Drafts::from([(42, "abc".to_string())]);
-        let json = serde_json::to_string(&drafts).unwrap();
-        assert_eq!(serde_json::from_str::<Drafts>(&json).unwrap(), drafts);
     }
 }

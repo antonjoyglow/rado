@@ -2,6 +2,38 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
+## [0.11.0] - 2026-11-22
+
+### Features
+
+- list: an empty review list says which PRs Rado lists (#142)
+- settings: the Azure DevOps organization field takes a pasted dev.azure.com link (#141)
+- poll: a failing source backs off and says when it tries again (#138)
+- ado: fewer Azure DevOps requests per poll (#137)
+- list: rows show "Draft ready" for PRs a review agent drafted, opening the draft (#134)
+- mcp: review agents can list the PRs they drafted and undo a mark (#132)
+- mcp: review agents can pick the workspace, and every reply names it (#131)
+
+### Fixes
+
+- settings: a hand-edited or damaged data file no longer resets your settings or drops hidden PRs without a copy (#169)
+- polling: after you change a workspace's Azure DevOps organization, the old organization's votes and hidden PRs are dropped once the new one answers; a mistyped name drops nothing (#154, #167)
+- settings: a settings.json Rado can't read is kept as it was, so your workspaces keep their tokens (#168)
+- list: priority dots, the Review next mark and the bird stay visible with a Windows contrast theme (#165)
+- mcp: rado-mcp reports a damaged queue schema as damaged, keeps each log entry on one line, and reads input that starts with a BOM (#163)
+- extension: PR tabs that load while Rado starts Edge are grouped too, including Azure DevOps tabs, whose page drops the tag (#158, #162)
+- settings: a settings.json saved with a byte order mark is read instead of set aside as damaged (#157)
+- mcp: rado-mcp answers a malformed request instead of going silent or quitting (#156)
+- settings: a Jira site with spaces, quotes or @ is refused instead of reaching the browser; one with an underscore, non-ASCII letters or an IPv6 address is accepted (#155, #166)
+- list: a ticket key inside a non-ASCII word no longer gets a chip for part of it (#153)
+- polling: an approved or hidden Azure DevOps PR reloads its comments after a push whose threads failed to load (#152)
+- settings: a pasted token saves on Enter or when you leave its field (#140)
+- list: a failed open, hide or workspace switch says why in the status line (#139)
+- list: the Copy and Not mine buttons on a hovered row respond to clicks again (#136)
+- mcp: the MCP server logs its data folder and tells a missing queue from a damaged one (#129)
+- mcp: agents marking drafts at once no longer lose each other's marks (#127)
+- list: a PR waiting on me leads its branch row (#126)
+
 ## [0.10.0] - 2026-11-18
 
 ### Features

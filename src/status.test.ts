@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { counterProblem, glows, isStale, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine } from "./status";
+import { counterProblem, glows, isStale, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine } from "./status";
 
 const now = new Date("2026-11-17T12:00:00Z");
 const minutesAgo = (m: number) => new Date(now.getTime() - m * 60_000).toISOString();
@@ -64,15 +64,50 @@ describe("statusLine", () => {
 
 describe("showStatus", () => {
   it("nothingToSay_isHidden", () => {
-    expect(showStatus(null, null, null)).toBe(false);
+    expect(showStatus(null, null, null, null)).toBe(false);
   });
 
   it.each([
-    [{ kind: "stale" as const, text: "x" }, null, null],
-    [null, "Settings could not be read", null],
-    [null, null, { version: "1.0.0", url: "u" }],
-  ])("anyLine_isShown", (line, warning, newer) => {
-    expect(showStatus(line, warning, newer)).toBe(true);
+    [{ kind: "stale" as const, text: "x" }, null, null, null],
+    [null, "Settings could not be read", null, null],
+    [null, null, "That row is gone; refresh the list", null],
+    [null, null, null, { version: "1.0.0", url: "u" }],
+  ])("anyLine_isShown", (line, warning, failed, newer) => {
+    expect(showStatus(line, warning, failed, newer)).toBe(true);
+  });
+});
+
+describe("listActions", () => {
+  const recorder = () => {
+    const reports: (string | null)[] = [];
+    return { reports, act: listActions((e) => reports.push(e)) };
+  };
+
+  it("failure_reportsItsError", async () => {
+    const { reports, act } = recorder();
+    await act(Promise.reject("Set this workspace's tracker in settings"));
+    expect(reports).toEqual([null, "Set this workspace's tracker in settings"]);
+  });
+
+  it("nextAction_clearsTheErrorAsItStarts_beforeItSettles", async () => {
+    const { reports, act } = recorder();
+    await act(Promise.reject("That row is gone; refresh the list"));
+    let settle!: () => void;
+    const running = act(new Promise<void>((resolve) => (settle = resolve)));
+    expect(reports[reports.length - 1]).toBeNull();
+    settle();
+    await running;
+    expect(reports).toEqual([null, "That row is gone; refresh the list", null]);
+  });
+
+  it("olderFailure_settlingAfterANewerAction_isNotShown", async () => {
+    const { reports, act } = recorder();
+    let fail!: (e: string) => void;
+    const slow = act(new Promise<void>((_, reject) => (fail = reject)));
+    await act(Promise.resolve());
+    fail("That row is gone; refresh the list");
+    await slow;
+    expect(reports).toEqual([null, null]);
   });
 });
 

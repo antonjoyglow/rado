@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::ado::PullRequest;
-use crate::queue::{AZURE_DEV_OPS, Branch, GITHUB, Queue, QueuedPr};
-use crate::score::{Provider, ReviewItem, ReviewState, Tier, VoteMemory};
+use crate::queue::{AZURE_DEV_OPS, Branch, GITHUB, QUEUE_SCHEMA, Queue, QueuedPr};
+use crate::score::{Provider, ReviewItem, ReviewState, Tier};
+use crate::source::QueueRef;
 
 pub struct Context<'a> {
     pub organization: &'a str,
@@ -12,51 +12,36 @@ pub struct Context<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// One poll's fresh data per source; `None` for a source that is off or failed, whose PRs are then left out.
-pub struct Sources<'a> {
-    pub ado: Option<&'a [PullRequest]>,
-    pub github: Option<&'a HashMap<i64, GitHubRef>>,
+/// One poll's queue refs per fresh source. A source that is off or failed has none, and its PRs are left out.
+pub struct Sources {
+    pub refs: HashMap<Provider, HashMap<i64, QueueRef>>,
     pub missing: Vec<String>,
 }
 
-/// What the queue needs from a GitHub PR beyond its list row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GitHubRef {
-    pub owner: String,
-    pub head: String,
-    /// The commit of my latest approval or change request.
-    pub last_voted: Option<String>,
-    pub agent: bool,
+/// A source's name in the queue file.
+pub fn source_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Ado => AZURE_DEV_OPS,
+        Provider::GitHub => GITHUB,
+    }
 }
 
 /// The reviews waiting on me, grouped by branch in rank order, with what an agent needs to call the provider.
 /// Leaves out hidden PRs, my own PRs, PRs I approved or am waiting on, and PRs of a source that wasn't fresh.
-pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls: &HashMap<i64, String>, ctx: &Context) -> Queue {
-    let ado: HashMap<i64, &PullRequest> = sources.ado.unwrap_or_default().iter().map(|pr| (pr.pull_request_id, pr)).collect();
+pub fn queue(items: &[ReviewItem], sources: &Sources, urls: &HashMap<i64, String>, ctx: &Context) -> Queue {
     let mut branches: Vec<Branch> = Vec::new();
     for item in items.iter().filter(|i| i.state.is_actionable() && !i.hidden) {
+        let Some(r) = sources.refs.get(&item.provider).and_then(|refs| refs.get(&item.id)) else { continue };
+        let provider = source_name(item.provider);
         let re_review = item.state == ReviewState::ReReview;
-        let (provider, project, repo_id, agent, source_commit, last_voted) = match item.provider {
-            Provider::Ado => {
-                let Some(pr) = ado.get(&item.id) else { continue };
-                let last_voted = memory.get(&item.id).map(|v| v.commit.clone());
-                let commit = pr.last_merge_source_commit.as_ref().map(|c| c.commit_id.clone());
-                (AZURE_DEV_OPS, pr.repository.project.name.clone(), pr.repository.id.clone(), false, commit, last_voted)
-            }
-            Provider::GitHub => {
-                let Some(r) = sources.github.and_then(|g| g.get(&item.id)) else { continue };
-                let repo_id = format!("{}/{}", r.owner, item.repo);
-                (GITHUB, r.owner.clone(), repo_id, r.agent, Some(r.head.clone()), r.last_voted.clone())
-            }
-        };
         let entry = QueuedPr {
             provider: provider.into(),
             pr_id: item.id,
             number: item.number,
-            project,
+            project: r.project.clone(),
             repo: item.repo.clone(),
-            repo_id,
-            agent_authored: agent,
+            repo_id: r.repo_id.clone(),
+            agent_authored: r.agent,
             url: urls.get(&item.id).cloned().unwrap_or_default(),
             title: item.title.clone(),
             author: item.author.clone(),
@@ -68,8 +53,8 @@ pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls:
             draft: item.draft,
             required: item.required,
             // A vote dismissed without a push leaves nothing new to diff against, so the whole PR is the review.
-            last_voted_commit: last_voted.filter(|v| re_review && Some(v) != source_commit.as_ref()),
-            source_commit,
+            last_voted_commit: r.last_voted.clone().filter(|v| re_review && Some(v) != r.source_commit.as_ref()),
+            source_commit: r.source_commit.clone(),
         };
         // The same branch name on two providers is two changes, and on GitHub under two owners too (`patch-1`).
         let same_change = |first: &QueuedPr| first.provider == provider && (provider == AZURE_DEV_OPS || first.project == entry.project);
@@ -79,6 +64,7 @@ pub fn queue(items: &[ReviewItem], sources: &Sources, memory: &VoteMemory, urls:
         }
     }
     Queue {
+        schema_version: QUEUE_SCHEMA,
         refreshed: ctx.now,
         organization: ctx.organization.to_string(),
         poll_minutes: ctx.poll_minutes,
@@ -110,30 +96,9 @@ fn tier_name(tier: Tier) -> &'static str {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::ado::{Commit, IdentityRef, Project, Repository};
-    use crate::score::VotedAt;
 
     fn now() -> DateTime<Utc> {
         "2026-11-10T09:00:00Z".parse().unwrap()
-    }
-
-    fn pr(id: i64, branch: &str, commit: &str) -> PullRequest {
-        PullRequest {
-            pull_request_id: id,
-            title: format!("PR {id}"),
-            created_by: IdentityRef { id: "author-id".into(), display_name: "Author".into() },
-            creation_date: now(),
-            repository: Repository {
-                id: format!("repo-{id}"),
-                name: format!("Repo{id}"),
-                project: Project { id: "project-id".into(), name: "Contoso".into() },
-            },
-            source_ref_name: format!("refs/heads/{branch}"),
-            target_ref_name: "refs/heads/dev".into(),
-            is_draft: false,
-            reviewers: vec![],
-            last_merge_source_commit: Some(Commit { commit_id: commit.into() }),
-        }
     }
 
     fn item(id: i64, branch: &str, state: ReviewState, score: i32) -> ReviewItem {
@@ -168,25 +133,33 @@ mod tests {
         Context { organization: "org", poll_minutes: 3, now: now() }
     }
 
-    fn ado(prs: &[PullRequest]) -> Sources<'_> {
-        Sources { ado: Some(prs), github: None, missing: vec![] }
+    /// An Azure DevOps PR's queue ref, at `commit`, never voted on.
+    fn ado_ref(id: i64, commit: &str) -> QueueRef {
+        QueueRef { project: "Contoso".into(), repo_id: format!("repo-{id}"), agent: false, source_commit: Some(commit.into()), last_voted: None }
+    }
+
+    fn github_ref(agent: bool) -> QueueRef {
+        QueueRef { project: "acme".into(), repo_id: "acme/web".into(), agent, source_commit: Some("h2".into()), last_voted: Some("h1".into()) }
+    }
+
+    fn sources(ado: Option<Vec<(i64, QueueRef)>>, github: Option<Vec<(i64, QueueRef)>>) -> Sources {
+        let refs = [(Provider::Ado, ado), (Provider::GitHub, github)]
+            .into_iter()
+            .filter_map(|(provider, refs)| Some((provider, refs?.into_iter().collect())))
+            .collect();
+        Sources { refs, missing: vec![] }
     }
 
     fn on_github(id: i64, branch: &str, state: ReviewState) -> ReviewItem {
         ReviewItem { provider: Provider::GitHub, number: 12, repo: "web".into(), ..item(id, branch, state, 50) }
     }
 
-    fn github_ref(agent: bool) -> GitHubRef {
-        GitHubRef { owner: "acme".into(), head: "h2".into(), last_voted: Some("h1".into()), agent }
-    }
-
     #[test]
     fn queue_gitHubPr_carriesOwnerRepoNumberAndHead() {
-        let refs = HashMap::from([(9_000_001, github_ref(true)), (9_000_002, github_ref(false))]);
+        let refs = vec![(9_000_001, github_ref(true)), (9_000_002, github_ref(false))];
         let items = vec![on_github(9_000_001, "feat", ReviewState::NeedsReview), on_github(9_000_002, "feat", ReviewState::ReReview)];
-        let sources = Sources { ado: None, github: Some(&refs), missing: vec![] };
 
-        let q = queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
+        let q = queue(&items, &sources(None, Some(refs)), &HashMap::new(), &ctx());
 
         let (first, second) = (&q.branches[0].prs[0], &q.branches[0].prs[1]);
         assert_eq!((first.provider.as_str(), first.project.as_str(), first.repo_id.as_str(), first.number), ("gitHub", "acme", "acme/web", 12));
@@ -196,51 +169,53 @@ mod tests {
 
     #[test]
     fn queue_sourceNotFresh_isLeftOutAndNamed() {
-        let prs = vec![pr(1, "a", "c1")];
         let items = vec![item(1, "a", ReviewState::NeedsReview, 60), on_github(9_000_001, "b", ReviewState::NeedsReview)];
-        let sources = Sources { ado: Some(&prs), github: None, missing: vec!["gitHub".into()] };
+        let sources = Sources { missing: vec!["gitHub".into()], ..sources(Some(vec![(1, ado_ref(1, "c1"))]), None) };
 
-        let q = queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
+        let q = queue(&items, &sources, &HashMap::new(), &ctx());
 
         assert_eq!(q.branches.iter().map(|b| b.branch.as_str()).collect::<Vec<_>>(), ["a"]);
         assert_eq!(q.missing_sources, ["gitHub"]);
     }
 
     #[test]
-    fn queue_sameBranchOnBothProviders_isTwoBranches() {
-        let prs = vec![pr(1, "feat", "c1")];
-        let refs = HashMap::from([(9_000_001, github_ref(false))]);
-        let items = vec![item(1, "feat", ReviewState::NeedsReview, 60), on_github(9_000_001, "feat", ReviewState::NeedsReview)];
-        let sources = Sources { ado: Some(&prs), github: Some(&refs), missing: vec![] };
+    fn queue_refOfTheOtherSource_isNotUsed() {
+        let items = vec![item(7, "a", ReviewState::NeedsReview, 60)];
+        let q = queue(&items, &sources(None, Some(vec![(7, github_ref(false))])), &HashMap::new(), &ctx());
+        assert!(q.branches.is_empty(), "an Azure DevOps PR kept from a failed poll must not pick up a GitHub PR's ref with its id");
+    }
 
-        let q = queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
+    #[test]
+    fn queue_sameBranchOnBothProviders_isTwoBranches() {
+        let items = vec![item(1, "feat", ReviewState::NeedsReview, 60), on_github(9_000_001, "feat", ReviewState::NeedsReview)];
+        let sources = sources(Some(vec![(1, ado_ref(1, "c1"))]), Some(vec![(9_000_001, github_ref(false))]));
+
+        let q = queue(&items, &sources, &HashMap::new(), &ctx());
 
         assert_eq!(q.branches.len(), 2);
     }
 
     #[test]
     fn queue_gitHubSameBranchUnderTwoOwners_isTwoBranches() {
-        let refs = HashMap::from([(9_000_001, github_ref(false)), (9_000_002, GitHubRef { owner: "other".into(), ..github_ref(false) })]);
+        let other = QueueRef { project: "other".into(), repo_id: "other/web".into(), ..github_ref(false) };
+        let refs = vec![(9_000_001, github_ref(false)), (9_000_002, other)];
         let items = vec![on_github(9_000_001, "patch-1", ReviewState::NeedsReview), on_github(9_000_002, "patch-1", ReviewState::NeedsReview)];
-        let sources = Sources { ado: None, github: Some(&refs), missing: vec![] };
 
-        assert_eq!(queue(&items, &sources, &VoteMemory::new(), &HashMap::new(), &ctx()).branches.len(), 2);
+        assert_eq!(queue(&items, &sources(None, Some(refs)), &HashMap::new(), &ctx()).branches.len(), 2);
     }
 
     #[test]
     fn queue_voteDismissedWithoutAPush_hasNoLastVotedCommit() {
-        let dismissed = GitHubRef { last_voted: Some("h2".into()), ..github_ref(false) };
-        let refs = HashMap::from([(9_000_001, dismissed)]);
-        let sources = Sources { ado: None, github: Some(&refs), missing: vec![] };
+        let dismissed = QueueRef { last_voted: Some("h2".into()), ..github_ref(false) };
 
-        let q = queue(&[on_github(9_000_001, "feat", ReviewState::ReReview)], &sources, &VoteMemory::new(), &HashMap::new(), &ctx());
+        let q = queue(&[on_github(9_000_001, "feat", ReviewState::ReReview)], &sources(None, Some(vec![(9_000_001, dismissed)])), &HashMap::new(), &ctx());
 
         assert_eq!(q.branches[0].prs[0].last_voted_commit, None);
     }
 
     #[test]
     fn queue_keepsOnlyReviewsToDo_groupedByBranchInRankOrder() {
-        let prs = vec![pr(1, "a", "c1"), pr(2, "b", "c2"), pr(3, "a", "c3"), pr(4, "c", "c4"), pr(5, "d", "c5"), pr(6, "e", "c6")];
+        let refs = [(1, "c1"), (2, "c2"), (3, "c3"), (4, "c4"), (5, "c5"), (6, "c6")].map(|(id, commit)| (id, ado_ref(id, commit)));
         let mut hidden = item(5, "d", ReviewState::NeedsReview, 70);
         hidden.hidden = true;
         let items = vec![
@@ -253,7 +228,7 @@ mod tests {
         ];
         let urls = HashMap::from([(1, "https://pr/1".to_string())]);
 
-        let q = queue(&items, &ado(&prs), &VoteMemory::new(), &urls, &ctx());
+        let q = queue(&items, &sources(Some(refs.to_vec()), None), &urls, &ctx());
 
         let shape: Vec<(&str, Vec<i64>)> = q.branches.iter().map(|b| (b.branch.as_str(), b.prs.iter().map(|p| p.pr_id).collect())).collect();
         assert_eq!(shape, vec![("b", vec![2]), ("a", vec![1, 3])]);
@@ -265,14 +240,11 @@ mod tests {
 
     #[test]
     fn queue_reReview_carriesTheCommitOfMyLastVote() {
-        let prs = vec![pr(1, "a", "new"), pr(2, "b", "c2")];
+        let voted_before_push = QueueRef { last_voted: Some("old".into()), ..ado_ref(1, "new") };
+        let voted_on_head = QueueRef { last_voted: Some("c2".into()), ..ado_ref(2, "c2") };
         let items = vec![item(1, "a", ReviewState::ReReview, 60), item(2, "b", ReviewState::NeedsReview, 50)];
-        let memory = VoteMemory::from([
-            (1, VotedAt { vote: -5, commit: "old".into() }),
-            (2, VotedAt { vote: 10, commit: "c2".into() }),
-        ]);
 
-        let q = queue(&items, &ado(&prs), &memory, &HashMap::new(), &ctx());
+        let q = queue(&items, &sources(Some(vec![(1, voted_before_push), (2, voted_on_head)]), None), &HashMap::new(), &ctx());
 
         assert_eq!(q.branches[0].prs[0].last_voted_commit.as_deref(), Some("old"));
         assert_eq!(q.branches[0].prs[0].state, "reReview");

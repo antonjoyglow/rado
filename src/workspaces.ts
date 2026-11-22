@@ -1,5 +1,16 @@
 import { api, type Saved, type Settings, type Snapshot, type Tracker, type Workspace } from "./api";
-import { h } from "./dom";
+import { h, whenBlurred } from "./dom";
+import { lastingSaver, secretSaver, type LastingSaver } from "./save";
+
+/** One save queue per workspace for the window's lifetime: an editor reopened while a save runs queues behind it. */
+const workspaceSavers = new Map<string, LastingSaver<Workspace>>();
+
+/** The save queue for `workspace`'s fields, made on first use from the workspace as given. */
+export function workspaceSaver(workspace: Workspace): LastingSaver<Workspace> {
+  let saver = workspaceSavers.get(workspace.id);
+  if (!saver) workspaceSavers.set(workspace.id, (saver = lastingSaver(workspace, api.saveWorkspace)));
+  return saver;
+}
 
 export const activeWorkspace = (settings: Settings): Workspace | undefined =>
   settings.workspaces.find((w) => w.id === settings.activeWorkspace);
@@ -54,11 +65,8 @@ export function isTyping(target: EventTarget | null): boolean {
 
 const KEYS_HINT = "Ctrl+← / Ctrl+→ switch workspaces";
 
-/** A switch that couldn't be saved still happened for this run, and the status line already says why saving fails. */
-export const switchWorkspace = (id: string) => void api.switchWorkspace(id).catch(() => undefined);
-
 /** The header chip naming the active workspace, and the picker it opens. */
-export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; picker: HTMLElement; render: (s: Snapshot) => void; close: () => boolean } {
+export function workspaceChip(onManage: () => void, switchTo: (id: string) => void): { chip: HTMLButtonElement; picker: HTMLElement; render: (s: Snapshot) => void; close: () => boolean } {
   const label = h("span", { class: "ws-name" });
   const chip = h("button", { class: "ws-chip", type: "button", ariaHasPopup: "menu", ariaExpanded: "false" }, label, h("span", { ariaHidden: "true" }, "▾"));
   const picker = h("div", { class: "ws-picker", role: "menu", hidden: true });
@@ -76,7 +84,7 @@ export function workspaceChip(onManage: () => void): { chip: HTMLButtonElement; 
         data: { id: w.id },
         onclick: () => {
           close();
-          if (w.id !== snapshot?.settings.activeWorkspace) switchWorkspace(w.id);
+          if (w.id !== snapshot?.settings.activeWorkspace) switchTo(w.id);
         },
       }, w.name)),
       h("button", { type: "button", role: "menuitem", class: "manage", onclick: () => { close(); onManage(); } }, "Manage workspaces…"),
@@ -167,13 +175,15 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     const isActive = workspace.id === snapshot.settings.activeWorkspace;
     activeSlot.replaceChildren(isActive
       ? h("span", { class: "ws-active" }, "Active: polled and counted now")
-      : h("button", { type: "button", onclick: () => switchWorkspace(workspace.id) }, "Make active"));
+      : h("button", { type: "button", onclick: () => api.switchWorkspace(workspace.id).catch((e) => fail(listNote, e)) }, "Make active"));
   };
 
   const buildEditor = (original: Workspace, saved: Saved) => {
-    const workspace: Workspace = structuredClone(original);
+    const saver = workspaceSaver(original);
+    // The saver is the only writer of these fields, and the snapshot can lag a save just made.
+    const workspace: Workspace = structuredClone(saver.latest);
     const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), keys: note(), token: note(), repos: note() };
-    const save = (target: HTMLElement) => api.saveWorkspace(workspace).then(() => ok(target), (e) => fail(target, e));
+    const save = (target: HTMLElement, done?: string) => saver.save(workspace).then(() => ok(target, done), (e) => fail(target, e));
 
     const name = h("input", {
       type: "text", ariaLabel: "Workspace name", value: workspace.name,
@@ -206,15 +216,28 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
         h("button", { type: "button", onclick: () => askRemove(true) }, "Cancel"),
       );
       askRemove(isSaved);
-      const button = h("button", {
-        type: "button",
-        onclick: () => store(input.value).then(() => {
-          input.value = "";
+      const save = secretSaver(store);
+      const commit = () => {
+        const value = input.value;
+        save(value).then((saved) => {
+          if (!saved) return;
+          if (input.value === value) input.value = "";
           input.placeholder = SAVED;
           askRemove(true);
           ok(target, "Saved to Windows Credential Manager");
-        }, (e) => fail(target, e)),
-      }, "Save");
+        }, (e) => fail(target, e));
+      };
+      // Pressing Save leaves the field, which may have saved and emptied it before the click.
+      const commitOrAsk = () => {
+        if (input.value.trim()) commit();
+        else if (input.placeholder !== SAVED) fail(target, `Paste the ${label} first`);
+      };
+      input.onchange = commit;
+      // Change fires only for a new value, so Enter after a failed save retries here.
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") commitOrAsk();
+      };
+      const button = h("button", { type: "button", onclick: commitOrAsk }, "Save");
       return h("span", { class: "inline" }, input, button, removeSlot);
     };
     const org = h("input", {
@@ -223,16 +246,7 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     });
     const repos = h("input", {
       type: "text", ariaLabel: "Watched repos", value: workspace.github.repos.join(", "), placeholder: "owner/name, as in github.com/owner/name",
-      onchange: () => {
-        const before = workspace.github;
-        const sent = { repos: parseList(repos.value) };
-        workspace.github = sent;
-        // A rejected repo must not ride along with the next save of another field; a failed write still changed it.
-        void api.saveWorkspace(workspace).then(() => ok(n.repos), (e) => {
-          if (workspace.github === sent && String(e).startsWith("Not saved")) workspace.github = before;
-          fail(n.repos, e);
-        });
-      },
+      onchange: () => { workspace.github = { repos: parseList(repos.value) }; void save(n.repos); },
     });
     const teams = h("input", {
       type: "text", ariaLabel: "My teams", value: workspace.azureDevOps.teams.join(", "), placeholder: "TeamAlpha",
@@ -243,18 +257,9 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     let keys = trackerKeys(workspace.tracker);
     const chosen = () => TRACKERS.find((t) => t.kind === kind) ?? TRACKERS[0];
     const saveTracker = (target: HTMLElement) => {
-      const before = workspace.tracker;
-      const sent = trackerFor(kind, trackerField.value, keys);
-      workspace.tracker = sent;
-      const held = sent.kind === "none" && keys.length > 0;
-      // A rejected value must not ride along with the next save of another field, nor undo a chip clicked since.
-      void api.saveWorkspace(workspace).then(() => ok(target, held ? `Not kept until the ${chosen().field} is set` : undefined), (e) => {
-        if (workspace.tracker === sent) {
-          workspace.tracker = before;
-          if (before.kind !== "none") keysField.value = (keys = before.keys).join(", ");
-        }
-        fail(target, e);
-      });
+      workspace.tracker = trackerFor(kind, trackerField.value, keys);
+      const held = workspace.tracker.kind === "none" && keys.length > 0;
+      void save(target, held ? `Not kept until the ${chosen().field} is set` : undefined);
     };
     const trackerField = h("input", { type: "text", value: trackerValue(workspace.tracker), onchange: () => saveTracker(n.tracker) });
     const keysField = h("input", {
@@ -284,6 +289,24 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
       trackerField.placeholder = chosen().placeholder;
     };
     showTracker();
+    // A failed save puts every field back to the last saved values; a text field with focus once it loses it.
+    saver.revert = (last) => {
+      const trackerBefore = JSON.stringify(workspace.tracker);
+      Object.assign(workspace, last);
+      whenBlurred(name, () => (name.value = workspace.name));
+      whenBlurred(org, () => (org.value = workspace.azureDevOps.organization));
+      whenBlurred(teams, () => (teams.value = workspace.azureDevOps.teams.join(", ")));
+      whenBlurred(repos, () => (repos.value = workspace.github.repos.join(", ")));
+      // The tracker goes back only when it changed, so a chosen kind with its field still empty survives another
+      // field's failure. It goes back at once and whole, even mid-typing: any part left over would be sent again
+      // with the next tracker save, or mixed with the restored kind.
+      if (JSON.stringify(workspace.tracker) === trackerBefore) return;
+      kind = workspace.tracker.kind;
+      keys = trackerKeys(workspace.tracker);
+      trackerField.value = trackerValue(workspace.tracker);
+      keysField.value = keys.join(", ");
+      showTracker();
+    };
 
     const removeSlot = h("span", { class: "inline" });
     const askRemove = () => removeSlot.replaceChildren(h("button", { type: "button", onclick: confirmRemove }, "Delete workspace…"));

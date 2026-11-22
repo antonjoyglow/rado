@@ -1,6 +1,6 @@
 [package]
 name = "rado"
-version = "0.10.0"
+version = "0.11.0"
 description = "Rado: a floating count of the Azure DevOps and GitHub reviews waiting on you"
 authors = ["Antonis Charalampidis"]
 edition = "2024"
@@ -25,6 +25,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
@@ -36,6 +37,7 @@ tokio = { version = "1", features = ["time", "sync", "macros"] }
 keyring = "4"
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+ts-rs = { version = "12", features = ["chrono-impl", "no-serde-warnings"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

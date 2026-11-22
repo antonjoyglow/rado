@@ -7,9 +7,10 @@ use crate::score::{CommentStats, Provider, ReviewItem, ReviewState};
 use crate::workspace::Tracker;
 
 /// One PR inside a row; `state` is `None` for a PR on the same branch that I am not asked to review.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
+    /// Unique across sources; what `open_pr` takes.
     pub id: i64,
     pub provider: Provider,
     pub number: i64,
@@ -20,11 +21,22 @@ pub struct Member {
     pub created_at: DateTime<Utc>,
     /// `None` for a related PR (its threads aren't fetched) or when its threads failed to load.
     pub updated_at: Option<DateTime<Utc>>,
+    /// Set by the session from `rado-mcp`'s marks.
+    pub agent_draft: Option<AgentDraft>,
+}
+
+/// A review draft an agent marked through `rado-mcp` at the PR's head commit.
+#[derive(Debug, Clone, PartialEq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraft {
+    /// Where `open_draft` goes, shown before it opens; `None` when Rado has no link to the draft.
+    pub host: Option<String>,
 }
 
 /// An active PR on the same source branch as one of mine, where I am not a reviewer.
 #[derive(Debug, Clone)]
 pub struct Related {
+    pub provider: Provider,
     pub id: i64,
     pub repo: String,
     pub title: String,
@@ -33,8 +45,11 @@ pub struct Related {
     pub created_at: DateTime<Utc>,
 }
 
-/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole.
-#[derive(Debug, Clone, Serialize)]
+/// A list row: one PR, or every PR sharing a source branch. The flattened fields describe the row as a whole:
+/// `createdAt` is when its earliest PR assigned to me (or mine) was opened, and `updatedAt` the latest activity
+/// across those PRs, a later sibling's opening included.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(rename = "ReviewItem")]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRow {
     pub key: String,
@@ -64,7 +79,7 @@ pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<Strin
     let bytes = branch.as_bytes();
     let alnum = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric());
     (0..bytes.len()).find_map(|start| {
-        if !bytes[start].is_ascii_alphabetic() || (start > 0 && alnum(start - 1)) {
+        if !bytes[start].is_ascii_alphabetic() || branch[..start].chars().next_back().is_some_and(char::is_alphanumeric) {
             return None;
         }
         let mut i = start;
@@ -81,7 +96,7 @@ pub fn ticket_key(branch: &str, any_case: bool, keys: &[String]) -> Option<Strin
             end += 1;
         }
         // `CVE-2024-3094`: a second dash and digits make an id, not a key.
-        if end == digits || alnum(end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
+        if end == digits || letter_or_digit_at(branch, end) || (bytes.get(end) == Some(&b'-') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)) {
             return None;
         }
         let upper = !prefix.bytes().any(|b| b.is_ascii_lowercase());
@@ -113,8 +128,14 @@ fn team_key(branch: &str, keys: &[String]) -> Option<String> {
         while bytes.get(end).is_some_and(u8::is_ascii_digit) {
             end += 1;
         }
-        (end > digits && !alnum(end)).then(|| branch[start..end].to_ascii_uppercase())
+        (end > digits && !letter_or_digit_at(branch, end)).then(|| branch[start..end].to_ascii_uppercase())
     })
+}
+
+/// Whether the character starting at byte `at` is a letter or digit in any script, so `ABC-12ä` holds no key.
+/// `at` must be a char boundary.
+fn letter_or_digit_at(branch: &str, at: usize) -> bool {
+    branch[at..].chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// Groups my ranked PRs by source branch, adds the related PRs on those branches, and orders rows by score.
@@ -131,9 +152,13 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
     let mut rows: Vec<ReviewRow> = groups
         .into_iter()
         .map(|(provider, branch, mut mine)| {
+            // The lead names the row: its state picks the tab, its score places the row. A PR waiting on me leads, so a
+            // row that counts as waiting also shows as the work waiting, not as the approved PR beside it.
             let stale = |i: &ReviewItem| i.state == ReviewState::Stale;
-            mine.sort_by(|a, b| a.hidden.cmp(&b.hidden).then(stale(a).cmp(&stale(b))).then(b.score.cmp(&a.score)));
-            let others: Vec<&Related> = related.iter().filter(|r| provider == Provider::Ado && r.branch == branch).collect();
+            mine.sort_by(|a, b| {
+                a.hidden.cmp(&b.hidden).then(stale(a).cmp(&stale(b))).then(b.actionable.cmp(&a.actionable)).then(b.score.cmp(&a.score))
+            });
+            let others: Vec<&Related> = related.iter().filter(|r| r.provider == provider && r.branch == branch).collect();
             let lead = mine[0];
             let comments = mine.iter().filter_map(|m| m.comments).reduce(|a, b| CommentStats {
                 total: a.total + b.total,
@@ -175,10 +200,11 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                     state: Some(m.state),
                     created_at: m.created_at,
                     updated_at: m.updated_at,
+                    agent_draft: None,
                 })
                 .chain(others.iter().map(|r| Member {
                     id: r.id,
-                    provider: Provider::Ado,
+                    provider: r.provider,
                     number: r.id,
                     repo: r.repo.clone(),
                     title: r.title.clone(),
@@ -186,6 +212,7 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
                     state: None,
                     created_at: r.created_at,
                     updated_at: None,
+                    agent_draft: None,
                 }))
                 .collect::<Vec<_>>();
             let key = if members.len() > 1 { format!("branch:{provider:?}:{branch}") } else { format!("pr:{}", lead.id) };
@@ -200,6 +227,25 @@ pub fn group(items: &[ReviewItem], related: &[Related], urls: &HashMap<i64, Stri
         .collect();
     rows.sort_by(|a, b| b.summary.score.cmp(&a.summary.score).then(b.summary.age_hours.cmp(&a.summary.age_hours)));
     rows
+}
+
+/// The counter's two numbers, counted in rows: rows waiting on my review, and rows of mine that need work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, ts_rs::TS)]
+pub struct Counts {
+    pub reviews: u32,
+    pub mine: u32,
+}
+
+/// A hidden row is never actionable, so the rows counted are the ones that are.
+pub fn counts(rows: &[ReviewRow]) -> Counts {
+    let mut counts = Counts::default();
+    for row in rows.iter().filter(|r| r.summary.actionable) {
+        match row.summary.state {
+            ReviewState::Mine => counts.mine += 1,
+            _ => counts.reviews += 1,
+        }
+    }
+    counts
 }
 
 /// Text for sharing: a lone PR is its link; an aggregate is one `repo: link` line per PR.
@@ -250,6 +296,89 @@ mod tests {
             comments: None,
             actionable: true,
         }
+    }
+
+    fn counted(items: &[ReviewItem]) -> Counts {
+        counts(&group(items, &[], &HashMap::new(), &Tracker::None))
+    }
+
+    /// One PR on its own branch, in `state`, waiting on me when `actionable`.
+    fn alone(id: i64, state: ReviewState, actionable: bool, hidden: bool) -> ReviewItem {
+        ReviewItem { state, actionable, hidden, ..item(id, "Api", &format!("b{id}"), 50) }
+    }
+
+    #[test]
+    fn counts_noRows_isZeroZero() {
+        assert_eq!(counted(&[]), Counts::default());
+    }
+
+    #[test]
+    fn counts_approvedOrWaitingOnAuthor_isNotCounted() {
+        let rows = [alone(1, ReviewState::Approved, false, false), alone(2, ReviewState::WaitingOnAuthor, false, false)];
+        assert_eq!(counted(&rows), Counts::default());
+    }
+
+    #[test]
+    fn counts_reviewsToDo_countAsReviews_andMyPrsNeedingWorkAsMine() {
+        let rows = [
+            alone(1, ReviewState::NeedsReview, true, false),
+            alone(2, ReviewState::ReReview, true, false),
+            alone(3, ReviewState::Mine, true, false),
+            alone(4, ReviewState::Mine, false, false),
+        ];
+        assert_eq!(counted(&rows), Counts { reviews: 2, mine: 1 });
+    }
+
+    #[test]
+    fn counts_hiddenRows_areNotCounted() {
+        let rows = [alone(1, ReviewState::NeedsReview, true, true), alone(2, ReviewState::Mine, true, true)];
+        assert_eq!(counted(&rows), Counts::default());
+    }
+
+    #[test]
+    fn group_prWaitingOnMe_leadsItsRow_overAHigherScoredApprovedOne() {
+        let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(1, "Api", "feature/x", 70) };
+        let draft_review = ReviewItem { draft: true, ..item(2, "Web", "feature/x", 10) };
+        let rows = group(&[approved, draft_review], &[], &HashMap::new(), &Tracker::None);
+        let row = &rows[0];
+        assert_eq!((row.summary.id, row.summary.state, row.summary.score), (2, ReviewState::NeedsReview, 10), "the row is the review to do");
+        assert_eq!(row.members.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(counts(&rows), Counts { reviews: 1, mine: 0 });
+    }
+
+    #[test]
+    fn group_reviewOnTheBranchOfMyPrThatNeedsNothing_leadsAndCountsAsAReview() {
+        let my_pr = ReviewItem { state: ReviewState::Mine, actionable: false, ..item(1, "Api", "feature/x", 90) };
+        let rows = group(&[my_pr, item(2, "Web", "feature/x", 50)], &[], &HashMap::new(), &Tracker::None);
+        assert_eq!(rows[0].summary.state, ReviewState::NeedsReview);
+        assert_eq!(counts(&rows), Counts { reviews: 1, mine: 0 });
+    }
+
+    #[test]
+    fn group_twoPrsWaitingOnMe_theHigherScoreLeads() {
+        let my_pr_needing_work = ReviewItem { state: ReviewState::Mine, ..item(1, "Api", "feature/x", 90) };
+        let rows = group(&[item(2, "Web", "feature/x", 50), my_pr_needing_work], &[], &HashMap::new(), &Tracker::None);
+        assert_eq!(rows[0].summary.state, ReviewState::Mine);
+        assert_eq!(counts(&rows), Counts { reviews: 0, mine: 1 });
+    }
+
+    #[test]
+    fn group_rowWhosePrWaitingOnMeIsHidden_isNotActionable() {
+        let hidden_review = ReviewItem { hidden: true, ..item(1, "Api", "feature/x", 60) };
+        let approved = ReviewItem { state: ReviewState::Approved, actionable: false, ..item(2, "Web", "feature/x", 10) };
+        let rows = group(&[hidden_review.clone(), approved], &[], &HashMap::new(), &Tracker::None);
+        assert!(!rows[0].summary.hidden && !rows[0].summary.actionable);
+        assert_eq!((rows[0].summary.id, rows[0].summary.state), (2, ReviewState::Approved), "a hidden PR never leads a visible row");
+        assert_eq!(counts(&rows), Counts::default());
+
+        let all_hidden = group(&[hidden_review], &[], &HashMap::new(), &Tracker::None);
+        assert!(all_hidden[0].summary.hidden && !all_hidden[0].summary.actionable, "the list's next review relies on this");
+    }
+
+    #[test]
+    fn counts_aBranchRowWithTwoReviews_countsOnce() {
+        let rows = [item(1, "Api", "feature/x", 60), item(2, "Web", "feature/x", 50)];
+        assert_eq!(counted(&rows), Counts { reviews: 1, mine: 0 });
     }
 
     /// A time `hours` from a fixed noon; negative is earlier.
@@ -315,8 +444,8 @@ mod tests {
     #[test]
     fn group_relatedPrOnMyBranch_joinsAsUnreviewedMember() {
         let related = [
-            Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) },
-            Related { id: 8, repo: "WebApp".into(), title: "other".into(), branch: "feature/z".into(), url: "https://x/8".into(), created_at: at(-8) },
+            Related { provider: Provider::Ado, id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) },
+            Related { provider: Provider::Ado, id: 8, repo: "WebApp".into(), title: "other".into(), branch: "feature/z".into(), url: "https://x/8".into(), created_at: at(-8) },
         ];
         let rows = group(&[item(1, "Api", "feature/x", 60)], &related, &urls(&[1]), &Tracker::None);
         assert_eq!(rows.len(), 1);
@@ -370,7 +499,7 @@ mod tests {
     fn group_sameBranchOnGitHubAndAzureDevOps_isTwoRows() {
         let mut github = item(500, "rado", "feature/x", 70);
         (github.provider, github.number) = (Provider::GitHub, 4);
-        let related = [Related { id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) }];
+        let related = [Related { provider: Provider::Ado, id: 9, repo: "WebApp".into(), title: "ui".into(), branch: "feature/x".into(), url: "https://x/9".into(), created_at: at(-9) }];
         let rows = group(&[github, item(1, "Api", "feature/x", 60)], &related, &urls(&[1, 500]), &Tracker::None);
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].key.as_str(), rows[0].members.len(), rows[0].members[0].number), ("pr:500", 1, 4));
@@ -434,6 +563,10 @@ mod tests {
             ("release-2026", None),
             ("feature/MYABC-12x", None),
             ("featureABC-12", None),
+            ("feature/HÖO-12", None),
+            ("ÄBC-12", None),
+            ("feature/über-ABC-12", Some("ABC-12")),
+            ("feature/ABC-12ä", None),
             ("main", None),
         ] {
             assert_eq!(ticket_key(branch, false, &[]).as_deref(), key, "{branch}");
@@ -508,6 +641,7 @@ mod tests {
             ("bugfix/HOO-7_null-check", Some("HOO-7")),
             ("feature/über-hoo-5", Some("HOO-5")),
             ("feature/ühoo-5", None),
+            ("feature/hoo-12ü", None),
             ("feature/login-abc-12", Some("ABC-12")),
             ("feature/x_Hoo-7", Some("HOO-7")),
             ("chore/node-18-upgrade", None),

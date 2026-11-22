@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, watchSnapshot, type Snapshot } from "./api";
-import { ago, pillCounts } from "./format";
+import { ago } from "./format";
 import { checkedText, counterProblem } from "./status";
 import { counterElement, paintCounter } from "./counter";
 import { activeWorkspace } from "./workspaces";
@@ -16,7 +16,7 @@ export function mountPill(root: HTMLElement): void {
   let snapshot: Snapshot | null = null;
   const render = () => {
     if (!snapshot) return;
-    const counts = pillCounts(snapshot.items);
+    const counts = snapshot.counts;
     const now = new Date();
     const problem = counterProblem(snapshot, snapshot.settings.pollMinutes, now);
     paintCounter(parts, counts, snapshot.settings.counter, snapshot.settings.pillScale, problem);

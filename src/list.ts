@@ -1,17 +1,18 @@
-import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
-  ageColumn, datesTooltip, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
+  ageColumn, datesTooltip, draftMarker, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
 } from "./format";
-import { h } from "./dom";
+import { POLL_MINUTES } from "./bindings/limits";
+import { h, whenBlurred } from "./dom";
 import { bird, glow, yawn } from "./bird";
-import { glows, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
+import { glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
-import { lastingSaver, type LastingSaver } from "./save";
+import { DROPPED, lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
-import { activeWorkspace, isTyping, stepWorkspace, switchWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
+import { activeWorkspace, isTyping, stepWorkspace, trackerName, workspaceChip, workspaceStep, workspacesPanel } from "./workspaces";
 import {
-  defaultListTab, inSection, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
+  defaultListTab, inSection, noReviews, restoreTab, SECTIONS, SETTINGS_TABS, stepTab, type SectionKey, type SettingsTab,
 } from "./tabs";
 
 /** When you last opened each row, by row key; "Review next" walks past the ones you just opened. */
@@ -91,18 +92,43 @@ export function mountList(root: HTMLElement): void {
   // The text is redrawn every second for the "ago" times; the Download line only on a snapshot, so a click or
   // keyboard focus on its button survives.
   const statusText = h("div");
+  const actionText = h("div", { class: "failed" });
   const newerText = h("span");
-  const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void api.openNewerRelease() }, "Download"));
-  const status = h("div", { class: "status", hidden: true }, statusText, newerLine);
+  const newerLine = h("div", { class: "newer", hidden: true }, newerText, h("button", { type: "button", class: "link", onclick: () => void act(api.openNewerRelease()) }, "Download"));
+  const status = h("div", { class: "status", hidden: true }, statusText, actionText, newerLine);
   const announcer = h("div", { class: "visually-hidden", role: "status" });
   const body = h("div", { class: "body", id: "list-panel", role: "tabpanel" });
   const settingsPanel = h("div", { class: "settings", hidden: true });
   const heading = h("h1", {}, "Reviews");
   const logo = bird();
-  const refreshButton = h("button", { class: "icon refresh", type: "button", ariaLabel: "Refresh now", title: "Refresh now", onclick: () => void api.refresh() }, h("span", { class: "refresh-glyph" }, "↻"));
-  const settingsButton = h("button", { class: "icon", type: "button", title: "Settings", onclick: () => showSettings(settingsPanel.hidden !== false) }, "⚙");
+  // The banner's own lines aren't a live region: it is hidden until it has something to say.
+  const announce = (text: string) => {
+    // Cleared first so a screen reader announces a repeat of the same text.
+    announcer.textContent = "";
+    requestAnimationFrame(() => { announcer.textContent = text; });
+  };
+  const showFailure = (error: string | null) => {
+    actionText.textContent = error ?? "";
+    if (error) announce(error);
+    renderStatus();
+  };
+  const act = listActions((error) => {
+    // Opening a link can hide the list before a later link of the same row fails; that error belongs to the last visit.
+    if (error && document.hidden) return;
+    showFailure(error);
+  });
+  const switchTo = (id: string) => void act(api.switchWorkspace(id));
+  const refreshButton = h("button", { class: "icon refresh", type: "button", ariaLabel: "Refresh now", title: "Refresh now", onclick: () => void act(api.refresh()) }, h("span", { class: "refresh-glyph" }, "↻"));
+  const settingsButton = h("button", {
+    class: "icon",
+    type: "button",
+    title: "Settings",
+    // Keeps focus in a Settings field until the click, so ← commits it the way Esc does.
+    onmousedown: (e: MouseEvent) => e.preventDefault(),
+    onclick: () => showSettings(settingsPanel.hidden !== false),
+  }, "⚙");
   const closeButton = h("button", { class: "icon", type: "button", title: "Close", onclick: () => void api.hideList() }, "✕");
-  const workspace = workspaceChip(() => showSettings(true, "workspaces"));
+  const workspace = workspaceChip(() => showSettings(true, "workspaces"), switchTo);
 
   // One tab per section, always all seven so they never move. Created once; renderBody updates them in place.
   const tabs = SECTIONS.map((s) => {
@@ -138,8 +164,16 @@ export function mountList(root: HTMLElement): void {
   const showSettings = (on: boolean, startTab: SettingsTab = settingsTab) => {
     if (on && !settingsPanel.hidden) settingsView?.select(startTab);
     if (on === !settingsPanel.hidden) return;
-    if (on) listScroll = body.scrollTop;
+    if (on) {
+      listScroll = body.scrollTop;
+      // Whatever failed on the way out is now in front of you to fix.
+      showFailure(null);
+    }
+    const editing = !on && document.activeElement instanceof HTMLElement && settingsPanel.contains(document.activeElement) ? document.activeElement : null;
     settingsPanel.hidden = !on;
+    // The focused field commits now rather than whenever Chromium moves focus off the hidden field, and once hidden,
+    // so its save, or the check that refuses it, reports to the status line instead of a hidden note.
+    editing?.blur();
     body.hidden = on;
     strip.list.hidden = on;
     heading.textContent = on ? "Settings" : "Reviews";
@@ -149,7 +183,7 @@ export function mountList(root: HTMLElement): void {
       ? renderSettings(settingsPanel, snapshot, startTab, (key) => {
           settingsTab = key;
           remember(SETTINGS_TAB_KEY, key);
-        })
+        }, showFailure)
       : null;
     if (!on) {
       body.scrollTop = listScroll;
@@ -158,6 +192,11 @@ export function mountList(root: HTMLElement): void {
   };
   // Larger text can push the selected tab past the strip's edge; a hidden strip can't scroll, so this also runs on return from settings.
   const revealTab = () => strip.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // Settings opens on the active workspace, whose editor holds the field.
+  const showWatchedRepos = () => {
+    showSettings(true, "workspaces");
+    settingsPanel.querySelector<HTMLInputElement>('input[aria-label="Watched repos"]')?.focus();
+  };
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
@@ -171,7 +210,7 @@ export function mountList(root: HTMLElement): void {
     if (line?.kind === "busy") statusText.append(h("span", { class: "spinner" }), line.text);
     else if (line) statusText.append(line.text);
     if (snapshot.warning) statusText.append(h("div", { class: "hint" }, snapshot.warning));
-    status.hidden = !showStatus(line, snapshot.warning, snapshot.newerRelease);
+    status.hidden = !showStatus(line, snapshot.warning, actionText.textContent || null, snapshot.newerRelease);
     refreshButton.dataset.busy = String(snapshot.polling);
     refreshButton.title = refreshTitle(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
   };
@@ -182,9 +221,7 @@ export function mountList(root: HTMLElement): void {
   const settleYawn = ({ held, play }: Yawn) => {
     heldYawn = held;
     if (play === 0) return;
-    // Cleared first so a screen reader announces a repeat of the same text.
-    announcer.textContent = "";
-    requestAnimationFrame(() => { announcer.textContent = newReviewsText(play); });
+    announce(newReviewsText(play));
     if (yawning?.playState === "running") return;
     yawning = yawn(logo);
   };
@@ -217,9 +254,18 @@ export function mountList(root: HTMLElement): void {
     const current = tab;
     const inThis = all.filter((i) => inSection(i, current));
     const items = current === "mine" ? newestFirst(inThis) : inThis;
-    if (items.length === 0) body.append(h("p", { class: "empty" }, "Nothing here."));
+    // Only once every source has answered: until then an empty Review tab may just mean a source hasn't.
+    const why = current === "needsReview" && snapshot.lastRefreshed !== null && noReviews(all);
+    const watch = why && snapshot.hasGithubToken;
+    if (items.length === 0) body.append(h("p", { class: "empty" },
+      "Nothing here.",
+      why && " Rado lists PRs where you or your teams are reviewers.",
+      watch && " To also see others' open PRs in a GitHub repo, add it to ",
+      watch && h("button", { type: "button", class: "link", onclick: showWatchedRepos }, "Watched repos"),
+      watch && ".",
+    ));
     const tracker = trackerName(activeWorkspace(snapshot.settings));
-    for (const item of items) body.append(row(item, tracker, item.key === next?.key));
+    for (const item of items) body.append(row(item, tracker, item.key === next?.key, act));
   };
 
   void watchSnapshot((s) => {
@@ -240,7 +286,11 @@ export function mountList(root: HTMLElement): void {
     if (refreshed) glow(logo);
   });
   setInterval(renderStatus, 1000);
-  document.addEventListener("visibilitychange", renderStatus);
+  document.addEventListener("visibilitychange", () => {
+    // A failed action's error is about that visit; the list hides when it loses focus.
+    if (document.hidden) actionText.textContent = "";
+    renderStatus();
+  });
   window.addEventListener("focus", () => {
     // Rows opened since the last render change which review is next.
     renderBody();
@@ -251,7 +301,7 @@ export function mountList(root: HTMLElement): void {
     if (step !== null && snapshot && !isTyping(e.target)) {
       e.preventDefault();
       const to = stepWorkspace(snapshot.settings.workspaces, snapshot.settings.activeWorkspace, step);
-      if (to) switchWorkspace(to);
+      if (to) switchTo(to);
       return;
     }
     if (e.key !== "Escape") return;
@@ -263,7 +313,7 @@ export function mountList(root: HTMLElement): void {
 
 const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", low: "Low" };
 
-function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
+function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType<typeof listActions>): HTMLElement {
   const aggregate = item.members.length > 1;
   // Plain text, so the outlined chips are exactly the things that open something. The separating dots are
   // drawn by the stylesheet inside each phrase, so a line never starts with one.
@@ -274,24 +324,23 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   });
   if (isNext) facts.unshift(h("span", { class: "next-label" }, "Review next"));
   const meta = facts.flatMap((f, i) => (i === 0 ? [f] : [" ", f]));
-  const members = item.members.map((m) => h("button", {
+  const members = item.members.flatMap((m) => [h("button", {
       class: "member",
       type: "button",
       title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
       data: { assigned: String(m.state !== null) },
       onclick: (e: MouseEvent) => {
         e.stopPropagation();
-        opened(item.key);
-        void api.openPr(m.id);
+        void act(api.openPr(m.id).then(() => opened(item.key)));
       },
-    }, prLabel(m)));
+    }, prLabel(m)), draftChip(m, item.key)]);
   const ticket = item.ticket && h("button", {
     class: "member",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
     onclick: (e: MouseEvent) => {
       e.stopPropagation();
-      void api.openTicket(item.key);
+      void act(api.openTicket(item.key));
     },
   }, item.ticket);
   const copy: HTMLButtonElement = h("button", {
@@ -306,9 +355,10 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
   return h("div", {
     class: "row",
     data: { tier, next: String(isNext) },
+    // Marked first: a row of several PRs can fail on a later link after the first one opened.
     onclick: () => {
       opened(item.key);
-      void api.openRow(item.key);
+      void act(api.openRow(item.key));
     },
   },
     h("span", { class: "dot", role: "img", title: `Priority: ${TIER_LABEL[tier]}`, ariaLabel: `Priority: ${TIER_LABEL[tier]}` }),
@@ -329,12 +379,32 @@ function row(item: ReviewItem, tracker: string, isNext: boolean): HTMLElement {
         h("button", {
           class: "action",
           type: "button",
-          title: item.hidden ? "Show again" : item.state === "mine" ? "Hide until it closes" : "Not yours: leave the count until it closes",
-          onclick: () => void api.setHidden(item.key, !item.hidden),
-        }, item.hidden ? "Show" : item.state === "mine" ? "Hide" : "Not mine"),
+          title: hideButton(item).title,
+          onclick: () => void act(api.setHidden(item.key, !item.hidden)),
+        }, hideButton(item).label),
       ),
     ),
   );
+}
+
+/** "Draft ready" beside the PR's chip: a button when the draft has a link, plain text when it has none. */
+function draftChip(m: Member, rowKey: string): HTMLElement | null {
+  const marker = draftMarker(m);
+  if (!marker) return null;
+  if (!marker.linked) return h("span", { class: "agent-draft", title: marker.title }, "Draft ready");
+  const open: HTMLButtonElement = h("button", {
+    class: "member agent-draft",
+    type: "button",
+    title: marker.title,
+    onclick: (e: MouseEvent) => {
+      e.stopPropagation();
+      api.openDraft(m.id).then(() => opened(rowKey), (error: unknown) => {
+        open.title = `${marker.title}\nCouldn't open it: ${String(error)}`;
+        flash(open, "Failed");
+      });
+    },
+  }, "Draft ready");
+  return open;
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -368,6 +438,7 @@ function renderSettings(
   snapshot: Snapshot,
   startTab: SettingsTab,
   onSelect: (key: SettingsTab) => void,
+  showFailure: (error: string) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
   const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
   // This saver is the only writer of these settings, and the snapshot can lag a save just made.
@@ -383,7 +454,12 @@ function renderSettings(
     if (kind === "ok") timers.set(n, setTimeout(() => (n.textContent = ""), 2000));
   };
   const ok = (n: HTMLElement, text = "Saved") => show(n, "ok", text);
-  const fail = (n: HTMLElement, e: unknown) => show(n, "error", String(e));
+  const fail = (n: HTMLElement, e: unknown) => {
+    show(n, "error", String(e));
+    // A save made on the way out of Settings, or out of a workspace's editor, can fail after its note left the screen.
+    // DROPPED would hide the error that caused it.
+    if (n.offsetParent === null && e !== DROPPED) showFailure(String(e).startsWith("Not saved") ? String(e) : `Not saved: ${String(e)}`);
+  };
   // General and Counter share `settings` and save it whole. A failed save puts both tabs back to the last saved
   // values in place; a General field that has focus is put back when it loses it.
   saver.revert = (saved) => {
@@ -394,10 +470,7 @@ function renderSettings(
   const save = (n: HTMLElement) => saver.save(settings).then(() => ok(n), (e) => fail(n, e));
   const generalShows: (() => void)[] = [];
   /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
-  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => {
-    if (document.activeElement === input) input.addEventListener("blur", show, { once: true });
-    else show();
-  });
+  const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => whenBlurred(input, show));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
   const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
@@ -441,7 +514,7 @@ function renderSettings(
 
   /** The General tab's fields, filled from `settings`; built once, and re-shown through `generalShows`. */
   const generalFields = (): HTMLElement[] => {
-    const minutes = h("input", { type: "number", min: "1", max: "120", value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
+    const minutes = h("input", { type: "number", min: String(POLL_MINUTES[0]), max: String(POLL_MINUTES[1]), value: String(settings.pollMinutes), class: "minutes", ariaLabel: "Minutes between checks" });
     const chips = POLL_CHOICES.map((m) =>
       h("button", { type: "button", class: "chip", data: { on: String(m === settings.pollMinutes) }, onclick: () => setMinutes(m) }, `${m} min`),
     );
@@ -457,7 +530,7 @@ function renderSettings(
     });
     minutes.onchange = () => {
       const m = parseMinutes(minutes.value);
-      if (m === null) fail(n.minutes, "Use a whole number from 1 to 120.");
+      if (m === null) fail(n.minutes, `Use a whole number from ${POLL_MINUTES[0]} to ${POLL_MINUTES[1]}.`);
       else setMinutes(m);
     };
 

@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// A named set of sources; only the active one is polled. A source is on once its secret is saved.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Workspace {
     /// Stable across renames; names this workspace's keyring entries and data folder.
@@ -18,7 +19,7 @@ pub struct Workspace {
     pub tracker: Tracker,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AdoSource {
     pub organization: String,
@@ -26,7 +27,7 @@ pub struct AdoSource {
     pub teams: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GithubSource {
     /// Repos (`owner/name`) whose open PRs, other than drafts and mine, all count as waiting on my review.
@@ -34,19 +35,18 @@ pub struct GithubSource {
 }
 
 /// Where ticket keys in branch names link to. `keys` are the team or project keys, such as `HOO`; when set,
-/// only branch keys with one of them count.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// only branch keys with one of them count. Jira's `site` is the host (`acme.atlassian.net`); Linear's `workspace`
+/// is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Tracker {
     #[default]
     None,
-    /// `site` is the host, such as `acme.atlassian.net`.
     Jira {
         site: String,
         #[serde(default, deserialize_with = "lenient")]
         keys: Vec<String>,
     },
-    /// `workspace` is the URL slug, `acme` in `linear.app/acme/issue/ABC-12`.
     Linear {
         workspace: String,
         #[serde(default, deserialize_with = "lenient")]
@@ -110,7 +110,7 @@ impl Workspace {
         }
         Self {
             name: self.name.trim().to_string(),
-            azure_dev_ops: AdoSource { organization: self.azure_dev_ops.organization.trim().to_string(), teams },
+            azure_dev_ops: AdoSource { organization: ado_org(&self.azure_dev_ops.organization), teams },
             github: GithubSource { repos },
             tracker: self.tracker.clamped(),
             ..self
@@ -145,10 +145,14 @@ fn github_repo(typed: &str) -> Option<String> {
 }
 
 /// The host of a typed Jira site: `HTTPS://acme.atlassian.net/jira/boards` gives `acme.atlassian.net`.
+/// Empty when it holds anything but alphanumeric characters (`char::is_alphanumeric`, so `ü` but not a combining
+/// mark), `-`, `.`, `_`, a `:` port and the brackets of an IPv6 address. The ticket link reaches the chosen browser as raw ShellExecute parameters, where a space or `"`
+/// would split it into other arguments, and `@` would send it to another host.
 fn jira_host(site: &str) -> String {
     let site = site.trim();
     let without_scheme = site.find("://").map_or(site, |i| &site[i + 3..]);
-    without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default().to_string()
+    let host = without_scheme.split(['/', '?', '#', '\\']).next().unwrap_or_default();
+    if host.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | '[' | ']')) { host.to_string() } else { String::new() }
 }
 
 /// The slug of a typed Linear workspace: `https://linear.app/Acme/issue/ABC-1` and ` acme ` give `acme`.
@@ -160,6 +164,25 @@ fn linear_slug(typed: &str) -> String {
     let first = segments.next().unwrap_or_default();
     let slug = if first.eq_ignore_ascii_case("linear.app") { segments.next().unwrap_or_default() } else { first };
     if slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') { slug.to_ascii_lowercase() } else { String::new() }
+}
+
+/// The organization in a typed name or a pasted link: `https://dev.azure.com/Acme/Web/_git/api` gives `Acme`,
+/// `acme.visualstudio.com/DefaultCollection` gives `acme`. Empty when it holds anything but letters, digits and
+/// `-`, since it goes into a URL.
+fn ado_org(typed: &str) -> String {
+    let typed = typed.trim();
+    let without_scheme = typed.find("://").map_or(typed, |i| &typed[i + 3..]);
+    let mut segments = without_scheme.split(['/', '?', '#', '\\']);
+    // Clone links carry a user: `https://acme@dev.azure.com/acme/...`.
+    let host = segments.next().unwrap_or_default().rsplit('@').next().unwrap_or_default();
+    let org = if host.eq_ignore_ascii_case("dev.azure.com") {
+        segments.next().unwrap_or_default()
+    } else if host.to_ascii_lowercase().ends_with(".visualstudio.com") {
+        &host[..host.len() - ".visualstudio.com".len()]
+    } else {
+        host
+    };
+    if org.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { org.to_string() } else { String::new() }
 }
 
 /// The settings of the single Azure DevOps org from before workspaces, read from the same file.
@@ -182,7 +205,7 @@ impl Legacy {
 
     /// The first workspace: named after the org, else "GitHub" when only a GitHub token was saved, else "Default".
     pub fn into_workspace(self, id: String, has_github_token: bool) -> Workspace {
-        let name = match self.organization.trim() {
+        let name = match ado_org(&self.organization).as_str() {
             "" if has_github_token => "GitHub".to_string(),
             "" => "Default".to_string(),
             org => org.to_string(),
@@ -265,6 +288,15 @@ mod tests {
             ("https://acme.atlassian.net/jira/software/projects/X", jira("acme.atlassian.net")),
             ("https://acme.atlassian.net?atlOrigin=x#top", jira("acme.atlassian.net")),
             (r"acme.atlassian.net\", jira("acme.atlassian.net")),
+            ("jira.acme.example:8443/browse", jira("jira.acme.example:8443")),
+            ("jira_ci.corp.local", jira("jira_ci.corp.local")),
+            ("äcme.atlassian.net", jira("äcme.atlassian.net")),
+            ("https://[::1]:8443/jira", jira("[::1]:8443")),
+            ("acme corp.atlassian.net", Tracker::None),
+            ("acme\u{202e}ten.naissalta.emca", Tracker::None),
+            ("acme.atlassian.net\"--incognito", Tracker::None),
+            ("user@acme.atlassian.net", Tracker::None),
+            ("acme.atlassian.net@evil.example", Tracker::None),
             ("https://", Tracker::None),
             ("  ", Tracker::None),
         ] {
@@ -285,6 +317,28 @@ mod tests {
             ("  ", Tracker::None),
         ] {
             assert_eq!(linear(typed).clamped(), expected, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn adoOrg_keepsTheOrgOfANameOrLinkAndEmptiesAnythingElse() {
+        for (typed, expected) in [
+            (" acme ", "acme"),
+            ("Acme-Labs", "Acme-Labs"),
+            ("https://dev.azure.com/acme", "acme"),
+            ("HTTPS://Dev.Azure.com/acme/Project/_git/web?path=/x#y", "acme"),
+            ("dev.azure.com/acme/", "acme"),
+            ("https://acme@dev.azure.com/acme/Project/_git/web", "acme"),
+            ("https://acme.visualstudio.com/DefaultCollection", "acme"),
+            ("acme.VisualStudio.com", "acme"),
+            ("https://dev.azure.com/", ""),
+            (".visualstudio.com", ""),
+            ("my org", ""),
+            ("acme.example.com", ""),
+            ("my%20org", ""),
+            ("", ""),
+        ] {
+            assert_eq!(ado_org(typed), expected, "{typed:?}");
         }
     }
 

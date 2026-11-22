@@ -6,37 +6,84 @@
 #[path = "../queue.rs"]
 mod queue;
 
+use std::ffi::OsString;
+use std::fs::File;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-use queue::{DRAFTS_FILE, Drafts, QUEUE_FILE, Queue};
+use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLinks, Drafts, MAX_DRAFT_URL, QUEUE_FILE, QUEUE_SCHEMA, Queue, ReadError, settings_path};
 
-const PROTOCOL: &str = "2025-06-18";
-const MAX_DRAFTS_WHILE_MISSING: usize = 500;
+/// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
+const PROTOCOL: &str = "2025-11-25";
+const PROTOCOLS: [&str; 4] = [PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 fn main() {
     let dir = data_dir();
+    log(&startup(&dir));
     let mut stdout = std::io::stdout().lock();
-    for line in std::io::stdin().lock().lines() {
+    for (index, line) in std::io::stdin().lock().split(b'\n').enumerate() {
         let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(response) = handle(&dir, Utc::now(), &line) {
+        // A writer such as PowerShell can start the stream with a byte order mark.
+        let line = if index == 0 { queue::without_bom(&line) } else { &line };
+        let reply = match std::str::from_utf8(line) {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => handle(&dir, Utc::now(), line),
+            Err(_) => Some(error(Value::Null, -32700, "parse error: the line is not UTF-8")),
+        };
+        if let Some(response) = reply {
+            if let Some(message) = error_message(&response) {
+                log(message);
+            }
             let _ = writeln!(stdout, "{response}");
             let _ = stdout.flush();
         }
     }
 }
 
-/// Rado's data folder, `%APPDATA%\dev.antonis.rado`; `RADO_DATA_DIR` overrides it.
+/// Stdout carries the protocol, so the log goes to stderr, which Claude Code keeps in its MCP logs.
+fn log(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{}", log_line(line));
+}
+
+/// One entry per line, whatever a workspace name or path holds: control characters and Unicode line separators are
+/// escaped.
+fn log_line(line: &str) -> String {
+    let mut entry = String::from("rado-mcp: ");
+    for c in line.chars() {
+        if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+            entry.extend(c.escape_default());
+        } else {
+            entry.push(c);
+        }
+    }
+    entry
+}
+
+/// Logged at start, so a wrong data folder shows before the first tool call.
+fn startup(root: &Path) -> String {
+    let workspace = workspace(root, None).map_or_else(|e| e, |ws| format!("active workspace {} ({})", ws.name, ws.dir.display()));
+    format!("{} started; data folder {}; {workspace}", env!("CARGO_PKG_VERSION"), root.display())
+}
+
+/// The error a reply carries, as a JSON-RPC error or as a failed tool call.
+fn error_message(response: &Value) -> Option<&str> {
+    let tool_error = response["result"]["isError"] == true;
+    response["error"]["message"].as_str().or_else(|| tool_error.then(|| response["result"]["content"][0]["text"].as_str()).flatten())
+}
+
 fn data_dir() -> PathBuf {
-    std::env::var_os("RADO_DATA_DIR")
+    chosen_data_dir(std::env::var_os("RADO_DATA_DIR"), std::env::var_os("APPDATA"))
+}
+
+/// Rado's data folder, `%APPDATA%\dev.antonis.rado`; a non-empty `RADO_DATA_DIR` overrides it.
+fn chosen_data_dir(rado_data_dir: Option<OsString>, appdata: Option<OsString>) -> PathBuf {
+    rado_data_dir
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("dev.antonis.rado"))
+        .unwrap_or_else(|| PathBuf::from(appdata.unwrap_or_default()).join("dev.antonis.rado"))
 }
 
 /// One JSON-RPC message in, at most one out; notifications get no reply.
@@ -45,17 +92,33 @@ fn handle(root: &Path, now: DateTime<Utc>, line: &str) -> Option<Value> {
         Ok(v) => v,
         Err(e) => return Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
     };
-    let id = request.get("id").cloned()?;
+    if request.is_array() {
+        return Some(error(Value::Null, -32600, "batches are not supported; send one request per line"));
+    }
+    let Some(message) = request.as_object() else {
+        return Some(error(Value::Null, -32600, "a request must be a JSON object"));
+    };
+    // A response from the client is answered with nothing, as a notification is.
+    if message.contains_key("result") || message.contains_key("error") {
+        return None;
+    }
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return Some(error(message.get("id").cloned().unwrap_or(Value::Null), -32600, "a request needs a method"));
+    };
+    let id = message.get("id").cloned()?;
     let params = request.get("params").cloned().unwrap_or(Value::Null);
-    let result = match request["method"].as_str().unwrap_or_default() {
+    let result = match method {
         "initialize" => json!({
-            "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
+            "protocolVersion": params["protocolVersion"].as_str().filter(|v| PROTOCOLS.contains(v)).unwrap_or(PROTOCOL),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "rado", "version": env!("CARGO_PKG_VERSION") },
         }),
         "ping" => json!({}),
         "tools/list" => json!({ "tools": tools() }),
-        "tools/call" => call(root, now, &params),
+        "tools/call" => match call(root, now, &params) {
+            Ok(result) => result,
+            Err(message) => return Some(error(id, -32602, &message)),
+        },
         other => return Some(error(id, -32601, &format!("unknown method {other}"))),
     };
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
@@ -71,15 +134,20 @@ fn tools() -> Value {
             "name": "list_review_queue",
             "description": "The pull requests waiting on the user's review, from Rado, best-ranked first, on Azure DevOps \
                 and GitHub. PRs are grouped by source branch: one branch is one change, even across repos. Hidden PRs, the \
-                user's own PRs and PRs already drafted at their current source commit are left out. Each PR has a provider: \
+                user's own PRs and PRs already drafted at their current source commit (list_drafted shows those) are left out. Each PR has a provider: \
                 for azureDevOps, project, repo, repoId and prId are what the Azure DevOps MCP tools take; for gitHub, project \
                 is the owner, repo the repository name and number the PR number. sourceCommit is the head commit to review. \
                 agentAuthored (GitHub only; always false on Azure DevOps) is true for a PR opened by a bot account or \
                 labelled agent, ai, ai-generated or ai-assisted. A reReview PR with lastVotedCommit has new pushes since \
                 the user's vote, so review only what changed since that commit; without it, review the whole PR. \
                 missingSources names a provider whose last poll failed or came back partial: some of its PRs may be \
-                absent, which doesn't mean they are done. Fails when Rado's data is stale; then review nothing.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+                absent, which doesn't mean they are done. Fails when Rado's data is stale; then review nothing. The reply \
+                names the workspace and workspaceId it read: the one active in Rado, unless workspace picks another.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "workspace": workspace_argument() },
+                "additionalProperties": false,
+            },
             "annotations": { "title": "List review queue", "readOnlyHint": true, "openWorldHint": false },
         },
         {
@@ -88,65 +156,278 @@ fn tools() -> Value {
                 until someone pushes again. Call it once per PR, after the draft is published, with the prId (not the GitHub \
                 PR number) and sourceCommit from list_review_queue. While missingSources is set, a PR that has since dropped \
                 out of the queue is still accepted, unless the id is a queued PR's GitHub number at that commit. A queued PR at another \
-                commit is refused: list again. Changes nothing on Azure DevOps or GitHub.",
+                commit is refused: list again. Pass the workspaceId list_review_queue returned as workspace, so a switch \
+                in Rado between the two calls can't send the mark elsewhere. Pass draftUrl so Draft ready on the PR's \
+                row in Rado's list becomes a button that opens the draft; marking again without it removes the link. \
+                Changes nothing on Azure DevOps or GitHub.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prId": { "type": "integer", "description": "The prId from list_review_queue." },
                     "commit": { "type": "string", "description": "The sourceCommit the draft reviewed." },
+                    "draftUrl": {
+                        "type": "string",
+                        "description": "An http:// or https:// link where the user can read the draft: its summary, risks and \
+                            suggested comments. At most 2048 characters; percent-encode spaces, quotes, backslashes and \
+                            non-ASCII characters, and put no user name or @ before the host.",
+                    },
+                    "workspace": workspace_argument(),
                 },
                 "required": ["prId", "commit"],
                 "additionalProperties": false,
             },
             "annotations": { "title": "Mark PR drafted", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         },
+        {
+            "name": "list_drafted",
+            "description": "The queued PRs that list_review_queue leaves out because a draft review was marked at their \
+                current sourceCommit, in the same shape and order. Use it to find the prId and commit to pass to \
+                unmark_drafted. A mark on a PR that is no longer queued, or is queued at another commit, isn't shown: \
+                to undo it, pass the prId and commit you marked. Unlike list_review_queue it answers from an old queue too; refreshedMinutesAgo says \
+                how old.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "workspace": workspace_argument() },
+                "additionalProperties": false,
+            },
+            "annotations": { "title": "List drafted PRs", "readOnlyHint": true, "openWorldHint": false },
+        },
+        {
+            "name": "unmark_drafted",
+            "description": "Undoes mark_drafted, so list_review_queue lists the PR again: call it when the draft was \
+                deleted, never saved, or marked on the wrong PR. Pass the prId and commit list_drafted shows, and the \
+                workspaceId it returned as workspace. Fails when the PR has no mark at that commit. Changes nothing on \
+                Azure DevOps or GitHub.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prId": { "type": "integer", "description": "The prId from list_drafted." },
+                    "commit": { "type": "string", "description": "The sourceCommit from list_drafted." },
+                    "workspace": workspace_argument(),
+                },
+                "required": ["prId", "commit"],
+                "additionalProperties": false,
+            },
+            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+        },
     ])
 }
 
-fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Value {
-    // Read on every call, so a switch in Rado is followed without restarting this server.
-    let dir = queue::active_workspace_dir(root)
-        .ok_or_else(|| format!("Rado has no active workspace in {}. Start Rado once to set it up.", root.display()));
-    let outcome = dir.and_then(|dir| match params["name"].as_str() {
-        Some("list_review_queue") => list(&dir, now),
-        Some("mark_drafted") => mark_drafted(&dir, &params["arguments"]),
-        other => Err(format!("Unknown tool {other:?}")),
-    });
-    match outcome {
-        Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
-        Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
-    }
-}
-
-fn read_queue(dir: &Path) -> Result<Queue, String> {
-    queue::read_json(&dir.join(QUEUE_FILE)).ok_or_else(|| {
-        format!("Rado has not written a review queue to {}. Start Rado, add a token to the workspace, and wait for one refresh.", dir.display())
+fn workspace_argument() -> Value {
+    json!({
+        "type": "string",
+        "description": "The workspaceId (or name) your instructions name, or the workspaceId list_review_queue \
+            returned; the one active in Rado when left out. Never guess one. The id stays the same when the user \
+            renames the workspace.",
     })
 }
 
-fn list(dir: &Path, now: DateTime<Utc>) -> Result<Value, String> {
-    let queue = read_queue(dir)?;
-    let age = (now - queue.refreshed).num_minutes();
-    let limit = queue::stale_after_minutes(queue.poll_minutes);
-    if age > limit {
+/// The tool's result, which carries a failed call as `isError`; an unknown tool is a protocol error instead.
+fn call(root: &Path, now: DateTime<Utc>, params: &Value) -> Result<Value, String> {
+    let args = &params["arguments"];
+    let name = params["name"].as_str().unwrap_or_default();
+    let in_workspace = |tool: &dyn Fn(&Workspace) -> Result<Value, String>| {
+        known_arguments(name, args)?;
+        workspace(root, args.get("workspace")).and_then(|ws| named(&ws, tool(&ws)))
+    };
+    let outcome = match name {
+        "list_review_queue" => in_workspace(&|ws| list(ws, now, queue::pending, true)),
+        "mark_drafted" => in_workspace(&|ws| mark_drafted(ws, args)),
+        "list_drafted" => in_workspace(&|ws| list(ws, now, queue::drafted, false)),
+        "unmark_drafted" => in_workspace(&|ws| unmark_drafted(ws, args)),
+        other => return Err(format!("Unknown tool: {other}")),
+    };
+    Ok(match outcome {
+        Ok(value) => json!({ "content": [{ "type": "text", "text": value.to_string() }] }),
+        Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
+    })
+}
+
+/// Refuses an argument the tool's schema doesn't list: ignoring a misnamed `workspaceId` would use the active
+/// workspace instead of the one the agent meant.
+fn known_arguments(tool: &str, args: &Value) -> Result<(), String> {
+    let tools = tools();
+    let schema = tools.as_array().and_then(|all| all.iter().find(|t| t["name"] == tool));
+    let args = match args {
+        Value::Null => return Ok(()),
+        Value::Object(args) => args,
+        other => return Err(format!("{tool}'s arguments must be an object, not {other}")),
+    };
+    let Some(properties) = schema.and_then(|t| t["inputSchema"]["properties"].as_object()) else {
+        return Ok(());
+    };
+    match args.keys().find(|key| !properties.contains_key(*key)) {
+        Some(key) => Err(format!("{tool} takes no argument {key:?}; it takes {}", properties.keys().cloned().collect::<Vec<_>>().join(", "))),
+        None => Ok(()),
+    }
+}
+
+/// Names the workspace in a tool's reply, an object, or in its error.
+fn named(ws: &Workspace, outcome: Result<Value, String>) -> Result<Value, String> {
+    outcome
+        .map(|mut reply| {
+            if let Some(fields) = reply.as_object_mut() {
+                fields.insert("workspace".into(), json!(ws.name));
+                fields.insert("workspaceId".into(), json!(ws.id));
+            }
+            reply
+        })
+        .map_err(|message| format!("Workspace {} (id {}): {message}", ws.name, ws.id))
+}
+
+/// The error with what to do about it: a file another program holds needs only a retry, a damaged one `repair`.
+fn advise(error: ReadError, repair: &str) -> String {
+    match error {
+        ReadError::Unreadable(message) => format!("{message}. Try again."),
+        ReadError::Invalid(message) => format!("{message}. {repair}"),
+    }
+}
+
+#[derive(Clone)]
+struct Workspace {
+    id: String,
+    name: String,
+    dir: PathBuf,
+    active: bool,
+}
+
+impl Workspace {
+    /// What to do about a missing, damaged or old queue: `if_active`, since only the active workspace is polled.
+    fn poll_advice(&self, if_active: &str) -> String {
+        if self.active {
+            if_active.into()
+        } else {
+            format!("Rado polls only the active workspace: tell the user to switch to {} in Rado, and review nothing until then.", self.name)
+        }
+    }
+}
+
+/// The workspace `requested` names, by id first, then by name ignoring case; the active one when it is absent. Read
+/// on every call, so a switch in Rado is followed without restarting this server. Only ids the settings list are
+/// used, so the argument never becomes a path.
+fn workspace(root: &Path, requested: Option<&Value>) -> Result<Workspace, String> {
+    let settings: Value = queue::read_json_file(&settings_path(root))
+        .map_err(|e| {
+            advise(e, "Tell the user to fix it, or put back a good copy, and restart Rado, or to change any setting in Rado if it was running before the file was damaged. A Rado started on the damaged file keeps a copy as settings.unreadable-*.json and saves no settings or tokens until it restarts on a good file.")
+        })?
+        .unwrap_or_default();
+    let active = settings["activeWorkspace"].as_str();
+    let all: Vec<Workspace> = (settings["workspaces"].as_array().into_iter().flatten())
+        .filter_map(|w| {
+            let id = w["id"].as_str().filter(|id| queue::is_workspace_id(id))?;
+            let name = w["name"].as_str().filter(|name| !name.trim().is_empty()).unwrap_or(id);
+            Some(Workspace { id: id.into(), name: name.into(), dir: queue::workspace_dir(root, id), active: active == Some(id) })
+        })
+        .collect();
+    let none = |what| format!("Rado has no {what} in {}. Start Rado once to set it up, or set RADO_DATA_DIR to Rado's data folder.", root.display());
+    let requested = match requested {
+        None | Some(Value::Null) => return all.into_iter().find(|w| w.active).ok_or_else(|| none("active workspace")),
+        Some(Value::String(requested)) => requested.trim(),
+        Some(other) => return Err(format!("workspace must be a workspace's name or id, not {other}")),
+    };
+    if all.is_empty() {
+        return Err(none("workspaces"));
+    }
+    if let Some(ws) = all.iter().find(|w| w.id == requested) {
+        return Ok(ws.clone());
+    }
+    let key = requested.to_lowercase();
+    let named: Vec<&Workspace> = all.iter().filter(|w| w.name.trim().to_lowercase() == key).collect();
+    let listed = |workspaces: &[&Workspace]| workspaces.iter().map(|w| format!("{} (id {})", w.name, w.id)).collect::<Vec<_>>().join(", ");
+    match named[..] {
+        [ws] => Ok(ws.clone()),
+        [] => Err(format!(
+            "Rado has no workspace {requested:?}; it has {}. Don't pick another: review nothing and tell the user.",
+            listed(&all.iter().collect::<Vec<_>>())
+        )),
+        _ => Err(format!(
+            "{} workspaces are named {requested:?}: {}. Don't pick one: review nothing and tell the user to name a workspaceId in your instructions.",
+            named.len(),
+            listed(&named)
+        )),
+    }
+}
+
+/// Checks the schema before the shape, so a newer file is reported as newer rather than as damaged. A schema that
+/// isn't a non-negative integer is left to the shape check, which reports the file as damaged.
+fn read_queue(ws: &Workspace) -> Result<Queue, String> {
+    let path = ws.dir.join(QUEUE_FILE);
+    let rewrite = |e| advise(e, &ws.poll_advice("Rado rewrites it after its next poll that reaches a source; start Rado if it isn't running."));
+    let file: Value = queue::read_json_file(&path)
+        .map_err(rewrite)?
+        .ok_or_else(|| {
+            let advice = ws.poll_advice("Start Rado, add a token to the workspace, and wait for one refresh.");
+            format!("Rado has not written a review queue to {}. {advice}", ws.dir.display())
+        })?;
+    if let Some(schema) = file.get("schemaVersion").and_then(Value::as_u64).filter(|&v| v > u64::from(QUEUE_SCHEMA)) {
         return Err(format!(
-            "Rado's review queue is {age} minutes old (the limit is {limit}): Rado is not running or cannot reach \
-             Azure DevOps or GitHub. Review nothing from it; start Rado and run again."
+            "{} has schema {schema}, but this rado-mcp {} ({}) reads up to {QUEUE_SCHEMA}. Restart this Claude session. If \
+             it still refuses, that exe isn't the newer one: run the Rado installer from Explorer with no Claude session \
+             open, or register the installed rado-mcp.exe (a source build: npm run mcp:build).",
+            path.display(),
+            env!("CARGO_PKG_VERSION"),
+            std::env::current_exe().unwrap_or_default().display(),
         ));
     }
-    let drafts: Drafts = queue::read_json(&dir.join(DRAFTS_FILE)).unwrap_or_default();
+    serde_json::from_value(file).map_err(|e| rewrite(ReadError::Invalid(format!("{} is not valid: {e}", path.display()))))
+}
+
+/// An unreadable or invalid file is an error, not an empty one: listing would bring every drafted PR back, and
+/// marking would replace all recorded drafts with one.
+fn read_drafts(path: &Path) -> Result<Drafts, String> {
+    queue::read_json_file(path)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| advise(e, "Delete it to start over; the PRs drafted so far will then be listed again."))
+}
+
+/// The queue's branches that `select` keeps, given the recorded drafts. Only a list to review from refuses an old
+/// queue: undoing a mark doesn't depend on its age.
+fn list(ws: &Workspace, now: DateTime<Utc>, select: fn(&Queue, &Drafts) -> Vec<queue::Branch>, to_review: bool) -> Result<Value, String> {
+    let queue = read_queue(ws)?;
+    let age = (now - queue.refreshed).num_minutes();
+    let limit = queue::stale_after_minutes(queue.poll_minutes);
+    if to_review && age > limit {
+        let advice = ws.poll_advice("Rado is not running or cannot reach Azure DevOps or GitHub; start Rado and run again.");
+        return Err(format!("Rado's review queue is {age} minutes old (the limit is {limit}). Review nothing from it. {advice}"));
+    }
+    let drafts = read_drafts(&ws.dir.join(DRAFTS_FILE))?;
     Ok(json!({
         "organization": queue.organization,
         "refreshedMinutesAgo": age,
         "missingSources": queue.missing_sources,
-        "branches": queue::pending(&queue, &drafts),
+        "branches": select(&queue, &drafts),
     }))
 }
 
-fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
+fn pr_and_commit(args: &Value) -> Result<(i64, &str), String> {
     let pr_id = args["prId"].as_i64().ok_or("prId (an integer) is required")?;
-    let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the reviewed sourceCommit) is required")?;
-    let queue = read_queue(dir)?;
+    let commit = args["commit"].as_str().filter(|c| !c.is_empty()).ok_or("commit (the PR's sourceCommit) is required")?;
+    Ok((pr_id, commit))
+}
+
+/// The links, or None when the file is damaged and no link is being written. A damaged file is never replaced, as
+/// that would drop every link in it; but Rado's list ignores it, so it blocks only a mark that writes a link, rather
+/// than have the agent draft a PR again because its mark was refused. A file held by another program is an error even
+/// then: skipping it would leave an unmarked PR's old link for this mark to bring back.
+fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, String> {
+    match queue::read_json_file(path) {
+        Ok(links) => Ok(Some(links.unwrap_or_default())),
+        Err(ReadError::Invalid(_)) if !writing_a_link => Ok(None),
+        Err(e) => Err(advise(e, "Delete it to start over; Rado's list then shows the drafts marked so far without their links.")),
+    }
+}
+
+fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
+    let (pr_id, commit) = pr_and_commit(args)?;
+    let url = match args.get("draftUrl") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
+        Some(_) => return Err(format!(
+            "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, with no spaces, quotes, backslashes or non-ASCII characters, and no @ before the host"
+        )),
+    };
+    let queue = read_queue(ws)?;
+    let dir = &ws.dir;
     // Matching the commit too keeps a PR id from another workspace's organization from being marked here. While a
     // source is missing, a PR listed before it dropped out is accepted, since a draft hides a PR only at this id and
     // commit; a GitHub PR number passed as the id is still refused.
@@ -161,16 +442,56 @@ fn mark_drafted(dir: &Path, args: &Value) -> Result<Value, String> {
     } else if prs().any(|p| p.number == pr_id && p.source_commit.as_deref() == Some(commit)) {
         return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
-    let path = dir.join(DRAFTS_FILE);
-    let mut drafts: Drafts = queue::read_json(&path).unwrap_or_default();
-    // A source that failed or answered in part is missing PRs, so their drafts survive until it answers in full, up
-    // to a cap for a source that stays missing.
-    if queue.missing_sources.is_empty() || drafts.len() >= MAX_DRAFTS_WHILE_MISSING {
-        queue::prune(&mut drafts, &queue);
+    let _lock = lock_drafts(dir)?;
+    let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
+    let mut drafts = read_drafts(&path)?;
+    let read = read_links(&links_path, url.is_some())?;
+    queue::record_draft(&mut drafts, pr_id, commit);
+    // Links first: Rado reads both files without the lock, and a link whose commit isn't marked yet shows nothing,
+    // while a new mark read with the old link could open the wrong draft.
+    if let Some(before) = read {
+        let mut links = before.clone();
+        match &url {
+            Some(url) => links.insert(pr_id, DraftLink { commit: commit.into(), url: url.clone() }),
+            None => links.shift_remove(&pr_id),
+        };
+        queue::prune_links(&mut links, &drafts);
+        // Only when changed, so an agent that never passes draftUrl never creates the file.
+        if links != before {
+            queue::write_json_atomic(&links_path, &links)?;
+        }
     }
-    drafts.insert(pr_id, commit.to_string());
+    queue::write_json_atomic(&path, &drafts)?;
+    Ok(json!({ "prId": pr_id, "commit": commit, "draftUrl": url }))
+}
+
+/// Matching the commit as well as the id keeps a GitHub PR number passed as the id from unmarking another PR, and the
+/// error never names the marked commit, so retrying with it can't get around that.
+fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
+    let (pr_id, commit) = pr_and_commit(args)?;
+    let path = ws.dir.join(DRAFTS_FILE);
+    let unmarked = || format!("PR {pr_id} has no draft mark at {commit}; pass the prId and commit list_drafted shows");
+    if !path.exists() {
+        return Err(unmarked());
+    }
+    let _lock = lock_drafts(&ws.dir)?;
+    let mut drafts = read_drafts(&path)?;
+    if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
+        return Err(unmarked());
+    }
+    // The link stays until the next mark prunes it; without its mark Rado never shows it.
+    drafts.shift_remove(&pr_id);
     queue::write_json_atomic(&path, &drafts)?;
     Ok(json!({ "prId": pr_id, "commit": commit }))
+}
+
+/// Waits for other `rado-mcp` processes to finish recording; the lock goes when the file is dropped or its process
+/// ends, so a crashed agent can't leave it held.
+fn lock_drafts(dir: &Path) -> Result<File, String> {
+    let path = dir.join(DRAFTS_LOCK_FILE);
+    let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    file.lock().map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -201,12 +522,18 @@ mod tests {
         make_queue(vec![]).refreshed + chrono::Duration::minutes(minutes_after_refresh)
     }
 
-    /// A data folder whose active workspace `w1` has a queue.
+    /// Writes the settings file as Rado does: `workspaces` as (id, name), and the active one's id.
+    fn settings(root: &Path, active: &str, workspaces: &[(&str, &str)]) {
+        let workspaces: Vec<Value> = workspaces.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect();
+        write_json_atomic(&settings_path(root), &json!({ "activeWorkspace": active, "workspaces": workspaces })).unwrap();
+    }
+
+    /// A data folder whose active workspace `w1`, named Work, has a queue.
     fn with_queue(name: &str) -> TempDir {
         let dir = TempDir::new(name);
         let workspace = queue::workspace_dir(&dir.0, "w1");
         std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(dir.0.join(queue::SETTINGS_FILE), r#"{"activeWorkspace":"w1"}"#).unwrap();
+        settings(&dir.0, "w1", &[("w1", "Work")]);
         let q = make_queue(vec![Branch { branch: "ABC-1".into(), prs: vec![pr(1, "c1"), pr(2, "c2")] }]);
         write_json_atomic(&workspace.join(QUEUE_FILE), &q).unwrap();
         dir
@@ -234,9 +561,55 @@ mod tests {
     }
 
     #[test]
+    fn initialize_unknownProtocol_answersTheNewestItSpeaks() {
+        let dir = TempDir::new("init-unknown");
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "1.0.0" } }));
+        assert_eq!(reply["result"]["protocolVersion"], PROTOCOL);
+    }
+
+    #[test]
+    fn unknownTool_isAProtocolError() {
+        let dir = TempDir::new("unknown-tool");
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "drop_queue" } }));
+        assert_eq!(reply["error"]["code"], -32602);
+        assert_eq!(reply["error"]["message"], "Unknown tool: drop_queue");
+    }
+
+    #[test]
+    fn startup_namesTheDataFolderAndWhatIsWrongWithIt() {
+        let dir = with_queue("startup");
+        assert!(startup(&dir.0).ends_with(&format!("active workspace Work ({})", queue::workspace_dir(&dir.0, "w1").display())));
+
+        let empty = TempDir::new("startup-empty");
+        let line = startup(&empty.0);
+        assert!(line.contains(&format!("data folder {}", empty.0.display())) && line.contains("RADO_DATA_DIR"), "{line}");
+    }
+
+    #[test]
     fn notification_getsNoReply() {
         let dir = TempDir::new("notify");
         assert_eq!(handle(&dir.0, at(0), r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
+    }
+
+    #[test]
+    fn notAnObject_orNoMethod_isInvalidRequest_andAClientResponseGetsNoReply() {
+        let dir = TempDir::new("invalid");
+        for line in ["5", r#""x""#, "null", "true", r#"{"foo":"boo"}"#, r#"{"jsonrpc":"2.0","method":1,"params":"bar"}"#] {
+            let reply = handle(&dir.0, at(0), line).unwrap_or_else(|| panic!("no reply to {line}"));
+            assert_eq!((reply["id"].clone(), reply["error"]["code"].clone()), (Value::Null, json!(-32600)), "{line}");
+        }
+        let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 1 }));
+        assert_eq!((reply["id"].clone(), reply["error"]["code"].clone()), (json!(1), json!(-32600)));
+        assert_eq!(handle(&dir.0, at(0), r#"{"jsonrpc":"2.0","id":1,"result":{}}"#), None);
+    }
+
+    #[test]
+    fn dataDir_anEmptyRadoDataDir_isNotAFolder() {
+        let appdata = Some(OsString::from(r"C:\Users\x\AppData\Roaming"));
+        let rado = PathBuf::from(r"C:\Users\x\AppData\Roaming").join("dev.antonis.rado");
+        assert_eq!(chosen_data_dir(Some(OsString::new()), appdata.clone()), rado);
+        assert_eq!(chosen_data_dir(None, appdata.clone()), rado);
+        assert_eq!(chosen_data_dir(Some(OsString::from(r"D:\data")), appdata), PathBuf::from(r"D:\data"));
     }
 
     #[test]
@@ -247,11 +620,139 @@ mod tests {
     }
 
     #[test]
-    fn toolsList_namesBothTools() {
+    fn toolsList_namesEveryTool_andEachTakesAWorkspace() {
         let dir = TempDir::new("list");
         let reply = send(&dir.0, at(0), json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }));
-        let names: Vec<&str> = reply["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["list_review_queue", "mark_drafted"]);
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["list_review_queue", "mark_drafted", "list_drafted", "unmark_drafted"]);
+        assert!(tools.iter().all(|t| t["inputSchema"]["properties"]["workspace"].is_object()));
+    }
+
+    #[test]
+    fn listDrafted_thenUnmark_bringsThePrBackToTheQueue() {
+        let dir = with_queue("unmark");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        write_json_atomic(&path, &Drafts::from([(9, "c9".to_string())])).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+
+        let drafted = text(&call_tool(&dir.0, at(1), "list_drafted", json!({})));
+        assert_eq!(drafted["branches"], json!([{ "branch": "ABC-1", "prs": [pr(1, "c1")] }]));
+        assert_eq!((&drafted["workspaceId"], &drafted["refreshedMinutesAgo"]), (&json!("w1"), &json!(1)));
+
+        let unmarked = text(&call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1", "workspace": "w1" })));
+
+        assert_eq!((&unmarked["prId"], &unmarked["commit"], &unmarked["workspaceId"]), (&json!(1), &json!("c1"), &json!("w1")));
+        assert_eq!(text(&call_tool(&dir.0, at(1), "list_drafted", json!({})))["branches"], json!([]));
+        assert_eq!(text(&call_tool(&dir.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"].as_array().unwrap().len(), 2);
+        assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
+    }
+
+    #[test]
+    fn unmarkDrafted_noMarkAtThatIdAndCommit_isAnErrorAndKeepsTheMarks() {
+        let dir = with_queue("unmark-wrong");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        let marks = Drafts::from([(1, "c1".to_string())]);
+        write_json_atomic(&path, &marks).unwrap();
+
+        let other_commit = error_text(&call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c0" })));
+        let unmarked = error_text(&call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 2, "commit": "c2" })));
+
+        assert_eq!(other_commit, "Workspace Work (id w1): PR 1 has no draft mark at c0; pass the prId and commit list_drafted shows");
+        assert!(!other_commit.contains("c1"), "the error must not hand over the marked commit");
+        assert!(unmarked.contains("PR 2 has no draft mark at c2"), "{unmarked}");
+        assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), marks);
+    }
+
+    #[test]
+    fn unmarkDrafted_workspaceNeverPolled_saysThereIsNoMark() {
+        let (root, _, _) = two_workspaces("unmark-new");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta"), ("c3", "Gamma")]);
+
+        let text = error_text(&call_tool(&root.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "c3" })));
+
+        assert!(text.ends_with("PR 1 has no draft mark at c; pass the prId and commit list_drafted shows"), "{text}");
+    }
+
+    fn links_at(dir: &TempDir) -> PathBuf {
+        queue::workspace_dir(&dir.0, "w1").join(DRAFT_LINKS_FILE)
+    }
+
+    #[test]
+    fn markDrafted_withoutADraftUrl_writesNoLinksFile() {
+        let dir = with_queue("no-links");
+        let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })));
+
+        assert_eq!(marked["draftUrl"], Value::Null);
+        assert!(!links_at(&dir).exists());
+    }
+
+    #[test]
+    fn markDrafted_draftUrl_isRecordedBesideAPlainDraftsFile_andMarkingAgainWithoutItRemovesIt() {
+        let dir = with_queue("links");
+        let url = "https://github.com/o/r/pull/1#pullrequestreview-9";
+
+        let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
+        assert_eq!(marked["draftUrl"], url);
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::from([(1, DraftLink { commit: "c1".into(), url: url.into() })]));
+        let drafts = std::fs::read_to_string(queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&drafts).unwrap(), json!({ "1": "c1" }), "an older rado-mcp still reads the marks");
+
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::new());
+    }
+
+    #[test]
+    fn markDrafted_draftUrlNotAnHttpLink_isAnErrorAndRecordsNothing() {
+        let dir = with_queue("bad-url");
+        for url in [json!("file:///C:/drafts/1.md"), json!(7)] {
+            let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
+            assert!(error.contains("draftUrl must be an http:// or https:// link of at most 2048 characters"), "{error}");
+        }
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+        assert!(!links_at(&dir).exists());
+    }
+
+    #[test]
+    fn markDrafted_invalidLinksFile_isAnError_andNeitherFileIsWritten() {
+        let dir = with_queue("bad-links");
+        std::fs::write(links_at(&dir), "[").unwrap();
+
+        let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" })));
+
+        assert!(error.contains("is not valid") && error.contains("Delete it"), "{error}");
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+        assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
+    }
+
+    #[test]
+    fn invalidLinksFile_markWithoutALinkIsRecorded_andTheFileIsKept() {
+        let dir = with_queue("bad-links-no-url");
+        std::fs::write(links_at(&dir), "[").unwrap();
+
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+
+        let drafts = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        assert_eq!(queue::read_json::<Drafts>(&drafts).unwrap(), Drafts::from([(1, "c1".to_string())]));
+        assert_eq!(std::fs::read_to_string(links_at(&dir)).unwrap(), "[");
+    }
+
+    #[test]
+    fn unmarkThenMarkAgainWithoutADraftUrl_dropsTheOldLink() {
+        let dir = with_queue("unmark-remark");
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": "https://d/1" }));
+        call_tool(&dir.0, at(1), "unmark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+
+        assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap(), DraftLinks::new());
+    }
+
+    #[test]
+    fn listDrafted_staleQueue_isStillListed() {
+        let dir = with_queue("drafted-stale");
+        assert_eq!(text(&call_tool(&dir.0, at(31), "list_drafted", json!({})))["refreshedMinutesAgo"], 31);
     }
 
     #[test]
@@ -265,6 +766,7 @@ mod tests {
         assert_eq!(body["branches"][0]["prs"][1]["sourceCommit"], "c2");
         assert_eq!(body["branches"][0]["prs"][1]["provider"], "azureDevOps");
         assert_eq!(body["missingSources"], json!([]));
+        assert_eq!((&body["workspace"], &body["workspaceId"]), (&json!("Work"), &json!("w1")));
     }
 
     #[test]
@@ -285,6 +787,75 @@ mod tests {
     }
 
     #[test]
+    fn listReviewQueue_invalidQueue_saysSoRatherThanMissing() {
+        let dir = with_queue("invalid");
+        std::fs::write(queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE), "{").unwrap();
+        let text = call_tool(&dir.0, at(0), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("is not valid") && text.contains("next poll"), "{text}");
+    }
+
+    #[test]
+    fn listReviewQueue_queueFromBeforeTheSchema_isRead() {
+        let dir = with_queue("unversioned");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let mut file: Value = queue::read_json(&path).unwrap();
+        file.as_object_mut().unwrap().remove("schemaVersion");
+        std::fs::write(&path, file.to_string()).unwrap();
+
+        assert_eq!(text(&call_tool(&dir.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 1);
+    }
+
+    #[test]
+    fn listReviewQueue_newerSchema_isRefusedAsNewerEvenWhenItsShapeChanged() {
+        let dir = with_queue("newer");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        std::fs::write(&path, json!({ "schemaVersion": QUEUE_SCHEMA + 1, "queue": [] }).to_string()).unwrap();
+
+        for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
+            let result = call_tool(&dir.0, at(1), tool, arguments);
+            assert!(result["content"][0]["text"].as_str().unwrap().contains(&format!("has schema {}", QUEUE_SCHEMA + 1)), "{tool}: {result}");
+        }
+    }
+
+    #[test]
+    fn listReviewQueue_schemaThatIsntANonNegativeInteger_isDamagedRatherThanNewer() {
+        let dir = with_queue("bad-schema");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let mut file: Value = queue::read_json(&path).unwrap();
+        for schema in [json!(-1), json!("abc"), json!(1.0), json!("2"), Value::Null] {
+            file["schemaVersion"] = schema;
+            std::fs::write(&path, file.to_string()).unwrap();
+
+            for (tool, arguments) in [("list_review_queue", json!({})), ("mark_drafted", json!({ "prId": 1, "commit": "c1" }))] {
+                let result = call_tool(&dir.0, at(1), tool, arguments);
+                let text = result["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("is not valid") && text.contains("next poll") && !text.contains("has schema"), "{tool}, {}: {text}", file["schemaVersion"]);
+            }
+        }
+    }
+
+    #[test]
+    fn logLine_keepsAnEntryOnOneLine() {
+        assert_eq!(log_line("Workspace Work\r\nHome\u{85}\u{2028}x: C:\\data"), r"rado-mcp: Workspace Work\r\nHome\u{85}\u{2028}x: C:\data");
+    }
+
+    #[test]
+    fn invalidDraftsFile_isAnErrorForBothTools_andIsKept() {
+        let dir = with_queue("bad-drafts");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        std::fs::write(&path, "{\"1\":").unwrap();
+
+        let listed = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
+        let marked = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2" }));
+
+        for result in [&listed, &marked] {
+            assert_eq!(result["isError"], true, "{result}");
+            assert!(result["content"][0]["text"].as_str().unwrap().contains("is not valid"), "{result}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"1\":");
+    }
+
+    #[test]
     fn markDrafted_thenList_leavesThePrOut() {
         let dir = with_queue("mark");
         let marked = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
@@ -297,18 +868,64 @@ mod tests {
     }
 
     #[test]
-    fn markDrafted_whileASourceIsMissing_keepsOtherDrafts() {
-        let dir = with_queue("missing-source");
-        let path = queue::workspace_dir(&dir.0, "w1");
-        write_json_atomic(&path.join(DRAFTS_FILE), &Drafts::from([(99, "c99".to_string())])).unwrap();
-        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
-        q.missing_sources = vec![queue::GITHUB.into()];
-        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
+    fn markDrafted_agentsMarkingAtOnce_allMarksAreKept() {
+        const AGENTS: i64 = 8;
+        const MARKS_EACH: i64 = 8;
+        let dir = TempDir::new("parallel");
+        let workspace = queue::workspace_dir(&dir.0, "w1");
+        std::fs::create_dir_all(&workspace).unwrap();
+        settings(&dir.0, "w1", &[("w1", "Work")]);
+        let prs = (1..=AGENTS * MARKS_EACH).map(|id| pr(id, &format!("c{id}"))).collect();
+        write_json_atomic(&workspace.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs }])).unwrap();
+        let start = std::sync::Barrier::new(AGENTS as usize);
 
+        std::thread::scope(|s| {
+            for agent in 0..AGENTS {
+                let (root, start) = (&dir.0, &start);
+                s.spawn(move || {
+                    start.wait();
+                    for id in (1..=MARKS_EACH).map(|n| agent * MARKS_EACH + n) {
+                        let result = call_tool(root, at(1), "mark_drafted", json!({ "prId": id, "commit": format!("c{id}") }));
+                        assert_eq!(result.get("isError"), None, "{result}");
+                    }
+                });
+            }
+        });
+
+        let drafts: Drafts = queue::read_json(&workspace.join(DRAFTS_FILE)).unwrap();
+        assert_eq!(drafts.len() as i64, AGENTS * MARKS_EACH);
+    }
+
+    /// Windows only: elsewhere a file lock doesn't stop a read.
+    #[cfg(windows)]
+    #[test]
+    fn markDrafted_draftsFileLockedByAnotherProgram_isAnErrorAndKeepsTheDrafts() {
+        let dir = with_queue("locked");
+        let path = queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE);
+        write_json_atomic(&path, &Drafts::from([(9, "c9".to_string())])).unwrap();
+        let held = File::options().read(true).write(true).open(&path).unwrap();
+        held.lock().unwrap();
+
+        let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" }));
+        drop(held);
+
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Workspace Work (id w1): Cannot read") && text.ends_with("Try again."), "{result}");
+        assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
+    }
+
+    #[test]
+    fn markDrafted_prThatLeftTheQueueAndCameBack_isStillSkipped() {
+        let dir = with_queue("came-back");
+        let path = queue::workspace_dir(&dir.0, "w1").join(QUEUE_FILE);
+        let full: Queue = queue::read_json(&path).unwrap();
         assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
+        write_json_atomic(&path, &make_queue(vec![Branch { branch: "ABC-1".into(), prs: vec![pr(2, "c2")] }])).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c2" })).get("isError"), None);
 
-        let drafts: Drafts = queue::read_json(&path.join(DRAFTS_FILE)).unwrap();
-        assert_eq!(drafts, Drafts::from([(1, "c1".to_string()), (99, "c99".to_string())]));
+        write_json_atomic(&path, &full).unwrap();
+
+        assert_eq!(text(&call_tool(&dir.0, at(2), "list_review_queue", json!({})))["branches"], json!([]));
     }
 
     #[test]
@@ -359,21 +976,6 @@ mod tests {
     }
 
     #[test]
-    fn markDrafted_sourceMissingForLong_prunesPastTheCap() {
-        let dir = with_queue("cap");
-        let path = queue::workspace_dir(&dir.0, "w1");
-        let mut q: Queue = queue::read_json(&path.join(QUEUE_FILE)).unwrap();
-        q.missing_sources = vec![queue::GITHUB.into()];
-        write_json_atomic(&path.join(QUEUE_FILE), &q).unwrap();
-        let old: Drafts = (1000..1000 + MAX_DRAFTS_WHILE_MISSING as i64).map(|id| (id, "c".to_string())).collect();
-        write_json_atomic(&path.join(DRAFTS_FILE), &old).unwrap();
-
-        assert_eq!(call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1" })).get("isError"), None);
-
-        assert_eq!(queue::read_json::<Drafts>(&path.join(DRAFTS_FILE)).unwrap(), Drafts::from([(1, "c1".to_string())]));
-    }
-
-    #[test]
     fn markDrafted_prNotInQueue_isAnError() {
         let dir = with_queue("notqueued");
         let result = call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 99, "commit": "c" }));
@@ -388,15 +990,26 @@ mod tests {
         assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
     }
 
-    #[test]
-    fn activeWorkspace_listsAndMarksInItsOwnFolder() {
-        let root = TempDir::new("workspaces");
+    /// Workspaces `a1` (Alpha) and `b2` (Beta), each queueing one PR at commit `c`: PR 1 and PR 2.
+    fn two_workspaces(name: &str) -> (TempDir, PathBuf, PathBuf) {
+        let root = TempDir::new(name);
         let (a, b) = (queue::workspace_dir(&root.0, "a1"), queue::workspace_dir(&root.0, "b2"));
         for (dir, id) in [(&a, 1), (&b, 2)] {
             std::fs::create_dir_all(dir).unwrap();
             write_json_atomic(&dir.join(QUEUE_FILE), &make_queue(vec![Branch { branch: "x".into(), prs: vec![pr(id, "c")] }])).unwrap();
         }
-        let activate = |id: &str| std::fs::write(root.0.join(queue::SETTINGS_FILE), json!({ "activeWorkspace": id }).to_string()).unwrap();
+        (root, a, b)
+    }
+
+    fn error_text(result: &Value) -> String {
+        assert_eq!(result["isError"], true, "{result}");
+        result["content"][0]["text"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn activeWorkspace_listsAndMarksInItsOwnFolder() {
+        let (root, a, b) = two_workspaces("workspaces");
+        let activate = |id: &str| settings(&root.0, id, &[("a1", "Alpha"), ("b2", "Beta")]);
 
         activate("b2");
         assert_eq!(text(&call_tool(&root.0, at(1), "list_review_queue", json!({})))["branches"][0]["prs"][0]["prId"], 2);
@@ -408,17 +1021,129 @@ mod tests {
     }
 
     #[test]
+    fn workspaceArgument_byIdOrName_usesThatOneWhileAnotherIsActive() {
+        let (root, a, b) = two_workspaces("pick");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+
+        for requested in ["b2", " b2 ", "Beta", " beta "] {
+            let body = text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
+            assert_eq!((&body["workspace"], &body["workspaceId"]), (&json!("Beta"), &json!("b2")), "{requested}");
+            assert_eq!(body["branches"][0]["prs"][0]["prId"], 2);
+        }
+        let marked = text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspace": "b2" })));
+
+        assert_eq!(marked["workspaceId"], "b2");
+        assert!(b.join(DRAFTS_FILE).exists() && !a.join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn workspaceArgument_unknown_isAnErrorListingTheWorkspaces() {
+        let (root, _, _) = two_workspaces("unknown-ws");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta"), ("../..", "Escape")]);
+
+        for requested in ["Gamma", "", "../..", "Escape"] {
+            let text = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": requested })));
+            assert_eq!(
+                text,
+                format!("Rado has no workspace {requested:?}; it has Alpha (id a1), Beta (id b2). Don't pick another: review nothing and tell the user.")
+            );
+        }
+    }
+
+    #[test]
+    fn workspaceArgument_nameTwoWorkspacesShare_asksForTheId() {
+        let (root, a, b) = two_workspaces("shared-name");
+        settings(&root.0, "a1", &[("a1", "Work"), ("b2", "work")]);
+
+        let text = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c", "workspace": "Work" })));
+
+        assert_eq!(
+            text,
+            r#"2 workspaces are named "Work": Work (id a1), work (id b2). Don't pick one: review nothing and tell the user to name a workspaceId in your instructions."#
+        );
+        assert!(!a.join(DRAFTS_FILE).exists() && !b.join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn unknownArgument_isAnErrorNotTheActiveWorkspace() {
+        let (root, a, _) = two_workspaces("unknown-arg");
+        let q = Queue { missing_sources: vec![queue::GITHUB.into()], ..make_queue(vec![]) };
+        write_json_atomic(&a.join(QUEUE_FILE), &q).unwrap();
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+
+        let listed = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspaceId": "b2" })));
+        let marked = error_text(&call_tool(&root.0, at(1), "mark_drafted", json!({ "prId": 2, "commit": "c", "workspaceId": "b2" })));
+
+        assert_eq!(listed, r#"list_review_queue takes no argument "workspaceId"; it takes workspace"#);
+        assert_eq!(marked, r#"mark_drafted takes no argument "workspaceId"; it takes commit, draftUrl, prId, workspace"#);
+        assert!(!a.join(DRAFTS_FILE).exists());
+
+        let not_an_object = send(&root.0, at(1), json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "list_review_queue", "arguments": "b2" } }));
+        assert_eq!(error_text(&not_an_object["result"]), r#"list_review_queue's arguments must be an object, not "b2""#);
+    }
+
+    #[test]
+    fn workspaceArgument_notAString_isAnErrorNotTheActiveWorkspace() {
+        let dir = with_queue("not-a-string");
+        let text = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "workspace": 1 })));
+        assert_eq!(text, "workspace must be a workspace's name or id, not 1");
+        assert!(!queue::workspace_dir(&dir.0, "w1").join(DRAFTS_FILE).exists());
+    }
+
+    #[test]
+    fn workspaceArgument_inactiveWorkspacesOldOrMissingQueue_saysToSwitchToIt() {
+        let (root, _, b) = two_workspaces("inactive");
+        settings(&root.0, "a1", &[("a1", "Alpha"), ("b2", "Beta")]);
+        let switch = "Rado polls only the active workspace: tell the user to switch to Beta in Rado, and review nothing until then.";
+
+        let stale = error_text(&call_tool(&root.0, at(31), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(stale.starts_with("Workspace Beta (id b2): Rado's review queue is 31 minutes old") && stale.ends_with(switch), "{stale}");
+
+        std::fs::write(b.join(QUEUE_FILE), "{").unwrap();
+        let damaged = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(damaged.contains("is not valid") && damaged.ends_with(switch), "{damaged}");
+
+        std::fs::remove_file(b.join(QUEUE_FILE)).unwrap();
+        let missing = error_text(&call_tool(&root.0, at(1), "list_review_queue", json!({ "workspace": "Beta" })));
+        assert!(missing.contains("has not written a review queue") && missing.ends_with(switch), "{missing}");
+    }
+
+    #[test]
     fn activeWorkspace_missingOrUnsafe_isAnError() {
-        for settings in [None, Some(r#"{"activeWorkspace":"../.."}"#)] {
+        let cases = [None, Some(json!({ "activeWorkspace": "../.." })), Some(json!({ "activeWorkspace": "../..", "workspaces": [{ "id": "../..", "name": "x" }] }))];
+        for file in cases {
             let dir = TempDir::new("unsafe");
             write_json_atomic(&dir.0.join(QUEUE_FILE), &make_queue(vec![])).unwrap();
-            if let Some(settings) = settings {
-                std::fs::write(dir.0.join(queue::SETTINGS_FILE), settings).unwrap();
+            if let Some(file) = &file {
+                write_json_atomic(&settings_path(&dir.0), file).unwrap();
             }
             let result = call_tool(&dir.0, at(1), "list_review_queue", json!({}));
-            assert_eq!(result["isError"], true, "{settings:?}");
-            assert!(result["content"][0]["text"].as_str().unwrap().contains("no active workspace"));
+            assert!(error_text(&result).contains("no active workspace"), "{file:?}");
         }
+    }
+
+    #[test]
+    fn activeWorkspace_invalidSettings_saysSoAndHowToRepairIt() {
+        let dir = TempDir::new("bad-settings");
+        std::fs::write(settings_path(&dir.0), "{").unwrap();
+        let text = call_tool(&dir.0, at(1), "list_review_queue", json!({}))["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("settings.json is not valid") && text.contains("and restart Rado"), "{text}");
+    }
+
+    #[test]
+    fn activeWorkspace_settingsWithAByteOrderMark_isRead() {
+        let dir = with_queue("bom-settings");
+        let path = settings_path(&dir.0);
+        let file = std::fs::read(&path).unwrap();
+        std::fs::write(&path, [b"\xEF\xBB\xBF".as_slice(), &file].concat()).unwrap();
+        assert_eq!(call_tool(&dir.0, at(1), "list_review_queue", json!({})).get("isError"), None);
+    }
+
+    #[test]
+    fn batch_isRefusedWithOneError() {
+        let dir = TempDir::new("batch");
+        let reply = send(&dir.0, at(0), json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]));
+        assert_eq!(reply["error"]["code"], -32600);
     }
 
     #[test]

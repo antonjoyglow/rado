@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DROPPED, lastingSaver, serialSaver } from "./save";
+import { DROPPED, lastingSaver, secretSaver, serialSaver } from "./save";
 
 type S = { a: number; b: number };
 
@@ -117,5 +117,47 @@ describe("lastingSaver", () => {
     expect(reverts).toEqual([{ a: 0, b: 0 }]);
     // The next view starts from the saved value, not the dropped one.
     expect(saver.latest).toEqual({ a: 0, b: 0 });
+  });
+});
+
+describe("secretSaver", () => {
+  it("saves a paste once when two commits of it overlap", async () => {
+    const sent: string[] = [];
+    let finish!: () => void;
+    const save = secretSaver((v) => new Promise<void>((resolve) => { sent.push(v); finish = resolve; }));
+    const enter = save("ghp_token");
+    const blur = save("ghp_token");
+    finish();
+    expect([await enter, await blur]).toEqual([true, false]);
+    expect(sent).toEqual(["ghp_token"]);
+  });
+
+  it("skips blank text", async () => {
+    const sent: string[] = [];
+    const save = secretSaver(async (v) => { sent.push(v); });
+    expect(await save("   ")).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
+  it("an edit saved while an earlier save runs is not saved twice", async () => {
+    const sent: string[] = [];
+    const done: (() => void)[] = [];
+    const save = secretSaver((v) => new Promise<void>((resolve) => { sent.push(v); done.push(resolve); }));
+    const first = save("v1");
+    const second = save("v2");
+    done[0]();
+    await first;
+    expect(await Promise.race([save("v2"), Promise.resolve("pending")])).toBe(false);
+    done[1]();
+    await second;
+    expect(sent).toEqual(["v1", "v2"]);
+  });
+
+  it("saves the same text again after a failure", async () => {
+    let fail = true;
+    const save = secretSaver(async () => { if (fail) throw "Credential Manager: denied"; });
+    await expect(save("pat")).rejects.toBe("Credential Manager: denied");
+    fail = false;
+    expect(await save("pat")).toBe(true);
   });
 });

@@ -160,8 +160,10 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .status { padding: 6px 14px; color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); }
 .status[data-kind="error"] { color: var(--urgent); }
 .hint { margin-top: 4px; color: var(--normal); }
+.status .failed { margin-top: 4px; color: var(--urgent); }
+.status .failed:empty { display: none; }
 .newer { margin-top: 4px; color: var(--fg); }
-.newer .link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
+.newer .link, .empty .link { padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; }
 .spinner {
   display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
   border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
@@ -222,6 +224,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 }
 .row .member[data-assigned="false"] { border-style: dashed; color: var(--muted); }
 .row .member:hover { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.row .member.agent-draft:not(:hover) { border-color: var(--accent); color: var(--accent); }
+.row span.agent-draft { padding: 0 6px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
 .row .dot { width: 8px; height: 8px; margin-top: calc(6px * var(--text-scale, 1)); border-radius: 50%; background: var(--low); }
 .row[data-tier="urgent"] .dot { background: var(--urgent); }
 .row[data-tier="normal"] .dot { background: var(--normal); }
@@ -243,7 +247,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
    Any touch screen keeps them shown: a tap can't hover, even on a laptop whose main pointer is a mouse. */
 .row .actions { opacity: 0; pointer-events: none; }
 .row:hover .actions, .row:has(:focus-visible) .actions, .row:has([data-flash]) .actions { opacity: 1; pointer-events: auto; }
-.row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; }
+/* At opacity 0 the times paint above the actions (their own stacking context) and would take the actions' clicks. */
+.row:hover .age, .row:has(:focus-visible) .age, .row:has([data-flash]) .age { opacity: 0; pointer-events: none; }
 @media (any-pointer: coarse) {
   .row .side { row-gap: 6px; }
   .row .actions { grid-area: 2 / 1; flex-direction: row; opacity: 1; pointer-events: auto; }
@@ -315,3 +320,14 @@ header { position: relative; }
 .ws-editor { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .ws-editor h2 { margin: 6px 0 0; font-size: calc(13px * var(--text-scale, 1)); color: var(--fg); }
 .settings button.danger { border-color: var(--urgent); color: var(--urgent); }
+
+/* Windows contrast themes (forced colours) paint every background in the theme's background colour and drop
+   box-shadows; only system colours survive. The SVG bird is exempt (preserve-parent-color), so it would keep Rado's
+   colours, which its glow and fade in bird.ts read too. The dots keep Rado's tier colours, so the ring makes them
+   show on the theme's background. */
+@media (forced-colors: active) {
+  header .bird { --fg: CanvasText; --accent: Highlight; }
+  .row .dot { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .tab .next-dot { background: Highlight; }
+  .row[data-next="true"] { border-left: 3px solid Highlight; padding-left: calc(14px - 3px); }
+}

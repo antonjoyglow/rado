@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Member, ReviewItem } from "./api";
-import { age, ageColumn, ago, datesTooltip, HEAT_CAP, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, pillCounts, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
+import { age, ageColumn, ago, datesTooltip, draftMarker, HEAT_CAP, hideButton, LIST_WIDTH_PERCENT, prLabel, heat, newestFirst, nextReview, parseWhole, parseMinutes, parseScale, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP } from "./format";
 
 const item = (over: Partial<ReviewItem>): ReviewItem => ({
   key: "pr:1", id: 1, provider: "ado", number: 1, title: "t", repo: "r", branch: "feature/x", members: [], newestAgeHours: 1, ticket: null, author: "a", target: "dev", releaseTarget: false, ageHours: 1,
   createdAt: "2026-11-04T11:00:00Z", updatedAt: null,
-  required: false, draft: false, state: "needsReview", score: 50, tier: "normal", hidden: false, approvals: 0, objections: 0, comments: null,
+  required: false, viaGroup: false, draft: false, state: "needsReview", score: 50, tier: "normal", hidden: false, approvals: 0, objections: 0, comments: null,
   actionable: over.state === undefined || over.state === "needsReview" || over.state === "reReview",
   ...over,
 });
@@ -13,7 +13,8 @@ const item = (over: Partial<ReviewItem>): ReviewItem => ({
 describe("nextReview", () => {
   const rows = [
     item({ key: "mine", state: "mine", actionable: true }),
-    item({ key: "hidden", hidden: true }),
+    // Rust never marks a hidden row actionable.
+    item({ key: "hidden", hidden: true, actionable: false }),
     item({ key: "stale", state: "stale" }),
     item({ key: "first" }),
     item({ key: "second", state: "reReview" }),
@@ -64,19 +65,6 @@ describe("ago", () => {
   ])("%s -> %s", (iso, text) => {
     expect(ago(iso, now)).toBe(text);
   });
-});
-
-describe("pillCounts", () => {
-  it("noItems_isZeroZero", () => expect(pillCounts([])).toEqual({ reviews: 0, mine: 0 }));
-  it("onlyApprovedOrWaiting_isZeroZero", () =>
-    expect(pillCounts([item({ state: "approved" }), item({ state: "waitingOnAuthor" })])).toEqual({ reviews: 0, mine: 0 }));
-  it("reviewsToDo_countLeft", () =>
-    expect(pillCounts([item({ state: "needsReview" }), item({ state: "reReview" })])).toEqual({ reviews: 2, mine: 0 }));
-  it("myPrNeedingWork_countsRight", () =>
-    expect(pillCounts([item({ state: "mine", actionable: true }), item({ state: "needsReview" })])).toEqual({ reviews: 1, mine: 1 }));
-  it("myPrNotNeedingWork_isNotCounted", () => expect(pillCounts([item({ state: "mine" })])).toEqual({ reviews: 0, mine: 0 }));
-  it("hiddenRows_areNotCounted", () =>
-    expect(pillCounts([item({ hidden: true }), item({ state: "mine", actionable: true, hidden: true })])).toEqual({ reviews: 0, mine: 0 }));
 });
 
 describe("heat", () => {
@@ -139,7 +127,20 @@ describe("parseWhole", () => {
 });
 
 const member = (over: Partial<Member>): Member => ({
-  id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", ...over,
+  id: 1, provider: "ado", number: 1, repo: "WebApp", title: "t", url: "u", state: "mine", createdAt: "C", updatedAt: "U", agentDraft: null, ...over,
+});
+
+describe("draftMarker", () => {
+  it("isNull_withoutADraft", () => expect(draftMarker(member({}))).toBeNull());
+
+  it("linked_namesWhereTheDraftOpens", () =>
+    expect(draftMarker(member({ agentDraft: { host: "github.com" } }))).toEqual({ title: "Open the agent's draft review of WebApp !1 (github.com)", linked: true }));
+
+  it("withoutALink_saysRadoHasNone", () =>
+    expect(draftMarker(member({ agentDraft: { host: null } }))).toEqual({
+      title: "An agent drafted a review of WebApp !1 at its latest commit; Rado has no link to it",
+      linked: false,
+    }));
 });
 
 describe("rowFacts", () => {
@@ -187,4 +188,12 @@ describe("parseMinutes", () => {
     "%s -> %s",
     (text, value) => expect(parseMinutes(text)).toBe(value),
   );
+});
+
+describe("hideButton", () => {
+  it("rowOfOthersPrs_isNotMine", () =>
+    expect(hideButton(item({ members: [member({ state: "needsReview" })] })).label).toBe("Not mine"));
+  it("reviewLeadingABranchWithMyPr_isHide", () =>
+    expect(hideButton(item({ state: "needsReview", members: [member({ id: 2, state: "needsReview" }), member({ id: 1, state: "mine" })] })).label).toBe("Hide"));
+  it("hiddenRow_isShow", () => expect(hideButton(item({ hidden: true, actionable: false })).label).toBe("Show"));
 });
