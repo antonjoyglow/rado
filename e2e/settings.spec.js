@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { open, calls, setFail, clearFail, setDelay, emit } from "./harness.js";
+import { open, calls, setFail, clearFail, setDelay, emit, settle } from "./harness.js";
 import { snapshot, item, workspace } from "./fixtures.js";
 
 const openSettings = async (page, snap = snapshot()) => {
@@ -27,7 +27,7 @@ test.describe("pasted tokens", () => {
     await pat(page).fill("secret-pat-2");
     await pat(page).press("Enter");
     await page.getByRole("button", { name: "Save" }).first().click();
-    await page.waitForTimeout(700);
+    await settle(page, "save_pat");
     expect(await calls(page, "save_pat")).toHaveLength(1);
   });
 
@@ -73,7 +73,6 @@ test.describe("pasted tokens", () => {
     await expect(page.getByText("Paste the PAT first")).toBeVisible();
     await pat(page).fill("    ");
     await pat(page).press("Enter");
-    await page.waitForTimeout(200);
     expect(await calls(page, "save_pat")).toHaveLength(0);
   });
 
@@ -100,16 +99,19 @@ test.describe("organization field", () => {
   test("after a save the field keeps the pasted link", async ({ page }) => {
     await openSettings(page);
     await page.evaluate(() => {
-      window.__QA.handlers.save_workspace = ({ workspace }) => {
-        const s = window.__QA.responses.get_snapshot;
+      window.__e2e.handlers.save_workspace = ({ workspace }) => {
+        const s = window.__e2e.responses.get_snapshot;
         s.settings.workspaces[0] = { ...workspace, azureDevOps: { ...workspace.azureDevOps, organization: "fabrikam" } };
-        setTimeout(() => window.__QA.emit("snapshot", s), 10);
+        setTimeout(() => {
+          window.__e2e.emit("snapshot", s);
+          window.__e2e.snapshotSent = true;
+        }, 10);
         return null;
       };
     });
     await page.getByLabel("Organization").fill("https://dev.azure.com/fabrikam/Proj/_git/web");
     await page.getByLabel("Organization").press("Tab");
-    await page.waitForTimeout(300);
+    await page.waitForFunction(() => window.__e2e.snapshotSent);
     await expect(page.getByLabel("Organization")).toHaveValue("https://dev.azure.com/fabrikam/Proj/_git/web");
   });
 });
@@ -123,7 +125,8 @@ test.describe("save queue", () => {
       await teams.fill(v);
       await teams.press("Tab");
     }
-    await page.waitForTimeout(800);
+    await expect.poll(async () => (await calls(page, "save_workspace")).at(-1)?.args.workspace.azureDevOps.teams.join("|")).toBe("A|B|C");
+    await settle(page, "save_workspace");
     const sent = (await calls(page, "save_workspace")).map((c) => c.args.workspace.azureDevOps.teams.join("|"));
     // Queued saves send the workspace as it is when their turn comes, so they coalesce to the latest value.
     expect(sent[0]).toBe("A");
@@ -134,15 +137,15 @@ test.describe("save queue", () => {
     await openSettings(page);
     await page.evaluate(() => {
       let n = 0;
-      window.__QA.handlers.save_workspace = () => new Promise((res, rej) => setTimeout(() => (++n === 1 ? rej("disk full") : res(null)), 200));
+      window.__e2e.handlers.save_workspace = () => new Promise((res, rej) => setTimeout(() => (++n === 1 ? rej("disk full") : res(null)), 200));
     });
     await page.getByLabel("My teams").fill("T1");
     await page.getByLabel("My teams").press("Tab");
     await page.getByLabel("Watched repos").fill("o/r");
     await page.getByLabel("Watched repos").press("Tab");
-    await page.waitForTimeout(800);
-    expect((await calls(page, "save_workspace")).length).toBe(1);
     await expect(page.getByText("disk full")).toBeVisible();
+    await settle(page, "save_workspace");
+    expect((await calls(page, "save_workspace")).length).toBe(1);
     await expect(page.getByText(/an earlier change failed to save/)).toBeVisible();
     await expect(page.getByLabel("My teams")).toHaveValue("");
   });

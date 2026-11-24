@@ -2,7 +2,8 @@ import { test, expect } from "@playwright/test";
 import { open, calls, emit } from "./harness.js";
 import { snapshot, item, member, workspace } from "./fixtures.js";
 
-const docOverflow = (page) => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+// The list scrolls inside .body (html and body clip), so sideways overflow shows there, not on the document.
+const sideOverflow = (page) => page.locator(".body").evaluate((b) => b.scrollWidth - b.clientWidth);
 
 test("3000 rows render and a re-render stays under 2 s", async ({ page }) => {
   const items = Array.from({ length: 3000 }, (_, i) => item({ id: 10_000 + i, title: `PR number ${i}` }));
@@ -10,7 +11,7 @@ test("3000 rows render and a re-render stays under 2 s", async ({ page }) => {
   await expect(page.locator(".row")).toHaveCount(3000, { timeout: 20000 });
   const rerender = await page.evaluate(async (s) => {
     const t = performance.now();
-    window.__QA.emit("snapshot", s);
+    window.__e2e.emit("snapshot", s);
     await new Promise((r) => requestAnimationFrame(() => r()));
     return performance.now() - t;
   }, snapshot({ items }));
@@ -26,13 +27,13 @@ test("long and unicode names don't overflow sideways at 360 px", async ({ page }
   ];
   const ws = [workspace("a", "工作区 🚀 with a really long workspace name that should truncate")];
   await open(page, snapshot({ items, settings: { workspaces: ws, activeWorkspace: "a" } }));
-  expect(await docOverflow(page)).toBeLessThanOrEqual(0);
+  expect(await sideOverflow(page)).toBeLessThanOrEqual(0);
 });
 
 test("an aggregate with 25 members wraps inside the window", async ({ page }) => {
   const members = Array.from({ length: 25 }, (_, i) => member({ repo: `repo-${i}`, agentDraft: i % 3 ? null : { host: "github.com" } }));
   await open(page, snapshot({ items: [item({ members, key: "big" })] }));
-  expect(await docOverflow(page)).toBeLessThanOrEqual(0);
+  expect(await sideOverflow(page)).toBeLessThanOrEqual(0);
 });
 
 test("in a 300x200 window the header controls stay reachable", async ({ page }) => {
@@ -123,7 +124,6 @@ test("typed poll minutes outside 1–120 are refused", async ({ page }) => {
     const before = (await calls(page, "save_settings")).length;
     await input.fill(v);
     await input.press("Tab");
-    await page.waitForTimeout(50);
     expect((await calls(page, "save_settings")).length, `typed ${v}`).toBe(before);
   }
 });

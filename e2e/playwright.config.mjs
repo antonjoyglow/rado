@@ -14,7 +14,8 @@ export default defineConfig({
     viewport: { width: 480, height: 640 },
   },
   webServer: {
-    command: `npx vite --host 127.0.0.1 --port ${port} --strictPort`,
+    // The built app, not the dev server: a cold dev server can re-optimize dependencies and reload pages mid-test.
+    command: `npx vite build && npx vite preview --host 127.0.0.1 --port ${port} --strictPort`,
     cwd: "..",
     url: `http://127.0.0.1:${port}`,
     reuseExistingServer: !process.env.CI,

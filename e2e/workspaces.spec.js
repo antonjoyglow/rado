@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { open, calls, emit } from "./harness.js";
+import { open, calls, emit, setDelay, setFail, settle } from "./harness.js";
 import { snapshot, item, workspace } from "./fixtures.js";
 
 const three = () => [workspace("a", "Alpha"), workspace("b", "Beta"), workspace("c", "Gamma")];
@@ -72,9 +72,9 @@ test.describe("switching workspaces", () => {
   test("rapid Ctrl+→ presses with a slow backend all ask for the next workspace", async ({ page }) => {
     const ws = Array.from({ length: 6 }, (_, i) => workspace(`w${i}`, `W${i}`));
     await open(page, snapshot({ settings: { workspaces: ws, activeWorkspace: "w0" } }));
-    await page.evaluate(() => (window.__QA.delay.switch_workspace = 200));
+    await setDelay(page, "switch_workspace", 200);
     for (let i = 0; i < 10; i++) await page.keyboard.press("Control+ArrowRight");
-    await page.waitForTimeout(500);
+    await settle(page, "switch_workspace");
     // The mock sends no new snapshot, so the active workspace stays w0.
     expect(new Set((await calls(page, "switch_workspace")).map((c) => c.args.id))).toEqual(new Set(["w1"]));
   });
@@ -100,7 +100,7 @@ test.describe("ticket chip", () => {
   test("a failed ticket open goes to the status line", async ({ page }) => {
     const ws = [workspace("a", "A", { tracker: { kind: "linear", workspace: "example", keys: [] } })];
     await open(page, snapshot({ settings: { workspaces: ws, activeWorkspace: "a" }, items: [item({ ticket: "ENG-7" })] }));
-    await page.evaluate(() => (window.__QA.fail.open_ticket = "No tracker for this workspace"));
+    await setFail(page, "open_ticket", "No tracker for this workspace");
     await page.getByRole("button", { name: "ENG-7" }).click();
     await expect(page.locator(".status .failed")).toHaveText("No tracker for this workspace");
   });
@@ -136,7 +136,6 @@ test.describe("text size", () => {
       const before = (await calls(page, "save_settings")).length;
       await input.fill(v);
       await input.press("Tab");
-      await page.waitForTimeout(50);
       expect((await calls(page, "save_settings")).length, `typed ${v}`).toBe(before);
     }
   });

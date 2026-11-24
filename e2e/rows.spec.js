@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { open, calls, setFail, clearFail } from "./harness.js";
-import { snapshot, item, member } from "./fixtures.js";
+import { open, calls, setFail, clearFail, settle } from "./harness.js";
+import { snapshot, item, member, workspace } from "./fixtures.js";
 
 test("the list renders a row with its title and the tab count", async ({ page }) => {
   await open(page, snapshot({ items: [item({ id: 1, title: "Fix login" })] }));
@@ -125,11 +125,11 @@ test.describe("status line errors", () => {
     await open(page, snapshot({ items: [item({ id: 33, key: "k33" })] }));
     await page.evaluate(() => {
       let n = 0;
-      window.__QA.handlers.open_row = () => (++n === 1 ? new Promise((_, rej) => setTimeout(() => rej("late failure"), 500)) : null);
+      window.__e2e.handlers.open_row = () => (++n === 1 ? new Promise((_, rej) => setTimeout(() => rej("late failure"), 500)) : null);
     });
     await page.locator(".row .title").first().click();
     await page.locator(".row .title").first().click();
-    await page.waitForTimeout(800);
+    await settle(page, "open_row");
     await expect(page.locator(".status .failed")).toHaveText("");
   });
 
@@ -143,8 +143,7 @@ test.describe("status line errors", () => {
   });
 
   test("a failed workspace switch reports; opening Settings clears it", async ({ page }) => {
-    const ws = (id, name) => ({ id, name, azureDevOps: { organization: "o", teams: [] }, github: { repos: [] }, tracker: { kind: "none" } });
-    await open(page, snapshot({ items: [item({ id: 35 })], settings: { workspaces: [ws("a", "A"), ws("b", "B")], activeWorkspace: "a" } }));
+    await open(page, snapshot({ items: [item({ id: 35 })], settings: { workspaces: [workspace("a", "A"), workspace("b", "B")], activeWorkspace: "a" } }));
     await setFail(page, "switch_workspace", "Couldn't save the switch: access denied");
     await page.keyboard.press("Control+ArrowRight");
     await expect(page.locator(".status .failed")).toHaveText("Couldn't save the switch: access denied");
