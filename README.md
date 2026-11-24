@@ -284,6 +284,9 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 npm install
 npm test             # TypeScript and browser extension unit tests
 npm run test:rust    # Rust unit tests
+npm run check        # tsc, unit tests, Rust tests and clippy, as CI runs them
+npm run e2e          # UI in Chromium with Tauri's IPC mocked (first: npx playwright install chromium)
+npm run e2e:webview2 # smoke test of the real app in WebView2; start it with e2e\webview2\start-app.cmd
 npm run app:dev      # run with hot reload
 npm run app:build    # release exe + NSIS installer under src-tauri/target/release/bundle/nsis
 npm run app:update   # build, then update the installed Rado in place and restart it
@@ -293,20 +296,24 @@ The installer updates an existing install in place: it skips Tauri's "uninstall 
 
 The installer and uninstaller also stop every `rado-mcp.exe` running from the install folder (one that won't stop is renamed to `rado-mcp.exe.old` and deleted next time). Claude sessions using it lose the `rado` tools until they restart; new sessions start the new one.
 
-`app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install, closes a running Rado and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`): run directly from a Claude desktop session, it would install into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. To update by hand, run the setup exe with the same flags.
+`app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install, closes a running Rado and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`), because an installer started from a Claude desktop session installs into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. Windows now refuses that WMI start from a Claude session (`Win32_Process.Create` error 2); `app:update` then prints the installer's path and exits with 1. So from a Claude session, never install: hand the owner a `.cmd` naming the exact installer to double-click from Explorer. To update by hand, run the setup exe with the same flags.
+
+`scripts\install-release.cmd <version>` installs a published release: it downloads `Rado_<version>_x64-setup.exe` from that version's GitHub release, runs it with `/P /UPDATE /R` and prints the installed version. Double-click it from Explorer or run it from a terminal outside the Claude app.
 
 The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. Without it, Rust can pick a Visual Studio install that has no C++ libraries.
 
 ## Releasing
 
-Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: tests, build, clippy, and a check that `src/bindings` matches the Rust types (run `npm run test:rust` and commit `src/bindings`, deleting the file of any type you removed or renamed).
+Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: tests, build, the mocked UI suite (`npm run e2e`), clippy on all targets, and a check that `src/bindings` matches the Rust types (run `npm run test:rust` and commit `src/bindings`, deleting the file of any type you removed or renamed).
 
 1. Cut the release branch from main: `git fetch origin && git switch -c release/0.11.0 origin/main && git push -u origin release/0.11.0`.
-2. Feature PRs target it (`gh pr create --base release/0.11.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog; the squash subject is the PR title.
-3. To release, on the release branch run `npm run release -- 0.11.0` (`--dry-run` shows what it would write and changes nothing). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` and `browser-extension/manifest.json`, and writes a dated `## [0.11.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
-4. Edit the section, commit, and open the release PR from `release/0.11.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
-5. Tag the merge on main and push the tag: `git fetch origin && git tag v0.11.0 origin/main && git push origin v0.11.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing or empty.
-6. Cut the next release branch from main after tagging (`release/0.12.0`). A patch release also starts from main (`release/0.11.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again.
+2. Feature PRs target it (`gh pr create --base release/0.11.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog; the squash subject is the PR title. Merging a PR closes the issues its body lists as `Closes #n` or `Fixes #n` (`.github/workflows/close-issues-on-release-merge.yml`). Claude sessions working one issue each follow [docs/issue-session.md](docs/issue-session.md).
+3. After the last feature PR merges and before QA, review the whole release once: a blind review of `git diff main...release/0.11.0` that looks for interactions between PRs (shared state, load paths, migrations, data-file formats).
+4. To release, on the release branch run `npm run release -- 0.11.0` (`--dry-run` shows what it would write and changes nothing). It sets the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json` and `browser-extension/manifest.json`, and writes a dated `## [0.11.0]` section into `CHANGELOG.md` from the commits since the last `v*` tag. Rerunning keeps an existing section as edited and prints the `feat` and `fix` PRs it doesn't mention yet; `--force` regenerates it, dropping hand edits.
+5. Edit the section, commit, and open the release PR from `release/0.11.0` into `main`. Merge it with a merge commit, not squash, so the feature commits stay visible.
+6. Tag the merge on main and push the tag: `git fetch origin && git tag v0.11.0 origin/main && git push origin v0.11.0`. `.github/workflows/release.yml` builds the installer and publishes it with the changelog section as the release notes; it fails if the section is missing or empty.
+7. Cut the next release branch from main after tagging (`release/0.12.0`). A patch release also starts from main (`release/0.11.1`), never from the old release branch: that branch never sees its own tag, so the script would list the whole previous release again. Tooling changes merged into `main` during a release reach the open release branch only when main is merged into it.
+8. Remove the worktrees of the release's merged branches (`git worktree remove <path>`, then `git worktree prune`).
 
 ## License
 

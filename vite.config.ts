@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { configDefaults, defineConfig } from "vitest/config";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
@@ -26,5 +26,9 @@ export default defineConfig(() => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+  // Claude worktrees under .claude/ hold whole copies of the repo, tests included; e2e/ is Playwright's.
+  test: {
+    exclude: [...configDefaults.exclude, ".claude/**", "e2e/**"],
   },
 }));

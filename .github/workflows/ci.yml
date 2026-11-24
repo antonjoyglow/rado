@@ -5,7 +5,25 @@ on:
     branches: [main, "release/**"]
 
 jobs:
-  check:
+  node:
+    runs-on: ubuntu-latest
+    # Playwright's image pins the browser and the fonts; with the runner's own fonts the e2e layout cases
+    # measure differently. Keep its version equal to @playwright/test's.
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
+      options: --user 1001
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run e2e
+
+  rust:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -19,9 +37,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      # The Rust build embeds dist/ (tauri.conf.json frontendDist), so it needs the frontend built.
       - run: npm ci
-      - run: npm test
-      - run: npm run build
+      - run: npx vite build
       # Removed first, so a file left behind by a removed or renamed Rust type shows as drift too.
       - run: rm src/bindings/*.ts
         shell: bash
@@ -34,4 +52,4 @@ jobs:
             echo "$changed"; git diff src/bindings
             echo "::error::src/bindings is out of date: run cargo test, delete any file listed as D, and commit the result"; exit 1
           fi
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
