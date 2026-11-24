@@ -1,0 +1,28 @@
+name: Close issues on release-branch merge
+
+# GitHub only closes "Closes #n" issues when a PR merges into the default branch, and feature PRs merge into release/**.
+on:
+  pull_request:
+    types: [closed]
+    branches: ["release/**"]
+
+permissions:
+  issues: write
+
+jobs:
+  close:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close the issues the PR body closes or fixes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BODY: ${{ github.event.pull_request.body }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          for n in $(printf '%s\n' "$BODY" | grep -ioE '^[[:space:]]*(close[sd]?|fix(e[sd])?)[[:space:]]+#[0-9]+' | grep -oE '[0-9]+$' | sort -un); do
+            gh issue close "$n" --comment "Fixed by #$PR, merged into $BASE." || echo "::warning::Could not close #$n"
+          done

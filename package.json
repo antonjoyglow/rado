@@ -15,7 +15,8 @@
     "app:build": "scripts\\msvc.cmd tauri build",
     "app:update": "scripts\\update.cmd",
     "mcp:build": "scripts\\msvc.cmd cargo build --release --manifest-path src-tauri/Cargo.toml --bin rado-mcp",
-    "test:rust": "scripts\\msvc.cmd cargo test --manifest-path src-tauri/Cargo.toml"
+    "test:rust": "scripts\\msvc.cmd cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "tsc && vitest run && npm run test:rust && scripts\\msvc.cmd cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
