@@ -12,5 +12,11 @@ if not defined SETUP (echo No installer found under %CARGO_TARGET_DIR%\release\b
 echo Updating Rado with %SETUP% ...
 rem run-outside.ps1 starts it outside the Claude desktop app's package, which would redirect the install.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-outside.ps1" "%CARGO_TARGET_DIR%\release\bundle\nsis\%SETUP%" "/P /UPDATE /R"
+if "%errorlevel%"=="99" (
+  echo Windows refused to start the installer outside the Claude app. Install it yourself: double-click a .cmd that runs
+  echo   "%CARGO_TARGET_DIR%\release\bundle\nsis\%SETUP%" /P /UPDATE /R
+  echo from Explorer, or run that line in a terminal opened outside the Claude app.
+  exit /b 1
+)
 if not "%errorlevel%"=="0" (echo The installer failed with exit code %errorlevel% & exit /b 1)
 echo Rado is updated and running.
