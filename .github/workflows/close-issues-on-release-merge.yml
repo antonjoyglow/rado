@@ -24,5 +24,5 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
         run: |
           for n in $(printf '%s\n' "$BODY" | grep -ioE '^[[:space:]]*(close[sd]?|fix(e[sd])?)[[:space:]]+#[0-9]+' | grep -oE '[0-9]+$' | sort -un); do
-            gh issue close "$n" --comment "Fixed by #$PR, merged into $BASE."
+            gh issue close "$n" --comment "Fixed by #$PR, merged into $BASE." || echo "::warning::Could not close #$n"
           done
