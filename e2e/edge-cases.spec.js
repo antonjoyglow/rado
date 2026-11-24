@@ -2,9 +2,14 @@ import { test, expect } from "@playwright/test";
 import { open, calls, emit } from "./harness.js";
 import { snapshot, item, member, workspace } from "./fixtures.js";
 
-// html and body clip, so sideways overflow shows on the header and on .body (where the list scrolls), not on the document.
+// html and body clip, so sideways overflow shows on .body (where the list scrolls) and as header controls
+// pushed past the window's edge, not on the document.
 const sideOverflow = (page) =>
-  page.evaluate(() => Math.max(...[...document.querySelectorAll("header, .body")].map((e) => e.scrollWidth - e.clientWidth)));
+  page.evaluate(() => {
+    const body = document.querySelector(".body");
+    const close = document.querySelector('header [title="Close"]').getBoundingClientRect();
+    return Math.max(body.scrollWidth - body.clientWidth, close.right - window.innerWidth);
+  });
 
 test("3000 rows render and a re-render stays under 2 s", async ({ page }) => {
   const items = Array.from({ length: 3000 }, (_, i) => item({ id: 10_000 + i, title: `PR number ${i}` }));
