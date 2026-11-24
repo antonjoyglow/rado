@@ -1,0 +1,4 @@
+{
+  "identifier": "dev.antonis.rado.e2e",
+  "build": { "devUrl": "http://127.0.0.1:1420", "beforeDevCommand": "npm run dev -- --host 127.0.0.1" }
+}
