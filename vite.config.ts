@@ -27,8 +27,8 @@ export default defineConfig(() => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-  // Claude worktrees under .claude/ hold whole copies of the repo, tests included.
+  // Claude worktrees under .claude/ hold whole copies of the repo, tests included; e2e/ is Playwright's.
   test: {
-    exclude: [...configDefaults.exclude, ".claude/**"],
+    exclude: [...configDefaults.exclude, ".claude/**", "e2e/**"],
   },
 }));

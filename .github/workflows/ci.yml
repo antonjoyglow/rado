@@ -7,6 +7,11 @@ on:
 jobs:
   node:
     runs-on: ubuntu-latest
+    # Playwright's image pins the browser and the fonts; with the runner's own fonts the e2e layout cases
+    # measure differently. Keep its version equal to @playwright/test's.
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
+      options: --user 1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -16,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: npm run e2e
 
   rust:
     runs-on: windows-latest

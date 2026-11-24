@@ -285,6 +285,8 @@ npm install
 npm test             # TypeScript and browser extension unit tests
 npm run test:rust    # Rust unit tests
 npm run check        # tsc, unit tests, Rust tests and clippy, as CI runs them
+npm run e2e          # UI in Chromium with Tauri's IPC mocked (first: npx playwright install chromium)
+npm run e2e:webview2 # smoke test of the real app in WebView2; start it with e2e\webview2\start-app.cmd
 npm run app:dev      # run with hot reload
 npm run app:build    # release exe + NSIS installer under src-tauri/target/release/bundle/nsis
 npm run app:update   # build, then update the installed Rado in place and restart it
@@ -302,7 +304,7 @@ The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads t
 
 ## Releasing
 
-Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: tests, build, clippy on all targets, and a check that `src/bindings` matches the Rust types (run `npm run test:rust` and commit `src/bindings`, deleting the file of any type you removed or renamed).
+Features collect on a `release/x.y.z` branch and ship together; `main` always equals the last release. Pull requests into `main` and `release/**` run `.github/workflows/ci.yml`: tests, build, the mocked UI suite (`npm run e2e`), clippy on all targets, and a check that `src/bindings` matches the Rust types (run `npm run test:rust` and commit `src/bindings`, deleting the file of any type you removed or renamed).
 
 1. Cut the release branch from main: `git fetch origin && git switch -c release/0.11.0 origin/main && git push -u origin release/0.11.0`.
 2. Feature PRs target it (`gh pr create --base release/0.11.0`), are squash-merged, have conventional titles (`feat(scope): …`, `fix: …`) and bump no versions. Only `feat` and `fix` squash subjects reach the changelog; the squash subject is the PR title. Merging a PR closes the issues its body lists as `Closes #n` or `Fixes #n` (`.github/workflows/close-issues-on-release-merge.yml`). Claude sessions working one issue each follow [docs/issue-session.md](docs/issue-session.md).
