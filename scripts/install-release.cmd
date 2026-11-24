@@ -6,6 +6,7 @@ setlocal
 set "VERSION=%~1"
 if not defined VERSION set /p "VERSION=Rado version to install (e.g. 0.11.0): "
 if not defined VERSION (echo No version given. & pause & exit /b 1)
+if /i "%VERSION:~0,1%"=="v" set "VERSION=%VERSION:~1%"
 set "URL=https://github.com/antonjoyglow/rado/releases/download/v%VERSION%/Rado_%VERSION%_x64-setup.exe"
 set "SETUP=%TEMP%\Rado_%VERSION%_x64-setup.exe"
 echo Downloading %URL%

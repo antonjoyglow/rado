@@ -12,7 +12,7 @@ Keep a good pace: no tests after every edit, only the full check (step 4). Don't
    - the tests you'll add;
    - the behaviour that changes for existing users' data.
 2. **Grill the plan.** Give the plan and the issue to one blind reviewer subagent (model opus, effort high). Ask what is wrong or missing, what is simpler, and which existing test or doc contradicts it. Fix the plan. Ask the owner only when a decision has no sensible default.
-3. **Implement**, with regression tests in the existing suites (cargo `mod tests`, vitest). UI changes also add a case to `e2e/` and run `npm run e2e`; behaviour that only WebView2 shows (focus, window size, native dialogs) also runs `npm run e2e:webview2`. Code rules:
+3. **Implement**, with regression tests in the existing suites (cargo `mod tests`, vitest). Code rules:
    - comments only for constraints the code can't show;
    - no dead code;
    - English only;
@@ -29,7 +29,7 @@ Keep a good pace: no tests after every edit, only the full check (step 4). Don't
    - Push as GitHub account `antonjoyglow` (the active gh account).
    - Open the PR into `<release branch>`. Body: what changed, how it was checked (test counts), what is not verified, a `Closes #n` line per issue (or `Part of #n` when the issue keeps open parts), and last the generated-with line. Merging closes the `Closes`/`Fixes` issues (`.github/workflows/close-issues-on-release-merge.yml`); don't close them by hand.
    - Merge with `gh pr merge <pr> -R antonjoyglow/rado --auto --squash` and stop; don't watch CI yourself. If CI fails or the base moved, the orchestrator tells you: merge `origin/<release branch>` into your branch (never rebase or force push), re-test, push.
-7. **Report** in your last message, under 150 words: PR link, merge state, test counts, review rounds and what they found, and anything not verified (UI you didn't see in `e2e/` or the running app).
+7. **Report** in your last message, under 150 words: PR link, merge state, test counts, review rounds and what they found, and anything not verified.
 
 ## Several issues in one session
 
@@ -44,7 +44,7 @@ Stay in your worktree and cut one branch per PR with `git switch -c <branch> ori
 - push to `main`, tag or release;
 - edit files outside your own worktree.
 
-Windows: Git Bash mangles backslashes in heredocs and inline scripts, so write scripts with the Write tool. Parallel shells share one working directory, so start commands with `cd <worktree> && `. A force push is refused.
+Windows: Git Bash mangles backslashes in heredocs and inline scripts, so write scripts with the Write tool. Parallel shells share one working directory, so start commands with `cd <worktree> && `.
 
 ## Orchestrator
 

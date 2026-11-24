@@ -284,7 +284,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 npm install
 npm test             # TypeScript and browser extension unit tests
 npm run test:rust    # Rust unit tests
-npm run check        # tsc, unit tests, Rust tests and clippy: what CI runs, minus the build
+npm run check        # tsc, unit tests, Rust tests and clippy, as CI runs them
 npm run app:dev      # run with hot reload
 npm run app:build    # release exe + NSIS installer under src-tauri/target/release/bundle/nsis
 npm run app:update   # build, then update the installed Rado in place and restart it

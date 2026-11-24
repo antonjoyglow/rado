@@ -4,9 +4,11 @@ param([Parameter(Mandatory)][string]$Exe, [string]$Arguments = '')
 # redirected into the app's private folder, so an installer started from a Claude session would install
 # there instead of into the real %LOCALAPPDATA%\Rado. WMI starts the process outside the package.
 $ErrorActionPreference = 'Stop'
-$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "`"$Exe`" $Arguments" }
-if ($r.ReturnValue -ne 0) {
-    [Console]::Error.WriteLine("Could not start $Exe through WMI (Win32_Process.Create returned $($r.ReturnValue))")
+try {
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "`"$Exe`" $Arguments" }
+    if ($r.ReturnValue -ne 0) { throw "Win32_Process.Create returned $($r.ReturnValue)" }
+} catch {
+    [Console]::Error.WriteLine("Could not start $Exe through WMI: $_")
     exit 99
 }
 $p = Get-Process -Id $r.ProcessId
