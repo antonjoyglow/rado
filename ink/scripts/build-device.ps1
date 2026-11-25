@@ -19,10 +19,12 @@ $names = Select-String -Path (Join-Path (Split-Path $sys.manifest_path) 'src\lib
 Set-Content "$stub\stub.c" ($names | ForEach-Object { "void $_(void) {}" })
 & $zig cc -target arm-linux-gnueabi.2.23 -shared "-Wl,-soname,libfontconfig.so.1" -o "$stub\libfontconfig.so" "$stub\stub.c"
 if ($LASTEXITCODE) { throw 'zig cc failed on the fontconfig stub' }
+# The pkg-config crate splits this output like a shell, which drops backslashes.
+$libDir = $stub -replace '\\', '/'
 Set-Content "$stub\pkg-config.cmd" @"
 @echo off
 echo %* | findstr /c:"--modversion" >nul && (echo 2.13.1& exit /b 0)
-echo %* | findstr /c:"--libs" >nul && (echo -L$stub -lfontconfig& exit /b 0)
+echo %* | findstr /c:"--libs" >nul && (echo -L$libDir -lfontconfig& exit /b 0)
 exit /b 0
 "@
 $env:PKG_CONFIG = "$stub\pkg-config.cmd"
