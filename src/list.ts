@@ -6,7 +6,7 @@ import {
 import { POLL_MINUTES } from "./bindings/limits";
 import { h, whenBlurred } from "./dom";
 import { bird, glow, yawn } from "./bird";
-import { glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
+import { checkedText, glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
 import { DROPPED, lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
@@ -200,6 +200,7 @@ export function mountList(root: HTMLElement): void {
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
+  const endChecked = h("span");
 
   const renderStatus = () => {
     if (!snapshot || document.hidden) return;
@@ -213,6 +214,7 @@ export function mountList(root: HTMLElement): void {
     status.hidden = !showStatus(line, snapshot.warning, actionText.textContent || null, snapshot.newerRelease);
     refreshButton.dataset.busy = String(snapshot.polling);
     refreshButton.title = refreshTitle(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
+    endChecked.textContent = checkedText(snapshot.lastRefreshed, now);
   };
 
   // A hidden list can't have focus (it hides when it loses it), so a yawn waits for the next focus.
@@ -266,6 +268,11 @@ export function mountList(root: HTMLElement): void {
     ));
     const tracker = trackerName(activeWorkspace(snapshot.settings));
     for (const item of items) body.append(row(item, tracker, item.key === next?.key, act));
+    if (items.length > 0) body.append(h("div", { class: "end" },
+      h("span", { class: "end-bird", ariaHidden: "true" }),
+      h("span", { class: "end-count" }, `That's all ${items.length}`),
+      endChecked,
+    ));
   };
 
   void watchSnapshot((s) => {
@@ -315,8 +322,7 @@ const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", l
 
 function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType<typeof listActions>): HTMLElement {
   const aggregate = item.members.length > 1;
-  // Plain text, so the outlined chips are exactly the things that open something. The separating dots are
-  // drawn by the stylesheet inside each phrase, so a line never starts with one.
+  // Spans, not buttons: the chips below are exactly the things that open something.
   const facts = rowFacts(item).map(({ text, kind, title }) => {
     const fact = h("span", { class: kind }, text);
     if (title) fact.title = title;
@@ -335,7 +341,7 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
       },
     }, prLabel(m)), draftChip(m, item.key)]);
   const ticket = item.ticket && h("button", {
-    class: "member",
+    class: "member ticket",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
     onclick: (e: MouseEvent) => {

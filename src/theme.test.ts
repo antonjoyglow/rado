@@ -26,8 +26,33 @@ describe("contrast", () => {
 describe("customPalette", () => {
   it("setsEveryListVariable", () => {
     expect(Object.keys(customPalette(DARK)).sort()).toEqual(
-      ["--accent", "--bg", "--clear", "--fg", "--hover", "--line", "--muted", "--next-bg", "--normal", "--on-accent", "--urgent"],
+      [
+        "--accent", "--bg", "--card", "--card-hover", "--clear", "--fg", "--ground", "--hover", "--line", "--muted", "--next-bg", "--normal",
+        "--on-accent", "--tag", "--tint-accent", "--tint-normal", "--urgent",
+      ],
     );
+  });
+
+  it("text_readsOnEveryCardAndPill", () => {
+    for (const picks of [
+      DARK,
+      PAPER,
+      { background: "#2e7d32", text: "#ffffff", accent: "#ffd60a" },
+      { background: "#3a3a3a", text: "#c0c0c0", accent: "#ffcc00" },
+      { background: "#000000", text: "#767676", accent: "#ffffff" },
+    ]) {
+      const p = customPalette(picks);
+      const on = (text: string, fills: string[]) => {
+        for (const f of fills) expect(contrast(p[text], p[f]), `${text} on ${f} of ${JSON.stringify(picks)}`).toBeGreaterThanOrEqual(READABLE);
+      };
+      on("--fg", ["--ground", "--card", "--card-hover", "--tag", "--tint-accent", "--tint-normal"]);
+      on("--muted", ["--ground", "--card", "--card-hover"]);
+    }
+  });
+
+  it("pillsAndTints_differFromTheCard", () => {
+    const p = customPalette(DARK);
+    expect(new Set([p["--card"], p["--card-hover"], p["--ground"], p["--tag"], p["--tint-accent"], p["--tint-normal"]]).size).toBe(6);
   });
 
   it("statusText_readsOnMidToneBackgrounds", () => {

@@ -38,7 +38,10 @@ const STATUS_ON_LIGHT = { "--urgent": "#c22d2d", "--normal": "#a35f08", "--clear
 const STATUS_ON_DARK = { "--urgent": "#f26b6b", "--normal": "#d98a1c", "--clear": "#4cc07f" };
 
 /** Every variable a custom theme sets; `--low` is only a dot, so the stylesheet's grey stays. */
-const VARIABLES = ["--bg", "--fg", "--muted", "--line", "--hover", "--next-bg", "--accent", "--on-accent", "--urgent", "--normal", "--clear"];
+const VARIABLES = [
+  "--bg", "--fg", "--muted", "--line", "--hover", "--next-bg", "--accent", "--on-accent", "--urgent", "--normal", "--clear",
+  "--ground", "--card", "--card-hover", "--tag", "--tint-accent", "--tint-normal",
+];
 
 /** Every list colour variable, derived from the three picked colours. */
 export function customPalette({ background: bg, text: fg, accent }: CustomTheme): Record<string, string> {
@@ -55,8 +58,20 @@ export function customPalette({ background: bg, text: fg, accent }: CustomTheme)
   const tint = mix(accent, bg, 0.06);
   const tinted = contrast(fg, tint) >= READABLE && [muted, ...Object.values(status)].every((c) => blend(c, [bg, hover, tint]));
   const nextBg = tinted ? tint : bg;
-  const readable = (color: string) => blend(color, [bg, hover, nextBg]) ?? fg;
+  // Cards are the background on a ground of the hover colour; a hovered card and the pills shade the way hover does.
+  const shade = hover === mix(fg, bg, 0.07) ? fg : away;
+  const cardHover = mix(shade, bg, 0.04);
+  // The largest share up to `share` of `color` over the background on which the text still reads; pills hold only text.
+  const fill = (color: string, share: number) =>
+    Array.from({ length: 10 }, (_, i) => mix(color, bg, share * (1 - i / 10))).find((c) => contrast(fg, c) >= READABLE) ?? bg;
+  const readable = (color: string) => blend(color, [bg, hover, nextBg, cardHover]) ?? fg;
   return {
+    "--ground": hover,
+    "--card": bg,
+    "--card-hover": cardHover,
+    "--tag": fill(shade, 0.14),
+    "--tint-accent": fill(accent, 0.2),
+    "--tint-normal": fill(status["--normal"], 0.2),
     "--bg": bg,
     "--fg": fg,
     // As faint as still reads.
