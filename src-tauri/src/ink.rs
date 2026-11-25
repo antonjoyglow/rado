@@ -375,7 +375,8 @@ async fn accept<R: Rado + Clone + Send + 'static>(listener: TcpListener, rado: R
 pub struct Pairing {
     secrets: Box<dyn Secrets>,
     token: watch::Sender<Option<String>>,
-    /// Why the device can't reach Rado while a token exists, or why the token couldn't be read.
+    /// Why the device can't reach Rado while a token exists, or why the token couldn't be read. Its lock is held
+    /// across every change to the token, so Credential Manager, `token` and `problem` always agree.
     problem: Mutex<Option<String>>,
 }
 
@@ -400,11 +401,9 @@ impl Pairing {
     }
 
     pub fn status(&self) -> InkStatus {
-        InkStatus {
-            paired: self.token.borrow().is_some(),
-            address: wifi_socket().map(|at| at.to_string()),
-            problem: self.problem.lock().expect("pairing lock").clone(),
-        }
+        let problem = self.problem.lock().expect("pairing lock").clone();
+        let paired = self.token.borrow().is_some();
+        InkStatus { paired, address: wifi_socket().map(|at| at.to_string()), problem }
     }
 
     /// Creates a token, replacing any earlier one, which stops working at once.
@@ -412,15 +411,18 @@ impl Pairing {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).map_err(|e| format!("Couldn't make a token: {e}"))?;
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let mut problem = self.problem.lock().expect("pairing lock");
         self.secrets.set(TOKEN_KEY, &token)?;
         self.token.send_replace(Some(token));
+        *problem = None;
         Ok(())
     }
 
     pub fn unpair(&self) -> Result<(), String> {
+        let mut problem = self.problem.lock().expect("pairing lock");
         self.secrets.delete(TOKEN_KEY)?;
         self.token.send_replace(None);
-        self.report(None);
+        *problem = None;
         Ok(())
     }
 
@@ -431,8 +433,12 @@ impl Pairing {
         Ok(format!("host={host}\nport={PORT}\ntoken={token}\n"))
     }
 
+    /// Records why the listener can't listen, unless the token went meanwhile.
     fn report(&self, problem: Option<String>) {
-        *self.problem.lock().expect("pairing lock") = problem;
+        let mut current = self.problem.lock().expect("pairing lock");
+        if self.token.borrow().is_some() {
+            *current = problem;
+        }
     }
 
     /// Listens on `address()` (the Wi-Fi address and `PORT` in the app) while a token exists, and moves when the
@@ -441,7 +447,6 @@ impl Pairing {
         let mut token = self.token.subscribe();
         loop {
             if token.borrow_and_update().is_none() {
-                self.report(None);
                 if token.changed().await.is_err() {
                     return;
                 }
@@ -452,9 +457,7 @@ impl Pairing {
                 None => None,
                 Some(at) => Some(TcpListener::bind(at).await.map_err(|e| format!("Can't listen on {at} ({e})"))),
             };
-            if self.token.borrow().is_some() {
-                self.report(bound.as_ref().and_then(|b| b.as_ref().err().cloned()));
-            }
+            self.report(bound.as_ref().and_then(|b| b.as_ref().err().cloned()));
             let serving = async {
                 match bound {
                     Some(Ok(listener)) => accept(listener, rado.clone(), token.clone()).await,
@@ -899,11 +902,24 @@ mod tests {
         let (running, rado) = (pairing.clone(), fake("run"));
         tokio::spawn(async move { running.run(rado, move || Some(at)).await });
 
-        assert!(becomes(at, false).await, "no token: nothing listens");
         pairing.pair().unwrap();
         assert!(becomes(at, true).await, "paired: listening");
         pairing.unpair().unwrap();
         assert!(becomes(at, false).await, "removed: not listening");
+        assert_eq!(pairing.status().problem, None);
+    }
+
+    #[tokio::test]
+    async fn run_keepsTheReasonTheTokenCouldntBeRead_untilPaired() {
+        let secrets = crate::store::tests::MemorySecrets::default();
+        secrets.fail_reads(true);
+        let pairing = Arc::new(Pairing::load(Box::new(secrets.clone())));
+        let (running, rado) = (pairing.clone(), fake("unreadable"));
+        tokio::spawn(async move { running.run(rado, || None).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(pairing.status().problem.is_some_and(|p| p.starts_with("Can't read the pairing token")));
+
+        pairing.pair().unwrap();
         assert_eq!(pairing.status().problem, None);
     }
 

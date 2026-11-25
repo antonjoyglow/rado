@@ -236,7 +236,7 @@ test.describe("PocketBook pairing", () => {
     expect(await calls(page, "copy_ink_config")).toHaveLength(1);
   });
 
-  test("Replace makes a new token, Remove goes back to Pair, and a listener problem shows", async ({ page }) => {
+  test("a listener problem shows, Replace goes through Rado, and Remove goes back to Pair", async ({ page }) => {
     await general(page, { ...paired, problem: "Can't listen on 192.168.1.14:7878 (in use)" }, {
       pair_ink: paired,
       unpair_ink: { paired: false, address: null, problem: null },
