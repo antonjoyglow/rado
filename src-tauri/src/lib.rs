@@ -516,9 +516,9 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
     session(&app, |s| s.add_workspace(&name))
 }
 
-/// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker.
+/// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker, and returns the organization as saved.
 #[tauri::command]
-fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
+fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<String, String> {
     session(&app, |s| s.save_workspace(workspace))
 }
 

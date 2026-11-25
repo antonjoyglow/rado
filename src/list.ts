@@ -449,7 +449,7 @@ function renderSettings(
   onSelect: (key: SettingsTab) => void,
   showFailure: (error: string) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
-  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
+  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, (s) => api.saveSettings(s).then(() => s)));
   // This saver is the only writer of these settings, and the snapshot can lag a save just made.
   const settings = { ...saver.latest };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside

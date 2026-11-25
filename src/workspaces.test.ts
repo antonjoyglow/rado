@@ -76,7 +76,7 @@ describe("workspaceSaver", () => {
   it("a failed save puts the workspace back to the last saved one and drops the saves queued behind it", async () => {
     const send = vi.mocked(api.saveWorkspace);
     send.mockReset();
-    send.mockResolvedValueOnce().mockRejectedValueOnce("Not saved: “x” isn't a GitHub repo (owner/name)").mockResolvedValue();
+    send.mockResolvedValueOnce("").mockRejectedValueOnce("Not saved: “x” isn't a GitHub repo (owner/name)");
     const saver = workspaceSaver(ws("r"));
     let reverted: Workspace | null = null;
     saver.revert = (last) => (reverted = last);
@@ -90,6 +90,22 @@ describe("workspaceSaver", () => {
     expect(reverted).toEqual({ ...ws("r"), name: "Renamed" });
     expect(saver.latest).toEqual({ ...ws("r"), name: "Renamed" });
     expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the organization as the backend cleaned it", async () => {
+    const send = vi.mocked(api.saveWorkspace);
+    send.mockReset();
+    const typed: Workspace = { ...ws("c", { kind: "jira", site: "https://acme.atlassian.net/", keys: [] }), azureDevOps: { organization: "https://dev.azure.com/acme/web", teams: [] } };
+    send.mockResolvedValueOnce("acme").mockRejectedValueOnce("Not saved: disk full");
+    const saver = workspaceSaver(typed);
+    let reverted: Workspace | null = null;
+    saver.revert = (last) => (reverted = last);
+    const expected = { ...typed, azureDevOps: { organization: "acme", teams: [] } };
+
+    await expect(saver.save(typed)).resolves.toEqual(expected);
+    expect(saver.latest).toEqual(expected);
+    await expect(saver.save({ ...expected, name: "X" })).rejects.toBe("Not saved: disk full");
+    expect(reverted).toEqual(expected);
   });
 });
 

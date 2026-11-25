@@ -8,7 +8,10 @@ const workspaceSavers = new Map<string, LastingSaver<Workspace>>();
 /** The save queue for `workspace`'s fields, made on first use from the workspace as given. */
 export function workspaceSaver(workspace: Workspace): LastingSaver<Workspace> {
   let saver = workspaceSavers.get(workspace.id);
-  if (!saver) workspaceSavers.set(workspace.id, (saver = lastingSaver(workspace, api.saveWorkspace)));
+  // Only the organization takes the backend's cleaned value: the editor's tracker revert compares against the
+  // tracker as typed, and a cleaned one would read as changed and overwrite that field on any later failure.
+  const send = (w: Workspace) => api.saveWorkspace(w).then((organization) => ({ ...w, azureDevOps: { ...w.azureDevOps, organization } }));
+  if (!saver) workspaceSavers.set(workspace.id, (saver = lastingSaver(workspace, send)));
   return saver;
 }
 
@@ -183,7 +186,10 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     // The saver is the only writer of these fields, and the snapshot can lag a save just made.
     const workspace: Workspace = structuredClone(saver.latest);
     const n = { name: note(), pat: note(), org: note(), teams: note(), tracker: note(), keys: note(), token: note(), repos: note() };
-    const save = (target: HTMLElement, done?: string) => saver.save(workspace).then(() => ok(target, done), (e) => fail(target, e));
+    const save = (target: HTMLElement, done?: string) => saver.save(workspace).then((saved) => {
+      ok(target, done);
+      return saved;
+    }, (e) => fail(target, e));
 
     const name = h("input", {
       type: "text", ariaLabel: "Workspace name", value: workspace.name,
@@ -242,7 +248,16 @@ export function workspacesPanel(first: Snapshot, notes: Notes): { element: HTMLE
     };
     const org = h("input", {
       type: "text", ariaLabel: "Organization", value: workspace.azureDevOps.organization, placeholder: "yourorg, as in dev.azure.com/yourorg",
-      onchange: () => { workspace.azureDevOps.organization = org.value.trim(); void save(n.org); },
+      onchange: () => {
+        const typed = (workspace.azureDevOps.organization = org.value.trim());
+        void save(n.org).then((saved) => {
+          if (!saved) return;
+          // Unless the field was edited again meanwhile.
+          const cleaned = saved.azureDevOps.organization;
+          if (workspace.azureDevOps.organization === typed) workspace.azureDevOps.organization = cleaned;
+          if (org.value.trim() === typed) org.value = cleaned;
+        });
+      },
     });
     const repos = h("input", {
       type: "text", ariaLabel: "Watched repos", value: workspace.github.repos.join(", "), placeholder: "owner/name, as in github.com/owner/name",
