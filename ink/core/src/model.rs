@@ -10,6 +10,8 @@ use crate::config::Config;
 
 /// Lines per page: ten one-line items and two banners fit the Era Color's 483 logical pixels.
 pub const ITEMS_PER_PAGE: usize = 10;
+/// How long "Nothing new" answers a tap that had nothing to mark seen.
+const NOTHING_NEW_FOR: chrono::TimeDelta = chrono::TimeDelta::seconds(3);
 /// Tally dots that fit between the margins; the rest show as "+N".
 pub const TALLY_DOTS: usize = 30;
 
@@ -41,6 +43,8 @@ pub struct Model {
     /// long as they keep waiting in that tab. One that comes back, or moves to Re-review between two polls, is new.
     seen: HashSet<(String, Tab)>,
     page: usize,
+    /// Until when a tap with nothing new says so.
+    nothing_new_until: Option<DateTime<FixedOffset>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +72,8 @@ pub struct ListView {
     pub tally: Vec<Tier>,
     /// Waiting reviews past the tally's dots.
     pub tally_more: usize,
+    /// Under the chips: how to mark new items seen, or "Nothing new" right after a tap that had none; else empty.
+    pub hint: &'static str,
     /// "updated 14:12", Rado's last refresh in the device's time.
     pub updated: String,
     /// The offline banner, then Rado's source error.
@@ -102,7 +108,7 @@ pub struct ItemView {
 
 impl Model {
     pub fn new(config: Result<Config, String>) -> Self {
-        Model { config, link: Link::Connecting, list: None, heard_at: None, seen: HashSet::new(), page: 0 }
+        Model { config, link: Link::Connecting, list: None, heard_at: None, seen: HashSet::new(), page: 0, nothing_new_until: None }
     }
 
     pub fn fetched(&mut self, fetched: Fetched, now: DateTime<FixedOffset>) {
@@ -136,8 +142,10 @@ impl Model {
     }
 
     /// I looked: nothing waiting now is new any more.
-    pub fn acknowledge(&mut self) {
-        self.seen = self.waiting_keys();
+    pub fn acknowledge(&mut self, now: DateTime<FixedOffset>) {
+        let waiting = self.waiting_keys();
+        self.nothing_new_until = waiting.is_subset(&self.seen).then(|| now + NOTHING_NEW_FOR);
+        self.seen = waiting;
     }
 
     fn waiting_keys(&self) -> HashSet<(String, Tab)> {
@@ -199,6 +207,13 @@ impl Model {
             new,
             tally: reviews_waiting.iter().copied().take(TALLY_DOTS).collect(),
             tally_more: reviews_waiting.len().saturating_sub(TALLY_DOTS),
+            hint: if new > 0 {
+                "Tap here to mark them seen"
+            } else if self.nothing_new_until.is_some_and(|until| now < until) {
+                "Nothing new"
+            } else {
+                ""
+            },
             updated: list
                 .last_refreshed
                 .map_or("not updated yet".into(), |at| format!("updated {}", at.with_timezone(&now.timezone()).format("%H:%M"))),
@@ -333,10 +348,24 @@ mod tests {
         assert_eq!(view.items.iter().map(|i| i.new).collect::<Vec<_>>(), [true, false]);
         assert_eq!(view.new, 1);
 
-        model.acknowledge();
+        assert_eq!(view.hint, "Tap here to mark them seen");
+
+        model.acknowledge(at("14:14"));
         let view = shown(&model, "14:14");
         assert!(view.items.iter().all(|i| !i.new));
-        assert_eq!(view.new, 0);
+        assert_eq!((view.new, view.hint), (0, ""));
+    }
+
+    #[test]
+    fn aTapWithNothingNew_saysSoForAFewSeconds() {
+        let mut model = loaded(vec![row("a", Tab::Other, true)]);
+        model.acknowledge(DateTime::parse_from_rfc3339("2026-11-25T14:12:00+02:00").unwrap());
+        let at_second = |s: u32| DateTime::parse_from_rfc3339(&format!("2026-11-25T14:12:0{s}+02:00")).unwrap();
+        let hint = |model: &Model, s| match model.view(at_second(s)) {
+            View::List(view) => view.hint,
+            other => panic!("not a list: {other:?}"),
+        };
+        assert_eq!((hint(&model, 2), hint(&model, 3)), ("Nothing new", ""));
     }
 
     #[test]
@@ -345,14 +374,14 @@ mod tests {
         model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:13"));
         assert_eq!(shown(&model, "14:13").items.iter().map(|i| i.new).collect::<Vec<_>>(), [true, false], "approved, then a re-review");
 
-        model.acknowledge();
+        model.acknowledge(at("14:13"));
         model.fetched(list_of(vec![row("approved", Tab::Other, false), row("r", Tab::Other, true)]), at("14:14"));
         model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:15"));
         assert!(shown(&model, "14:15").items[0].new, "seen, gone, back");
 
-        model.acknowledge();
+        model.acknowledge(at("14:13"));
         model.fetched(list_of(vec![row("approved", Tab::Other, true), row("r", Tab::Other, true)]), at("14:16"));
-        model.acknowledge();
+        model.acknowledge(at("14:13"));
         model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:17"));
         assert!(shown(&model, "14:17").items[0].new, "approved and pushed to between two polls: a re-review");
     }

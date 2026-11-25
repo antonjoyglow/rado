@@ -189,6 +189,7 @@ export component AppWindow inherits Window {
     in property <int> new;
     in property <[Tier]> tally;
     in property <int> tally-more;
+    in property <string> hint;
     in property <string> updated;
     in property <[string]> banners;
     in property <[Item]> items;
@@ -352,8 +353,8 @@ export component AppWindow inherits Window {
                                     if root.new > 0: Chip { text: root.new + " new"; fill: Ink.teal; }
                                     if root.mine > 0: Chip { text: root.mine + " yours"; fill: Ink.amber; }
                                 }
-                                if root.new > 0: Text {
-                                    text: "Tap here to mark them seen";
+                                if root.hint != "": Text {
+                                    text: root.hint;
                                     font-size: Type.caption;
                                     color: Ink.muted;
                                 }

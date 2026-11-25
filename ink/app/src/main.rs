@@ -50,7 +50,7 @@ fn run(config_path: &str) -> Result<(), slint::PlatformError> {
     ui.on_acknowledge({
         let (model, render) = (model.clone(), render.clone());
         move || {
-            model.borrow_mut().acknowledge();
+            model.borrow_mut().acknowledge(now());
             render();
         }
     });
@@ -119,6 +119,7 @@ fn draw(ui: &AppWindow, view: &View) {
             ui.set_new(list.new as i32);
             ui.set_tally(ModelRc::new(VecModel::from(list.tally.iter().map(|&t| tier(t)).collect::<Vec<_>>())));
             ui.set_tally_more(list.tally_more as i32);
+            ui.set_hint(list.hint.into());
             let items: Vec<Item> = list
                 .items
                 .iter()
