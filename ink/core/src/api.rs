@@ -38,7 +38,7 @@ pub struct Row {
 }
 
 /// The tabs the device tells apart; every other tab, and any added later, is `Other`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Tab {
     ReReview,

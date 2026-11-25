@@ -35,9 +35,9 @@ pub struct Model {
     list: Option<List>,
     /// When Rado last answered: the list was current then.
     heard_at: Option<DateTime<FixedOffset>>,
-    /// Waiting items I have seen: those on the first list or waiting when I last acknowledged, for as long as they
-    /// keep waiting. An item that stops waiting and comes back, as a re-review does, is new again.
-    seen: HashSet<String>,
+    /// Waiting items I have seen, by key and tab: those on the first list or waiting when I last acknowledged, for as
+    /// long as they keep waiting in that tab. One that comes back, or moves to Re-review between two polls, is new.
+    seen: HashSet<(String, Tab)>,
     page: usize,
 }
 
@@ -97,7 +97,7 @@ impl Model {
                 if first {
                     self.seen = waiting;
                 } else {
-                    self.seen.retain(|key| waiting.contains(key));
+                    self.seen.retain(|seen| waiting.contains(seen));
                 }
                 self.page = self.page.min(self.pages() - 1);
             }
@@ -123,8 +123,8 @@ impl Model {
         self.seen = self.waiting_keys();
     }
 
-    fn waiting_keys(&self) -> HashSet<String> {
-        self.waiting().iter().map(|r| r.key.clone()).collect()
+    fn waiting_keys(&self) -> HashSet<(String, Tab)> {
+        self.waiting().iter().map(|r| seen_key(r)).collect()
     }
 
     /// Turns a page forward or back, staying within the pages.
@@ -160,7 +160,7 @@ impl Model {
         banners.extend(list.error.clone());
         let items = self.waiting();
         let urgent = items.iter().filter(|r| r.tier == Tier::Urgent).count();
-        let new = items.iter().filter(|r| !self.seen.contains(&r.key)).count();
+        let new = items.iter().filter(|r| !self.seen.contains(&seen_key(r))).count();
         let summary = match (items.is_empty(), urgent, new) {
             (true, ..) => "All clear".to_string(),
             (false, 0, 0) => String::new(),
@@ -186,7 +186,7 @@ impl Model {
                     title: row.title.clone(),
                     age: age(row.age_hours),
                     tier: row.tier,
-                    new: !self.seen.contains(&row.key),
+                    new: !self.seen.contains(&seen_key(row)),
                     re_review: row.tab == Tab::ReReview,
                     yours: row.tab == Tab::Mine,
                     draft: row.draft.is_some(),
@@ -207,6 +207,10 @@ impl Model {
     fn pages(&self) -> usize {
         self.waiting().len().div_ceil(ITEMS_PER_PAGE).max(1)
     }
+}
+
+fn seen_key(row: &Row) -> (String, Tab) {
+    (row.key.clone(), row.tab)
 }
 
 fn age(hours: i64) -> String {
@@ -314,6 +318,12 @@ mod tests {
         model.fetched(list_of(vec![row("approved", Tab::Other, false), row("r", Tab::Other, true)]), at("14:14"));
         model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:15"));
         assert!(shown(&model, "14:15").items[0].new, "seen, gone, back");
+
+        model.acknowledge();
+        model.fetched(list_of(vec![row("approved", Tab::Other, true), row("r", Tab::Other, true)]), at("14:16"));
+        model.acknowledge();
+        model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:17"));
+        assert!(shown(&model, "14:17").items[0].new, "approved and pushed to between two polls: a re-review");
     }
 
     #[test]
@@ -408,7 +418,8 @@ mod tests {
         model.fetched(Fetched::Unauthorized, at("14:13"));
         assert!(matches!(model.view(at("14:13")), View::Setup { problem } if problem.contains("rejected the token")));
         model.failed(Failure::Unreachable);
-        assert!(matches!(model.view(at("14:13")), View::Setup { .. }), "still rejected while the laptop is away");
+        model.failed(Failure::Answer("Rado answered 500".into()));
+        assert!(matches!(model.view(at("14:13")), View::Setup { .. }), "rejected until Rado sends a list again");
         model.fetched(Fetched::NotModified, at("14:14"));
         assert_eq!(titles(&shown(&model, "14:14")), ["Change a"]);
     }
