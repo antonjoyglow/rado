@@ -1,6 +1,8 @@
 // Injected before the app: stands in for Tauri's IPC, so the UI runs in a plain browser. Tests drive it through window.__e2e.
 (() => {
   const S = (window.__e2e = { calls: [], settled: [], fail: {}, delay: {}, responses: {}, handlers: {}, listeners: {}, cb: {} });
+  // Like the real command, a save returns the organization as saved.
+  S.handlers.save_workspace = ({ workspace }) => workspace.azureDevOps.organization;
   let next = 0;
   const view = new URLSearchParams(location.search).get("view") || "list";
   const answer = async (cmd, args) => {

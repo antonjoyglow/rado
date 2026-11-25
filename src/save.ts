@@ -2,10 +2,11 @@ export const DROPPED = "Not saved: an earlier change failed to save, so the sett
 
 /**
  * Saves one shared settings object, one save at a time, each sending the object as it is when its turn comes.
- * A failed save hands `revert` a copy of the last saved value, and saves queued before that failure reject with
- * DROPPED instead of sending, so no save ever carries a change whose save failed.
+ * `send` resolves with the value as stored, which the backend can have cleaned, and each save resolves with it. A failed
+ * save hands `revert` a copy of the last saved value, and saves queued before that failure reject with DROPPED instead
+ * of sending, so no save ever carries a change whose save failed.
  */
-export function serialSaver<T>(initial: T, send: (value: T) => Promise<void>, revert: (saved: T) => void): (current: T) => Promise<void> {
+export function serialSaver<T>(initial: T, send: (value: T) => Promise<T>, revert: (saved: T) => void): (current: T) => Promise<T> {
   let saved = structuredClone(initial);
   let queue: Promise<unknown> = Promise.resolve();
   let failures = 0;
@@ -16,8 +17,8 @@ export function serialSaver<T>(initial: T, send: (value: T) => Promise<void>, re
       if (seen !== failures) throw DROPPED;
       const sent = structuredClone(current);
       try {
-        await send(sent);
-        saved = sent;
+        saved = await send(sent);
+        return structuredClone(saved);
       } catch (e) {
         failures++;
         revert(structuredClone(saved));
@@ -31,21 +32,24 @@ export function serialSaver<T>(initial: T, send: (value: T) => Promise<void>, re
 
 /** A serialSaver that outlives one view: a later view starts from `latest` and sets `revert`. */
 export interface LastingSaver<T> {
-  save: (current: T) => Promise<void>;
-  /** The value of the last save queued, or the last saved value after a failure. */
+  save: (current: T) => Promise<T>;
+  /** The value of the last save queued, as saved once it is, or the last saved value after a failure. */
   latest: T;
   revert: (saved: T) => void;
 }
 
-export function lastingSaver<T>(initial: T, send: (value: T) => Promise<void>): LastingSaver<T> {
-  const saver: LastingSaver<T> = { latest: structuredClone(initial), revert: () => {}, save: () => Promise.resolve() };
+export function lastingSaver<T>(initial: T, send: (value: T) => Promise<T>): LastingSaver<T> {
+  const saver: LastingSaver<T> = { latest: structuredClone(initial), revert: () => {}, save: () => Promise.resolve(initial) };
   const queue = serialSaver(initial, send, (saved) => {
     saver.latest = structuredClone(saved);
     saver.revert(saved);
   });
   saver.save = (current) => {
-    saver.latest = structuredClone(current);
-    return queue(current);
+    const queued = (saver.latest = structuredClone(current));
+    return queue(current).then((saved) => {
+      if (saver.latest === queued) saver.latest = saved;
+      return saved;
+    });
   };
   return saver;
 }

@@ -692,7 +692,8 @@ impl Session {
     /// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker. A changed
     /// source starts a new baseline, and on the active workspace makes the poll in flight stale and polls again.
     /// Written before it is applied: after any error the workspace is as it was, which is what the editor's rollback relies on.
-    pub fn save_workspace(&mut self, workspace: Workspace) -> Result<(), String> {
+    /// Returns the organization as saved: a pasted link cleaned to its name.
+    pub fn save_workspace(&mut self, workspace: Workspace) -> Result<String, String> {
         if let Some(repo) = workspace.bad_repo() {
             return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
         }
@@ -716,6 +717,7 @@ impl Session {
         let org_changed = !old_org.eq_ignore_ascii_case(&workspace.azure_dev_ops.organization);
         let github_changed = slot.github != workspace.github;
         let id = workspace.id.clone();
+        let organization = workspace.azure_dev_ops.organization.clone();
         *slot = workspace;
         // Before the settings, which would otherwise make the votes pass for the new organization's after a restart.
         if org_changed {
@@ -746,7 +748,7 @@ impl Session {
             self.generation += 1;
             self.wake = true;
         }
-        Ok(())
+        Ok(organization)
     }
 
     pub fn switch(&mut self, id: &str) -> Result<(), String> {
@@ -1589,7 +1591,7 @@ pub(crate) mod tests {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-org-link");
         let mut changed = s.settings.workspaces[0].clone();
         changed.azure_dev_ops.organization = "https://dev.azure.com/acme/Project/_git/web".into();
-        s.save_workspace(changed.clone()).expect("saved");
+        assert_eq!(s.save_workspace(changed.clone()).expect("saved"), "acme");
         assert_eq!(s.settings.workspaces[0].azure_dev_ops.organization, "acme");
 
         changed.azure_dev_ops.organization = "my org".into();
