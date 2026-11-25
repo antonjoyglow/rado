@@ -1,0 +1,28 @@
+[package]
+name = "ink-app"
+version = "0.1.0"
+description = "Rado's list on a PocketBook Era Color. The built app is GPL-3.0 as a whole, since it uses Slint under GPL-3.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rado-ink"
+path = "src/main.rs"
+
+[features]
+default = ["preview"]
+# A window on the desktop, against Rado or ink/mock-rado.mjs.
+preview = ["slint/backend-winit"]
+# The PocketBook app, cross-built by `just build`.
+device = ["dep:inkview", "dep:inkview-slint"]
+
+[dependencies]
+ink-core = { path = "../core" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+slint = { version = "1.19", default-features = false, features = ["compat-1-2", "std", "renderer-software", "software-renderer-systemfonts"] }
+inkview = { git = "https://github.com/simmsb/inkview-rs", rev = "15cdb984048bd878a780d3133e9f4fc64bb9edb0", default-features = false, features = ["sdk-6-10"], optional = true }
+inkview-slint = { git = "https://github.com/simmsb/inkview-rs", rev = "15cdb984048bd878a780d3133e9f4fc64bb9edb0", default-features = false, optional = true }
+
+[build-dependencies]
+slint-build = "1.19"

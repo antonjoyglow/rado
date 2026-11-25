@@ -1,0 +1,282 @@
+// Sizes are logical pixels: on the Era Color one is 3.48 physical pixels (300 dpi times its 1.16 scale), so the
+// screen is about 363 by 483.
+import "fonts/Inter-VariableFont.ttf";
+import { Palette } from "std-widgets.slint";
+
+export struct TabItem {
+    label: string,
+    count: int,
+    selected: bool,
+}
+
+export enum Tier { low, normal, urgent }
+
+export struct RowItem {
+    title: string,
+    prs: string,
+    facts: string,
+    tier: Tier,
+    draft-ready: bool,
+    review-next: bool,
+}
+
+export enum Mode { setup, waiting, list }
+
+component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    border-width: 1px;
+    border-color: enabled ? black : #999;
+    border-radius: 4px;
+    min-width: 36px;
+    min-height: 24px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            color: root.enabled ? black : #999;
+            font-size: 9px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Kaleido colour is faint, so the fills are dark and saturated and the word alone says the tier.
+component TierPill inherits Rectangle {
+    in property <Tier> tier;
+    width: 46px;
+    height: 16px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: tier == Tier.low ? black : transparent;
+    background: tier == Tier.urgent ? #a0001c : tier == Tier.normal ? #1b3f8b : white;
+    Text {
+        text: tier == Tier.urgent ? "Urgent" : tier == Tier.normal ? "Normal" : "Low";
+        color: tier == Tier.low ? black : white;
+        font-size: 8px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component RowView inherits Rectangle {
+    in property <RowItem> item;
+    height: 48px;
+    background: item.review-next ? #e8e8e8 : white;
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: #bbb;
+    }
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: start;
+            spacing: 2px;
+            Text {
+                text: item.title;
+                font-size: 10px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                text: item.prs;
+                font-size: 8px;
+                overflow: elide;
+            }
+            Text {
+                text: (item.review-next ? "Review next · " : "") + item.facts + (item.draft-ready ? " · Draft ready" : "");
+                font-size: 8px;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: start;
+            TierPill { tier: item.tier; }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <Mode> mode;
+    /// The setup problem, or what the app is doing before the first list.
+    in property <string> message;
+    in property <string> config-path;
+    in property <string> workspace;
+    in property <int> reviews;
+    in property <int> mine;
+    in property <string> updated;
+    in property <[string]> banners;
+    in property <[TabItem]> tabs;
+    in property <[RowItem]> rows;
+    in property <string> page;
+    in property <bool> has-previous;
+    in property <bool> has-next;
+    callback select-tab(int);
+    callback turn-page(bool);
+    callback exit();
+
+    preferred-width: 363px;
+    preferred-height: 483px;
+    background: white;
+    default-font-family: "Inter";
+
+    // Text defaults to the palette's colour, which a desktop in dark mode makes white.
+    init => { Palette.color-scheme = ColorScheme.light; }
+
+    forward-focus: keys;
+    // The page buttons arrive as Left and Right (inkview-slint's mapping of Prev and Next).
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow || event.text == Key.PageUp) {
+                root.turn-page(false);
+                return accept;
+            }
+            if (event.text == Key.RightArrow || event.text == Key.PageDown) {
+                root.turn-page(true);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 8px;
+                height: 40px;
+                Text {
+                    text: mode == Mode.list ? root.workspace : "Rado";
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if mode == Mode.list: Text {
+                    text: root.reviews + " reviews · " + root.mine + " mine";
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+                if mode == Mode.list: Text {
+                    text: root.updated;
+                    font-size: 8px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+                Button {
+                    text: "Exit";
+                    clicked => { root.exit(); }
+                }
+            }
+
+            if mode == Mode.setup: VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                alignment: start;
+                Text {
+                    text: "Pair with Rado";
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.message;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "In Rado on the laptop, open Settings → General → PocketBook, press Copy config, and save the text as " + root.config-path + ". Then start this app again.";
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+            }
+
+            if mode == Mode.waiting: VerticalLayout {
+                padding: 16px;
+                alignment: start;
+                Text {
+                    text: root.message;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+            }
+
+            if mode == Mode.list: VerticalLayout {
+                for banner in root.banners: Rectangle {
+                    height: 20px;
+                    background: black;
+                    Text {
+                        text: banner;
+                        color: white;
+                        font-size: 9px;
+                        overflow: elide;
+                        x: 8px;
+                        width: parent.width - 16px;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    height: 28px;
+                    for tab[index] in root.tabs: Rectangle {
+                        background: tab.selected ? black : white;
+                        border-width: 1px;
+                        border-color: black;
+                        Text {
+                            text: tab.label + " " + tab.count;
+                            color: tab.selected ? white : black;
+                            font-size: 9px;
+                            font-weight: tab.selected ? 700 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            clicked => { root.select-tab(index); }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    vertical-stretch: 1;
+                    for row in root.rows: RowView { item: row; }
+                    if root.rows.length == 0: Text {
+                        text: "Nothing here.";
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        height: 48px;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    padding: 6px;
+                    height: 36px;
+                    Button {
+                        text: "‹ Back";
+                        enabled: root.has-previous;
+                        clicked => { root.turn-page(false); }
+                    }
+                    Text {
+                        text: root.page;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: "Next ›";
+                        enabled: root.has-next;
+                        clicked => { root.turn-page(true); }
+                    }
+                }
+            }
+        }
+    }
+}
