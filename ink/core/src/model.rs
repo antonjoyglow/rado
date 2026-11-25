@@ -209,7 +209,8 @@ impl Model {
             tally_more: reviews_waiting.len().saturating_sub(TALLY_DOTS),
             hint: if new > 0 {
                 "Tap here to mark them seen"
-            } else if self.nothing_new_until.is_some_and(|until| now < until) {
+            // Bounded both ways: the device clock can jump back when Wi-Fi syncs it.
+            } else if self.nothing_new_until.is_some_and(|until| now < until && until - now <= NOTHING_NEW_FOR) {
                 "Nothing new"
             } else {
                 ""
@@ -366,6 +367,8 @@ mod tests {
             other => panic!("not a list: {other:?}"),
         };
         assert_eq!((hint(&model, 2), hint(&model, 3)), ("Nothing new", ""));
+        let an_hour_earlier = DateTime::parse_from_rfc3339("2026-11-25T13:12:01+02:00").unwrap();
+        assert!(matches!(model.view(an_hour_earlier), View::List(view) if view.hint.is_empty()), "the clock jumped back");
     }
 
     #[test]
