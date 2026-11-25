@@ -1,6 +1,7 @@
 // Sizes are logical pixels: on the Era Color one is 3.48 physical pixels (300 dpi times its 1.16 scale), so the
 // screen is about 363 by 483.
-import "fonts/Inter-VariableFont.ttf";
+import "fonts/AtkinsonHyperlegibleNext.ttf";
+import "fonts/JetBrainsMono.ttf";
 import { Palette } from "std-widgets.slint";
 
 export struct TabItem {
@@ -132,7 +133,7 @@ export component AppWindow inherits Window {
     preferred-width: 363px;
     preferred-height: 483px;
     background: white;
-    default-font-family: "Inter";
+    default-font-family: "Atkinson Hyperlegible Next";
 
     // Text defaults to the palette's colour, which a desktop in dark mode makes white.
     init => { Palette.color-scheme = ColorScheme.light; }
@@ -159,6 +160,7 @@ export component AppWindow inherits Window {
                 height: 40px;
                 Text {
                     text: mode == Mode.list ? root.workspace : "Rado";
+                    horizontal-stretch: 1;
                     font-size: 12px;
                     font-weight: 700;
                     vertical-alignment: center;
@@ -166,11 +168,13 @@ export component AppWindow inherits Window {
                 }
                 if mode == Mode.list: Text {
                     text: root.reviews + " reviews · " + root.mine + " mine";
+                    font-family: "JetBrains Mono";
                     font-size: 10px;
                     vertical-alignment: center;
                 }
                 if mode == Mode.list: Text {
                     text: root.updated;
+                    font-family: "JetBrains Mono";
                     font-size: 8px;
                     vertical-alignment: center;
                     horizontal-alignment: right;
@@ -267,6 +271,7 @@ export component AppWindow inherits Window {
                     }
                     Text {
                         text: root.page;
+                        font-family: "JetBrains Mono";
                         font-size: 9px;
                         horizontal-alignment: center;
                         vertical-alignment: center;

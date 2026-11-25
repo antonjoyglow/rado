@@ -58,8 +58,10 @@ pub enum Tab {
 #[serde(rename_all = "camelCase")]
 pub enum Tier {
     Low,
-    Normal,
     Urgent,
+    /// Also any tier a later Rado adds, so the list still reads.
+    #[serde(other)]
+    Normal,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -83,8 +85,10 @@ pub struct Pr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Provider {
-    Ado,
     Github,
+    /// Also any provider a later Rado adds.
+    #[serde(other)]
+    Ado,
 }
 
 #[derive(Debug, PartialEq)]
@@ -153,6 +157,13 @@ mod tests {
     fn fixture_tabsTheDeviceDoesntShow_areOther() {
         let list: List = serde_json::from_str(FIXTURE).unwrap();
         assert_eq!(list.rows.iter().find(|r| r.key == "pr:9").unwrap().tab, Tab::Other);
+    }
+
+    #[test]
+    fn valuesALaterRadoAdds_stillRead() {
+        let pr: Pr = serde_json::from_str(r#"{"repo":"r","number":1,"provider":"gitlab"}"#).unwrap();
+        assert_eq!(pr.provider, Provider::Ado);
+        assert_eq!(serde_json::from_str::<Tier>(r#""critical""#).unwrap(), Tier::Normal);
     }
 
     #[test]
