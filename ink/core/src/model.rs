@@ -56,10 +56,14 @@ pub struct ListView {
     /// The counter's two numbers.
     pub reviews: u32,
     pub mine: u32,
-    /// "2 urgent · 3 new", or "All clear" when nothing waits.
-    pub summary: String,
-    /// Something listed is new, so acknowledging would change the page.
-    pub has_new: bool,
+    /// How the load feels, from the reviews waiting: "All clear!" to "Review avalanche!".
+    pub mood: &'static str,
+    pub heat: Heat,
+    /// Waiting items by tier and newness, across all pages.
+    pub urgent: usize,
+    pub new: usize,
+    /// One mark per waiting review, in Rado's order: a tally to read the load and its urgency at a glance.
+    pub tally: Vec<Tier>,
     /// "updated 14:12", Rado's last refresh in the device's time.
     pub updated: String,
     /// The offline banner, then Rado's source error.
@@ -68,6 +72,15 @@ pub struct ListView {
     /// The page shown, from 1, and how many there are.
     pub page: usize,
     pub pages: usize,
+}
+
+/// The reviews waiting, in four steps, for the colour of the big number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heat {
+    Clear,
+    Calm,
+    Warm,
+    Hot,
 }
 
 /// One thing waiting on me: a review, then my own PRs.
@@ -161,19 +174,25 @@ impl Model {
         let items = self.waiting();
         let urgent = items.iter().filter(|r| r.tier == Tier::Urgent).count();
         let new = items.iter().filter(|r| !self.seen.contains(&seen_key(r))).count();
-        let summary = match (items.is_empty(), urgent, new) {
-            (true, ..) => "All clear".to_string(),
-            (false, 0, 0) => String::new(),
-            (false, urgent, 0) => format!("{urgent} urgent"),
-            (false, 0, new) => format!("{new} new"),
-            (false, urgent, new) => format!("{urgent} urgent · {new} new"),
+        let reviews = list.counts.reviews;
+        let (mood, heat) = match reviews {
+            0 if items.is_empty() => ("All clear!", Heat::Clear),
+            0 => ("No reviews waiting", Heat::Clear),
+            1 => ("Just one. Quick win?", Heat::Calm),
+            2..=3 => ("A few waiting", Heat::Calm),
+            4..=6 => ("Getting busy", Heat::Warm),
+            7..=9 => ("Stacking up", Heat::Hot),
+            _ => ("Review avalanche!", Heat::Hot),
         };
         View::List(ListView {
             workspace: list.workspace.clone(),
             reviews: list.counts.reviews,
             mine: list.counts.mine,
-            summary,
-            has_new: new > 0,
+            mood,
+            heat,
+            urgent,
+            new,
+            tally: items.iter().filter(|r| r.tab != Tab::Mine).map(|r| r.tier).collect(),
             updated: list
                 .last_refreshed
                 .map_or("not updated yet".into(), |at| format!("updated {}", at.with_timezone(&now.timezone()).format("%H:%M"))),
@@ -277,7 +296,8 @@ mod tests {
         let view = shown(&model, "14:12");
         assert_eq!((view.workspace.as_str(), view.reviews, view.mine), ("Acme", 3, 1));
         assert_eq!(view.updated, "updated 11:30", "Rado's 09:30 UTC in the device's +02:00");
-        assert_eq!(view.summary, "1 urgent");
+        assert_eq!((view.urgent, view.new, view.mood, view.heat), (1, 0, "A few waiting", Heat::Calm));
+        assert_eq!(view.tally, [Tier::Urgent, Tier::Normal, Tier::Normal], "the three waiting reviews, not mine");
         assert_eq!(titles(&view), ["Change 1", "Change 4", "Change 2", "Change 6"], "waiting rows; Hidden, Approved and an unwaiting Mine row left out");
         let first = &view.items[0];
         assert_eq!((first.age.as_str(), first.tier, first.draft, first.new), ("1d", Tier::Urgent, true, false));
@@ -287,9 +307,14 @@ mod tests {
 
     #[test]
     fn nothingWaiting_isAllClear() {
-        let model = loaded(vec![row("m", Tab::Mine, false), row("o", Tab::Other, false)]);
+        let mut model = Model::new(Ok(config()));
+        let Fetched::Changed { mut list, etag } = list_of(vec![row("m", Tab::Mine, false), row("o", Tab::Other, false)]) else {
+            unreachable!()
+        };
+        list.counts = Counts { reviews: 0, mine: 0 };
+        model.fetched(Fetched::Changed { list, etag }, at("14:12"));
         let view = shown(&model, "14:12");
-        assert_eq!((view.summary.as_str(), view.items.len()), ("All clear", 0));
+        assert_eq!((view.mood, view.heat, view.items.len(), view.tally.len()), ("All clear!", Heat::Clear, 0, 0));
     }
 
     #[test]
@@ -300,12 +325,12 @@ mod tests {
         model.fetched(list_of(vec![row("b", Tab::Other, true), row("a", Tab::Other, true)]), at("14:13"));
         let view = shown(&model, "14:13");
         assert_eq!(view.items.iter().map(|i| i.new).collect::<Vec<_>>(), [true, false]);
-        assert_eq!((view.summary.as_str(), view.has_new), ("1 new", true));
+        assert_eq!(view.new, 1);
 
         model.acknowledge();
         let view = shown(&model, "14:14");
         assert!(view.items.iter().all(|i| !i.new));
-        assert_eq!((view.summary.as_str(), view.has_new), ("", false));
+        assert_eq!(view.new, 0);
     }
 
     #[test]
@@ -327,12 +352,30 @@ mod tests {
     }
 
     #[test]
-    fn summary_countsUrgentAndNew() {
+    fn urgentAndNew_areCountedAcrossPages() {
         let mut urgent = row("u", Tab::Other, true);
         urgent.tier = Tier::Urgent;
         let mut model = loaded(vec![urgent.clone()]);
         model.fetched(list_of(vec![urgent, row("n", Tab::Other, true)]), at("14:13"));
-        assert_eq!(shown(&model, "14:13").summary, "1 urgent · 1 new");
+        let view = shown(&model, "14:13");
+        assert_eq!((view.urgent, view.new), (1, 1));
+    }
+
+    #[test]
+    fn moodAndHeat_followTheReviewsWaiting() {
+        let mood = |reviews: u32, rows: Vec<Row>| {
+            let mut model = Model::new(Ok(config()));
+            let Fetched::Changed { mut list, etag } = list_of(rows) else { unreachable!() };
+            list.counts.reviews = reviews;
+            model.fetched(Fetched::Changed { list, etag }, at("14:12"));
+            let view = shown(&model, "14:12");
+            (view.mood, view.heat)
+        };
+        assert_eq!(mood(0, vec![row("m", Tab::Mine, true)]), ("No reviews waiting", Heat::Clear));
+        assert_eq!(mood(1, vec![]), ("Just one. Quick win?", Heat::Calm));
+        assert_eq!(mood(5, vec![]), ("Getting busy", Heat::Warm));
+        assert_eq!(mood(8, vec![]), ("Stacking up", Heat::Hot));
+        assert_eq!(mood(12, vec![]), ("Review avalanche!", Heat::Hot));
     }
 
     #[test]

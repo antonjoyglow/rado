@@ -1,11 +1,37 @@
 // Sizes are logical pixels: on the Era Color one is 3.48 physical pixels (300 dpi times its 1.16 scale), so the
-// screen is about 363 by 483. The page is a notifier read from across the desk: the numbers first, then one line per
-// thing waiting on me. Colour is only in the Urgent tag.
+// screen is about 363 by 483. The page is a notifier read from across the desk: the load first, then one line per
+// thing waiting on me.
 import "fonts/AtkinsonHyperlegibleNext.ttf";
 import "fonts/JetBrainsMono.ttf";
 import { Palette } from "std-widgets.slint";
 
+// Kaleido colour is faint, so every colour is dark and saturated, and white text on it says the same thing in grey.
+global Ink {
+    out property <color> red: #b3002d;
+    out property <color> blue: #1f4fbf;
+    out property <color> green: #15803d;
+    out property <color> orange: #c45200;
+    out property <color> teal: #00777a;
+    out property <color> purple: #6b2fa8;
+    out property <color> amber: #a86400;
+    out property <color> muted: #555555;
+    out property <color> rule: #c8c8c8;
+}
+
+// One type scale and one grid: a 12 px margin on both sides that every row starts and ends on.
+global Type {
+    out property <length> margin: 12px;
+    out property <length> display: 44px;
+    out property <length> mood: 14px;
+    out property <length> title: 10.5px;
+    out property <length> body: 10px;
+    out property <length> caption: 8px;
+    out property <length> tag: 7px;
+}
+
 export enum Tier { low, normal, urgent }
+
+export enum Heat { clear, calm, warm, hot }
 
 export struct Item {
     title: string,
@@ -21,22 +47,38 @@ export enum Mode { setup, waiting, list }
 
 component Tag inherits Rectangle {
     in property <string> text;
-    in property <color> fill: transparent;
-    in property <color> ink: black;
-    in property <bool> outlined;
+    in property <color> fill;
     height: 13px;
-    border-radius: 6.5px;
+    border-radius: 3px;
     background: fill;
-    border-width: outlined ? 1px : 0;
-    border-color: black;
     HorizontalLayout {
-        padding-left: 5px;
-        padding-right: 5px;
+        padding-left: 4px;
+        padding-right: 4px;
         Text {
             text: root.text;
-            color: root.ink;
-            font-size: 8px;
-            font-weight: 700;
+            color: white;
+            font-size: Type.tag;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <color> fill;
+    height: 18px;
+    border-radius: 9px;
+    background: fill;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            color: white;
+            font-size: 9px;
+            font-weight: 800;
             vertical-alignment: center;
         }
     }
@@ -71,52 +113,62 @@ component Button inherits Rectangle {
 
 component ItemLine inherits Rectangle {
     in property <Item> item;
-    height: 27px;
+    height: 26px;
+    // The tier stripe sits in the margin, so titles keep the page's left edge.
     Rectangle {
+        x: 5px;
+        y: 6px;
+        width: 3px;
+        height: parent.height - 12px;
+        border-radius: 1.5px;
+        background: item.tier == Tier.urgent ? Ink.red : item.tier == Tier.normal ? Ink.blue : Ink.rule;
+    }
+    Rectangle {
+        x: Type.margin;
         y: parent.height - 1px;
+        width: parent.width - 2 * Type.margin;
         height: 1px;
-        background: #ccc;
+        background: Ink.rule;
     }
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
+        padding-left: Type.margin;
+        padding-right: Type.margin;
         spacing: 4px;
-        // Kaleido colour is faint, so the fill is dark and saturated and the word alone says it.
-        if item.tier == Tier.urgent: VerticalLayout {
-            alignment: center;
-            Tag { text: "Urgent"; fill: #a0001c; ink: white; }
-        }
         Text {
             text: item.title;
             horizontal-stretch: 1;
-            color: item.tier == Tier.low ? #555 : black;
-            font-size: 10px;
+            color: item.tier == Tier.low ? Ink.muted : black;
+            font-size: Type.title;
             font-weight: item.new || item.tier == Tier.urgent ? 700 : 400;
             vertical-alignment: center;
             overflow: elide;
         }
+        if item.tier == Tier.urgent: VerticalLayout {
+            alignment: center;
+            Tag { text: "URGENT"; fill: Ink.red; }
+        }
         if item.new: VerticalLayout {
             alignment: center;
-            Tag { text: "NEW"; fill: black; ink: white; }
+            Tag { text: "NEW"; fill: Ink.teal; }
         }
         if item.re-review: VerticalLayout {
             alignment: center;
-            Tag { text: "Re-review"; outlined: true; }
+            Tag { text: "RE-REVIEW"; fill: Ink.purple; }
         }
         if item.yours: VerticalLayout {
             alignment: center;
-            Tag { text: "Yours"; outlined: true; }
+            Tag { text: "YOURS"; fill: Ink.amber; }
         }
         if item.draft: VerticalLayout {
             alignment: center;
-            Tag { text: "Draft"; fill: #d0d0d0; }
+            Tag { text: "DRAFT"; fill: Ink.green; }
         }
         Text {
             text: item.age;
-            width: 22px;
+            width: 24px;
             font-family: "JetBrains Mono";
             font-size: 9px;
-            color: #444;
+            color: Ink.muted;
             horizontal-alignment: right;
             vertical-alignment: center;
         }
@@ -131,8 +183,11 @@ export component AppWindow inherits Window {
     in property <string> workspace;
     in property <int> reviews;
     in property <int> mine;
-    in property <string> summary;
-    in property <bool> has-new;
+    in property <string> mood;
+    in property <Heat> heat;
+    in property <int> urgent;
+    in property <int> new;
+    in property <[Tier]> tally;
     in property <string> updated;
     in property <[string]> banners;
     in property <[Item]> items;
@@ -167,23 +222,23 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             HorizontalLayout {
-                padding-left: 10px;
-                padding-right: 6px;
+                padding-left: Type.margin;
+                padding-right: Type.margin;
                 spacing: 8px;
                 height: 30px;
                 Text {
                     text: mode == Mode.list ? root.workspace : "Rado";
                     horizontal-stretch: 1;
-                    font-size: 10px;
-                    font-weight: 700;
+                    font-size: Type.body;
+                    font-weight: 800;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 if mode == Mode.list: Text {
                     text: root.updated;
                     font-family: "JetBrains Mono";
-                    font-size: 8px;
-                    color: #444;
+                    font-size: Type.caption;
+                    color: Ink.muted;
                     vertical-alignment: center;
                 }
                 VerticalLayout {
@@ -196,32 +251,36 @@ export component AppWindow inherits Window {
             }
 
             if mode == Mode.setup: VerticalLayout {
-                padding: 16px;
+                padding-left: Type.margin;
+                padding-right: Type.margin;
+                padding-top: 16px;
                 spacing: 12px;
                 alignment: start;
                 Text {
                     text: "Pair with Rado";
-                    font-size: 14px;
-                    font-weight: 700;
+                    font-size: Type.mood;
+                    font-weight: 800;
                 }
                 Text {
                     text: root.message;
-                    font-size: 10px;
+                    font-size: Type.body;
                     wrap: word-wrap;
                 }
                 Text {
                     text: "In Rado on the laptop, open Settings > General > PocketBook, press Copy config, and save the text as " + root.config-path + ". Then start this app again.";
-                    font-size: 10px;
+                    font-size: Type.body;
                     wrap: word-wrap;
                 }
             }
 
             if mode == Mode.waiting: VerticalLayout {
-                padding: 16px;
+                padding-left: Type.margin;
+                padding-right: Type.margin;
+                padding-top: 16px;
                 alignment: start;
                 Text {
                     text: root.message;
-                    font-size: 10px;
+                    font-size: Type.body;
                     wrap: word-wrap;
                 }
             }
@@ -236,61 +295,79 @@ export component AppWindow inherits Window {
                         font-size: 9px;
                         font-weight: 700;
                         overflow: elide;
-                        x: 10px;
-                        width: parent.width - 20px;
+                        x: Type.margin;
+                        width: parent.width - 2 * Type.margin;
                         vertical-alignment: center;
                     }
                 }
                 Rectangle {
-                    height: 112px;
+                    height: 122px;
                     VerticalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        padding-top: 4px;
+                        padding-left: Type.margin;
+                        padding-right: Type.margin;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 9px;
                         HorizontalLayout {
-                            spacing: 18px;
-                            alignment: start;
-                            VerticalLayout {
-                                Text {
-                                    text: root.reviews;
-                                    font-family: "JetBrains Mono";
-                                    font-size: 56px;
-                                    font-weight: 800;
-                                }
-                                Text {
-                                    text: root.reviews == 1 ? "review" : "reviews";
-                                    font-size: 9px;
-                                    color: #444;
+                            spacing: Type.margin;
+                            Rectangle {
+                                width: 88px;
+                                height: 88px;
+                                border-radius: 22px;
+                                background: root.heat == Heat.clear ? Ink.green : root.heat == Heat.calm ? Ink.blue : root.heat == Heat.warm ? Ink.orange : Ink.red;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: root.reviews;
+                                        color: white;
+                                        font-family: "JetBrains Mono";
+                                        font-size: Type.display;
+                                        font-weight: 800;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.reviews == 1 ? "REVIEW" : "REVIEWS";
+                                        color: white;
+                                        font-size: Type.tag;
+                                        font-weight: 800;
+                                        letter-spacing: 1px;
+                                        horizontal-alignment: center;
+                                    }
                                 }
                             }
                             VerticalLayout {
-                                alignment: end;
+                                alignment: center;
+                                spacing: 6px;
                                 Text {
-                                    text: root.mine;
-                                    font-family: "JetBrains Mono";
-                                    font-size: 30px;
-                                    font-weight: 700;
+                                    text: root.mood;
+                                    font-size: Type.mood;
+                                    font-weight: 800;
+                                    wrap: word-wrap;
                                 }
-                                Text {
-                                    text: "yours";
-                                    font-size: 9px;
-                                    color: #444;
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: 5px;
+                                    if root.urgent > 0: Chip { text: root.urgent + " urgent"; fill: Ink.red; }
+                                    if root.new > 0: Chip { text: root.new + " new"; fill: Ink.teal; }
+                                    if root.mine > 0: Chip { text: root.mine + " yours"; fill: Ink.amber; }
+                                }
+                                if root.new > 0: Text {
+                                    text: "Tap here to mark them seen";
+                                    font-size: Type.caption;
+                                    color: Ink.muted;
                                 }
                             }
                         }
+                        // One dot per waiting review, coloured by tier.
                         HorizontalLayout {
-                            spacing: 6px;
-                            Text {
-                                text: root.summary;
-                                font-size: 12px;
-                                font-weight: 800;
-                                vertical-alignment: center;
-                            }
-                            if root.has-new: Text {
-                                text: "tap to mark seen";
-                                font-size: 8px;
-                                color: #555;
-                                vertical-alignment: center;
+                            alignment: start;
+                            spacing: 3px;
+                            height: 7px;
+                            for tier in root.tally: Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: tier == Tier.urgent ? Ink.red : tier == Tier.normal ? Ink.blue : Ink.rule;
                             }
                         }
                     }
@@ -299,7 +376,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle {
-                    height: 2px;
+                    height: 1.5px;
                     background: black;
                 }
                 VerticalLayout {
@@ -308,8 +385,8 @@ export component AppWindow inherits Window {
                     for item in root.items: ItemLine { item: item; }
                 }
                 if root.pages > 1: HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
+                    padding-left: Type.margin;
+                    padding-right: Type.margin;
                     height: 28px;
                     VerticalLayout {
                         alignment: center;

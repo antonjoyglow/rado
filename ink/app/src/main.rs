@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ink_core::api::Tier as CoreTier;
 use ink_core::config;
-use ink_core::model::{Model, View};
+use ink_core::model::{Heat as CoreHeat, Model, View};
 use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -82,6 +82,14 @@ fn run(config_path: &str) -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
+fn tier(tier: CoreTier) -> Tier {
+    match tier {
+        CoreTier::Low => Tier::Low,
+        CoreTier::Normal => Tier::Normal,
+        CoreTier::Urgent => Tier::Urgent,
+    }
+}
+
 fn draw(ui: &AppWindow, view: &View) {
     match view {
         View::Setup { problem } => {
@@ -100,19 +108,23 @@ fn draw(ui: &AppWindow, view: &View) {
             ui.set_updated(list.updated.as_str().into());
             let banners: Vec<SharedString> = list.banners.iter().map(|b| b.into()).collect();
             ui.set_banners(ModelRc::new(VecModel::from(banners)));
-            ui.set_summary(list.summary.as_str().into());
-            ui.set_has_new(list.has_new);
+            ui.set_mood(list.mood.into());
+            ui.set_heat(match list.heat {
+                CoreHeat::Clear => Heat::Clear,
+                CoreHeat::Calm => Heat::Calm,
+                CoreHeat::Warm => Heat::Warm,
+                CoreHeat::Hot => Heat::Hot,
+            });
+            ui.set_urgent(list.urgent as i32);
+            ui.set_new(list.new as i32);
+            ui.set_tally(ModelRc::new(VecModel::from(list.tally.iter().map(|&t| tier(t)).collect::<Vec<_>>())));
             let items: Vec<Item> = list
                 .items
                 .iter()
                 .map(|i| Item {
                     title: i.title.as_str().into(),
                     age: i.age.as_str().into(),
-                    tier: match i.tier {
-                        CoreTier::Low => Tier::Low,
-                        CoreTier::Normal => Tier::Normal,
-                        CoreTier::Urgent => Tier::Urgent,
-                    },
+                    tier: tier(i.tier),
                     new: i.new,
                     re_review: i.re_review,
                     yours: i.yours,
