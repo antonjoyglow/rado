@@ -13,10 +13,18 @@
   --low: #8a9099;
   --clear: var(--accent);
   --scroll-thumb: color-mix(in srgb, var(--muted) 80%, var(--bg));
-  /* Outlines of things you press: 3:1 or more on --bg, --hover and --next-bg in each built-in theme. */
+  /* Outlines of things you press: 3:1 or more on --bg, --hover, --card, --card-hover and --next-bg in each built-in theme. */
   --border-strong: color-mix(in srgb, var(--muted) 85%, var(--bg));
-  /* The Review next row's tint; customPalette in theme.ts mirrors the 6% for custom themes. */
-  --next-bg: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  /* Rows are cards on a ground. Only --fg (or --on-accent on --accent) sits on a pill or tint; --muted sits on the
+     ground and the cards. customPalette in theme.ts derives the same set for custom themes. */
+  --ground: #f2f4f7;
+  --card: #ffffff;
+  --card-hover: #f7f8fa;
+  --tag: #e4e6ea;
+  --tint-accent: #deece8;
+  --tint-normal: #f0e5d7;
+  /* The Review next card's tint; customPalette in theme.ts mirrors the 6% for custom themes, whose cards are --bg. */
+  --next-bg: color-mix(in srgb, var(--accent) 6%, var(--card));
   font: 13px/1.4 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--fg);
 }
@@ -36,6 +44,12 @@
     --urgent: #f26b6b;
     --normal: #d98a1c;
     --clear: var(--accent);
+    --ground: #1a1c1f;
+    --card: #26292e;
+    --card-hover: #2e3238;
+    --tag: #383c43;
+    --tint-accent: #284842;
+    --tint-normal: #4d3e2a;
   }
 }
 
@@ -50,6 +64,12 @@
   --urgent: #f26b6b;
   --normal: #d98a1c;
   --clear: var(--accent);
+  --ground: #1a1c1f;
+  --card: #26292e;
+  --card-hover: #2e3238;
+  --tag: #383c43;
+  --tint-accent: #284842;
+  --tint-normal: #4d3e2a;
 }
 
 :root[data-theme="highContrast"] {
@@ -64,6 +84,12 @@
   --normal: #ffb347;
   --low: #b8b8b8;
   --clear: #5ee08f;
+  --ground: #000000;
+  --card: #000000;
+  --card-hover: #262626;
+  --tag: #262626;
+  --tint-accent: #382f02;
+  --tint-normal: #382710;
 }
 
 * { box-sizing: border-box; }
@@ -128,7 +154,7 @@ body[data-view="list"] #app { display: flex; flex-direction: column; height: 100
 
 header { display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 10px 8px 10px 14px; border-bottom: 1px solid var(--line); }
 header h1 {
-  flex: 1; min-width: 0; margin: 0; font-size: calc(18px * min(var(--text-scale, 1), 1.25)); font-weight: 700;
+  flex: 1; min-width: 0; margin: 0; font: 800 calc(19px * min(var(--text-scale, 1), 1.25)) / 1.3 "Nunito", "Segoe UI Variable", "Segoe UI", sans-serif;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* Below 400 px the chip and icons need the title's room; it stays in the accessibility tree. */
@@ -182,7 +208,16 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
   header .refresh[data-busy="true"] .refresh-glyph { opacity: .4; }
 }
 
-.body { flex: 1; overflow-y: auto; padding: 4px 0 10px; scrollbar-width: thin; }
+/* The list body is the ground the cards sit on, a dot pattern drawn as a fill. Sizes in em, here and in the rows,
+   follow the text size setting through the body's font size. */
+.body {
+  flex: 1; display: flex; flex-direction: column; gap: 0.6em; overflow-y: auto; padding: 0.77em 0.92em 0.92em; scrollbar-width: thin;
+  background-color: var(--ground); background-image: radial-gradient(var(--line) 1.2px, transparent 1.7px); background-size: 16px 16px;
+}
+.body[hidden] { display: none; }
+:root[data-theme="highContrast"] .body { background-image: none; }
+/* Muted text reads on the ground but not on a dot, so text on the ground covers the dots under it. */
+.body > .empty, .body > .end > span:not(.end-bird) { background-color: var(--ground); }
 
 /* The list's tabs share the window's width and never shrink below their text, so the strip scrolls sideways below about 520 px. */
 .tabs { flex: none; display: flex; padding: 0 2px; overflow-x: auto; scrollbar-width: thin; border-bottom: 1px solid var(--line); }
@@ -193,55 +228,101 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
   border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none;
   font-size: calc(12px * var(--text-scale, 1)); font-weight: 600; white-space: nowrap;
 }
-#app > .tabs .tab { flex: 1 0 auto; justify-content: center; padding: 8px 8px 6px; gap: 4px; }
+/* The list's tabs are a pill bar; the settings tabs keep their underline. */
+#app > .tabs { gap: 4px; padding: 6px 10px 8px; }
+#app > .tabs .tab { flex: 1 0 auto; justify-content: center; padding: 5px 10px; gap: 5px; border: 0; border-radius: 999px; }
+#app > .tabs .tab .n { min-width: 1.6em; padding: 0 0.45em; border-radius: 999px; background: var(--hover); line-height: 1.5; text-align: center; }
+#app > .tabs .tab[aria-selected="true"], #app > .tabs .tab[aria-selected="true"] .n { background: var(--accent); color: var(--on-accent); }
+#app > .tabs .tab[aria-selected="true"] .next-dot { background: var(--on-accent); }
+#app > .tabs .tab[aria-selected="true"]:focus-visible { outline-color: var(--on-accent); }
 .tab .n { color: var(--muted); font-weight: 400; font-size: calc(11px * var(--text-scale, 1)); font-variant-numeric: tabular-nums; }
 .tab[data-empty="true"] { color: var(--muted); }
 .tab:hover { background: var(--hover); }
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.tab[aria-selected="true"] .n { color: var(--accent); }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tab .next-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .tab:not([data-next="true"]) .next-dot { display: none; }
 .empty { margin: 4px 14px 8px; color: var(--muted); }
 
 .row {
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; align-items: start;
-  padding: 8px 8px 8px 14px; cursor: pointer;
+  flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 0.77em; align-items: start;
+  padding: 0.77em 0.92em 0.77em 0.77em; border-radius: 1.4em; background-color: var(--card); cursor: pointer;
 }
-.row[data-next="true"] { background: var(--next-bg); box-shadow: inset 3px 0 0 var(--accent); }
-.row:hover { background: var(--hover); }
+:root[data-theme="highContrast"] .row { box-shadow: inset 0 0 0 1px var(--line); }
+.row[data-next="true"] {
+  --arc: color-mix(in srgb, var(--accent) 16%, transparent);
+  background-color: var(--next-bg);
+  background-image: radial-gradient(circle at 100% 0, transparent 0 30px, var(--arc) 30px 32px, transparent 32px 44px,
+    var(--arc) 44px 46px, transparent 46px 58px, var(--arc) 58px 60px, transparent 60px);
+}
+/* The Review next card keeps its tint on hover; light --muted doesn't read on a tinted --card-hover. */
+.row:not([data-next="true"]):hover { background-color: var(--card-hover); }
+.row[data-next="true"]:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+:root[data-theme="highContrast"] .row[data-next="true"]:hover { box-shadow: inset 0 0 0 2px var(--fg); }
 .row button.title { padding: 0; border: 0; background: none; text-align: left; }
 .row button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .row .action {
-  width: calc(72px * var(--text-scale, 1)); padding: 2px 0; border: 1px solid var(--border-strong); border-radius: 6px;
-  background: var(--bg); color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); text-align: center;
+  width: calc(72px * var(--text-scale, 1)); padding: 3px 0; border: 0; border-radius: 999px;
+  background: var(--tag); color: var(--fg); font-size: calc(11px * var(--text-scale, 1)); font-weight: 600; text-align: center;
 }
-.row .action:hover { color: var(--fg); }
-.row .action[data-flash="true"] { color: var(--clear); border-color: currentColor; }
-.row .members { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.row .action:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.row .action[data-flash="true"] { background: var(--card); color: var(--clear); box-shadow: inset 0 0 0 1px currentColor; }
+.row .members { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 1px; }
 .row .member {
-  padding: 0 6px; border-radius: 8px; border: 1px solid var(--border-strong); background: none; color: var(--fg); font-size: calc(11px * var(--text-scale, 1));
+  max-width: 100%; overflow-wrap: anywhere; padding: 0.1em 0.85em; border: 0; border-radius: 999px; background: var(--tag); color: var(--fg);
+  font-size: calc(11px * var(--text-scale, 1)); font-weight: 600; line-height: 1.5;
 }
-.row .member[data-assigned="false"] { border-style: dashed; color: var(--muted); }
-.row .member:hover { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
-.row .member.agent-draft:not(:hover) { border-color: var(--accent); color: var(--accent); }
-.row span.agent-draft { padding: 0 6px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); }
-.row .dot { width: 8px; height: 8px; margin-top: calc(6px * var(--text-scale, 1)); border-radius: 50%; background: var(--low); }
-.row[data-tier="urgent"] .dot { background: var(--urgent); }
-.row[data-tier="normal"] .dot { background: var(--normal); }
-.row .main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.row .title { font-weight: 600; overflow-wrap: anywhere; }
-.row .meta { color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); }
-/* Each phrase wraps whole and carries its own separating dot, so a line never starts with one. */
-.row .meta > span { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
-.row .meta > span:not(:last-child)::after { content: "\00a0·"; color: var(--muted); font-weight: 400; }
-.row .meta .next-label, .row .meta .required { color: var(--fg); font-weight: 600; }
-.row .meta .approved { color: var(--clear); }
-.row .meta .objected { color: var(--normal); }
+.row .member.ticket { background: var(--tint-accent); }
+.row .member[data-assigned="false"] { background: none; box-shadow: inset 0 0 0 1.5px var(--border-strong); color: var(--muted); }
+.row .member:hover { background: var(--accent); box-shadow: none; color: var(--on-accent); }
+.row .member.agent-draft { background: var(--accent); color: var(--on-accent); }
+.row .member.agent-draft:hover { background: var(--fg); color: var(--bg); }
+.row span.agent-draft { padding: 0 6px; color: var(--muted); font-size: calc(11px * var(--text-scale, 1)); line-height: 1.6; }
+.row .dot {
+  --dot: var(--low); display: grid; place-items: center; width: 2.2em; height: 2.2em; border-radius: 50%;
+  background: color-mix(in srgb, var(--dot) 20%, transparent);
+}
+.row .dot::after { content: ""; width: 0.8em; height: 0.8em; border-radius: 50%; background: var(--dot); }
+.row[data-tier="urgent"] .dot { --dot: var(--urgent); }
+.row[data-tier="normal"] .dot { --dot: var(--normal); }
+.row .main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.row .title {
+  margin-top: 0.15em; font: 800 calc(15px * var(--text-scale, 1)) / 1.3 "Nunito", "Segoe UI Variable", "Segoe UI", sans-serif;
+  overflow-wrap: anywhere;
+}
+.row .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: var(--fg); font-size: calc(12px * var(--text-scale, 1)); }
+.row .meta > span { max-width: 100%; overflow-wrap: anywhere; }
+.row .meta .branch, .row .meta .comments { color: var(--muted); }
+.row .meta .comments::before {
+  content: ""; display: inline-block; width: 1.05em; height: 1.05em; margin-right: 0.3em; vertical-align: -0.2em; background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M3 2.5h10a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4.5 14v-2.5H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.row .meta :is(.tag, .required, .approved, .objected, .next-label) { padding: 0 0.65em; border-radius: 999px; background: var(--tag); line-height: 1.5; }
+.row .meta :is(.required, .objected) { background: var(--tint-normal); font-weight: 700; }
+.row .meta .approved { background: var(--tint-accent); font-weight: 700; }
+.row .meta .next-label { background: var(--accent); color: var(--on-accent); font-weight: 700; }
 /* The times and the actions share one cell, as wide as the wider of the two, so swapping them never re-wraps the title. */
 .row .side { display: grid; }
 .row .side > * { grid-area: 1 / 1; }
-.row .age { display: flex; flex-direction: column; align-items: flex-end; color: var(--muted); font-size: calc(12px * var(--text-scale, 1)); margin-top: 1px; white-space: nowrap; }
+.row .age { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: calc(11px * var(--text-scale, 1)); margin-top: 2px; white-space: nowrap; }
+.row .age > span { padding: 0 0.7em; border-radius: 999px; background: var(--tag); color: var(--fg); line-height: 1.6; }
+/* About 715 px at 100% text; in em the breakpoint moves with the text size, so large text keeps the narrow layout longer. */
+@container (min-width: 55em) {
+  .row { padding: 1.08em 1.23em 1.08em 0.92em; column-gap: 1.08em; }
+  /* The chips' column sizes first, so the title's needs a floor or large text squeezes it to nothing. */
+  .row .main {
+    display: grid; grid-template-columns: minmax(min(18em, 60%), 1fr) fit-content(calc(320px * var(--text-scale, 1)));
+    column-gap: 1.23em; row-gap: 4px; align-items: center;
+  }
+  .row .main > .title, .row .main > .meta { grid-column: 1; }
+  .row .main > .members { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; margin-top: 0; }
+}
+.body > .end {
+  flex: 1 0 auto; min-height: 9em; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  color: var(--muted); font-size: calc(12px * var(--text-scale, 1));
+}
+.body > .end .end-bird { width: calc(3em * 200 / 240); height: 3em; background: var(--line); mask: url("./counter-logo.svg") center / contain no-repeat; }
+.body > .end .end-count { color: var(--fg); font: 800 calc(14px * var(--text-scale, 1)) / 1.3 "Nunito", "Segoe UI Variable", "Segoe UI", sans-serif; }
 .row .actions { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; cursor: default; }
 /* Hidden actions stay in the Tab order. :focus-within would keep them shown after a mouse click on a chip.
    Any touch screen keeps them shown: a tap can't hover, even on a laptop whose main pointer is a mouse. */
@@ -298,10 +379,10 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 header { position: relative; }
 .ws-chip {
   display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 40%; height: 28px; padding: 0 8px;
-  border: 1px solid var(--line); border-radius: 14px; background: none; font-size: calc(13px * var(--text-scale, 1)); color: var(--muted);
+  border: 0; border-radius: 14px; background: var(--hover); font-size: calc(13px * var(--text-scale, 1)); color: var(--muted);
 }
 .ws-chip .ws-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-weight: 600; }
-.ws-chip:hover, .ws-chip[aria-expanded="true"] { background: var(--hover); }
+.ws-chip:hover, .ws-chip[aria-expanded="true"] { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .ws-chip:focus-visible, .ws-picker button:focus-visible, .ws-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ws-picker {
   position: absolute; z-index: 10; top: 100%; right: 10px; min-width: 200px; max-width: 80%; padding: 4px;
@@ -326,10 +407,16 @@ header { position: relative; }
 /* Windows contrast themes (forced colours) paint every background in the theme's background colour and drop
    box-shadows; only system colours survive. The SVG bird is exempt (preserve-parent-color), so it would keep Rado's
    colours, which its glow and fade in bird.ts read too. The dots keep Rado's tier colours, so the ring makes them
-   show on the theme's background. */
+   show on the theme's background. Cards and pills lose their fills, so they get borders. */
 @media (forced-colors: active) {
   header .bird { --fg: CanvasText; --accent: Highlight; }
-  .row .dot { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .row .dot::after { forced-color-adjust: none; border: 1px solid CanvasText; }
   .tab .next-dot { background: Highlight; }
-  .row[data-next="true"] { border-left: 3px solid Highlight; padding-left: calc(14px - 3px); }
+  .row { border: 1px solid CanvasText; }
+  .row[data-next="true"] { border-left: 4px solid Highlight; }
+  .row .meta :is(.tag, .required, .approved, .objected, .next-label), .row .member, .row .age > span, .row .action, .ws-chip { border: 1px solid CanvasText; }
+  .row .member[data-assigned="false"] { border-style: dashed; }
+  .row .meta .comments::before { forced-color-adjust: none; background: CanvasText; }
+  #app > .tabs .tab[aria-selected="true"], #app > .tabs .tab[aria-selected="true"] .n { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  #app > .tabs .tab[aria-selected="true"] .next-dot { background: HighlightText; }
 }
