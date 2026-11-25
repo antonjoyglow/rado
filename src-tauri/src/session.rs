@@ -54,7 +54,7 @@ const MAX_BACKOFF_MINUTES: i64 = 60;
 struct Backoff {
     /// Failed polls in a row.
     failures: u32,
-    /// The next automatic try: never sooner than one poll interval.
+    /// The next try.
     until: DateTime<Utc>,
     /// When the source said to come back (`Retry-After` or a rate limit's reset); a bare 429 names nothing.
     named: Option<DateTime<Utc>>,
@@ -76,9 +76,10 @@ impl Backoff {
         Self { failures, until, named, message: error.message }
     }
 
-    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true).
+    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true). It
+    /// says "until" only when the source's own time sets the next try, since Refresh passes once that time has come.
     fn status(&self, now: DateTime<Utc>) -> String {
-        match (self.named.is_some(), self.failures) {
+        match (self.named.is_some_and(|at| at >= self.until), self.failures) {
             (true, _) => format!("{} until {}", self.message, clock(self.until, now)),
             (false, 1) => self.message.clone(),
             (false, _) => format!("{} · next try {}", self.message, clock(self.until, now)),
@@ -1191,6 +1192,7 @@ pub(crate) mod tests {
         assert_eq!(asked.status(t0()), format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
         let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
+        assert_eq!(soon.status(t0()), "GitHub: rate limited", "the interval, not the source, sets that try");
         let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(after_failures.until, t0() + minutes(3), "a named time replaces the doubling");
     }
@@ -1287,6 +1289,7 @@ pub(crate) mod tests {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-503");
         let seconds = chrono::Duration::seconds;
         file_github(&mut s, Poll::Failed(SourceError::http("HTTP 503 Service Unavailable".into(), Some(t0() + seconds(5))).named("GitHub")), t0());
+        assert_eq!(s.ws.backoff[&Provider::GitHub].status(t0()), "GitHub: HTTP 503 Service Unavailable", "no \"until\" the interval: Refresh passes sooner");
         assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]), "automatic polls wait an interval");
 
         s.refresh(t0() + seconds(2));
