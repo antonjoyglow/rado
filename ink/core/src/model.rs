@@ -35,7 +35,8 @@ pub struct Model {
     list: Option<List>,
     /// When Rado last answered: the list was current then.
     heard_at: Option<DateTime<FixedOffset>>,
-    /// Row keys I have seen: everything on the first list, and everything listed when I last acknowledged.
+    /// Waiting items I have seen: those on the first list or waiting when I last acknowledged, for as long as they
+    /// keep waiting. An item that stops waiting and comes back, as a re-review does, is new again.
     seen: HashSet<String>,
     page: usize,
 }
@@ -90,10 +91,14 @@ impl Model {
     pub fn fetched(&mut self, fetched: Fetched, now: DateTime<FixedOffset>) {
         match fetched {
             Fetched::Changed { list, .. } => {
-                if self.list.is_none() {
-                    self.seen.extend(list.rows.iter().map(|r| r.key.clone()));
-                }
+                let first = self.list.is_none();
                 self.list = Some(*list);
+                let waiting = self.waiting_keys();
+                if first {
+                    self.seen = waiting;
+                } else {
+                    self.seen.retain(|key| waiting.contains(key));
+                }
                 self.page = self.page.min(self.pages() - 1);
             }
             Fetched::NotModified => {}
@@ -106,13 +111,20 @@ impl Model {
         self.heard_at = Some(now);
     }
 
+    /// A rejected token stays on screen until Rado answers again.
     pub fn failed(&mut self, failure: Failure) {
-        self.link = Link::Failing(failure);
+        if self.link != Link::Rejected {
+            self.link = Link::Failing(failure);
+        }
     }
 
-    /// I looked: nothing listed now is new any more.
+    /// I looked: nothing waiting now is new any more.
     pub fn acknowledge(&mut self) {
-        self.seen.extend(self.list.iter().flat_map(|l| &l.rows).map(|r| r.key.clone()));
+        self.seen = self.waiting_keys();
+    }
+
+    fn waiting_keys(&self) -> HashSet<String> {
+        self.waiting().iter().map(|r| r.key.clone()).collect()
     }
 
     /// Turns a page forward or back, staying within the pages.
@@ -293,6 +305,18 @@ mod tests {
     }
 
     #[test]
+    fn anItemThatStartsWaitingAgain_isNew() {
+        let mut model = loaded(vec![row("approved", Tab::Other, false), row("r", Tab::Other, true)]);
+        model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:13"));
+        assert_eq!(shown(&model, "14:13").items.iter().map(|i| i.new).collect::<Vec<_>>(), [true, false], "approved, then a re-review");
+
+        model.acknowledge();
+        model.fetched(list_of(vec![row("approved", Tab::Other, false), row("r", Tab::Other, true)]), at("14:14"));
+        model.fetched(list_of(vec![row("approved", Tab::ReReview, true), row("r", Tab::Other, true)]), at("14:15"));
+        assert!(shown(&model, "14:15").items[0].new, "seen, gone, back");
+    }
+
+    #[test]
     fn summary_countsUrgentAndNew() {
         let mut urgent = row("u", Tab::Other, true);
         urgent.tier = Tier::Urgent;
@@ -383,6 +407,8 @@ mod tests {
         let mut model = loaded(vec![row("a", Tab::Other, true)]);
         model.fetched(Fetched::Unauthorized, at("14:13"));
         assert!(matches!(model.view(at("14:13")), View::Setup { problem } if problem.contains("rejected the token")));
+        model.failed(Failure::Unreachable);
+        assert!(matches!(model.view(at("14:13")), View::Setup { .. }), "still rejected while the laptop is away");
         model.fetched(Fetched::NotModified, at("14:14"));
         assert_eq!(titles(&shown(&model, "14:14")), ["Change a"]);
     }
