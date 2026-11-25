@@ -7,9 +7,10 @@
 mod queue;
 
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLin
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
 const PROTOCOLS: [&str; 4] = [PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"];
+const DRAFTS_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 fn main() {
     let dir = data_dir();
@@ -442,7 +444,7 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     } else if prs().any(|p| p.number == pr_id && p.source_commit.as_deref() == Some(commit)) {
         return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
-    let _lock = lock_drafts(dir)?;
+    let _lock = lock_drafts(dir, DRAFTS_LOCK_WAIT)?;
     let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
     let mut drafts = read_drafts(&path)?;
     let read = read_links(&links_path, url.is_some())?;
@@ -474,7 +476,7 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     if !path.exists() {
         return Err(unmarked());
     }
-    let _lock = lock_drafts(&ws.dir)?;
+    let _lock = lock_drafts(&ws.dir, DRAFTS_LOCK_WAIT)?;
     let mut drafts = read_drafts(&path)?;
     if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
         return Err(unmarked());
@@ -485,13 +487,29 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
-/// Waits for other `rado-mcp` processes to finish recording; the lock goes when the file is dropped or its process
-/// ends, so a crashed agent can't leave it held.
-fn lock_drafts(dir: &Path) -> Result<File, String> {
+/// Waits up to `wait` for other `rado-mcp` processes to finish recording, then gives up, so an agent that hung while
+/// recording can't block every mark. The lock goes when the file is dropped or its process ends, so a crashed agent
+/// can't leave it held.
+fn lock_drafts(dir: &Path, wait: Duration) -> Result<File, String> {
     let path = dir.join(DRAFTS_LOCK_FILE);
     let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    file.lock().map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file)
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "{} has been held for {} s by another agent recording a draft. Try again; if this keeps happening, end the hung session's rado-mcp.",
+                        path.display(),
+                        wait.as_secs_f32()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -912,6 +930,20 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Workspace Work (id w1): Cannot read") && text.ends_with("Try again."), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
+    }
+
+    #[test]
+    fn lockDrafts_heldByAHungAgent_givesUpNamingTheLockFile() {
+        let dir = TempDir::new("hung");
+        let path = dir.0.join(DRAFTS_LOCK_FILE);
+        let held = File::options().create(true).truncate(false).write(true).open(&path).unwrap();
+        held.lock().unwrap();
+
+        let error = lock_drafts(&dir.0, Duration::from_millis(100)).unwrap_err();
+        drop(held);
+
+        assert!(error.starts_with(&format!("{} has been held for 0.1 s by another agent", path.display())), "{error}");
+        assert!(lock_drafts(&dir.0, Duration::from_millis(100)).is_ok());
     }
 
     #[test]
