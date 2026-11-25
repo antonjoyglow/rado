@@ -1,0 +1,171 @@
+{
+  "workspace": "Acme",
+  "counts": {
+    "reviews": 3,
+    "mine": 1
+  },
+  "lastRefreshed": "2026-11-25T09:30:00Z",
+  "polling": false,
+  "error": null,
+  "rows": [
+    {
+      "key": "pr:1",
+      "tab": "needsReview",
+      "tier": "urgent",
+      "title": "Change 1",
+      "ticket": "ABC-12",
+      "ageHours": 30,
+      "approvals": 1,
+      "objections": 0,
+      "comments": {
+        "total": 3,
+        "openThreads": 1
+      },
+      "waiting": true,
+      "holdsMine": false,
+      "draft": {
+        "linked": true
+      },
+      "prs": [
+        {
+          "repo": "api",
+          "number": 101,
+          "provider": "ado"
+        }
+      ]
+    },
+    {
+      "key": "pr:8",
+      "tab": "hidden",
+      "tier": "low",
+      "title": "Change 8",
+      "ticket": null,
+      "ageHours": 2,
+      "approvals": 0,
+      "objections": 0,
+      "comments": null,
+      "waiting": false,
+      "holdsMine": false,
+      "draft": null,
+      "prs": [
+        {
+          "repo": "api",
+          "number": 108,
+          "provider": "ado"
+        }
+      ]
+    },
+    {
+      "key": "pr:4",
+      "tab": "reReview",
+      "tier": "normal",
+      "title": "Change 4",
+      "ticket": null,
+      "ageHours": 12,
+      "approvals": 0,
+      "objections": 0,
+      "comments": null,
+      "waiting": true,
+      "holdsMine": false,
+      "draft": null,
+      "prs": [
+        {
+          "repo": "web",
+          "number": 104,
+          "provider": "github"
+        }
+      ]
+    },
+    {
+      "key": "branch:GitHub:feature/shared",
+      "tab": "needsReview",
+      "tier": "normal",
+      "title": "Change 2",
+      "ticket": null,
+      "ageHours": 48,
+      "approvals": 0,
+      "objections": 0,
+      "comments": null,
+      "waiting": true,
+      "holdsMine": true,
+      "draft": {
+        "linked": false
+      },
+      "prs": [
+        {
+          "repo": "web",
+          "number": 102,
+          "provider": "github"
+        },
+        {
+          "repo": "app",
+          "number": 103,
+          "provider": "github"
+        }
+      ]
+    },
+    {
+      "key": "pr:7",
+      "tab": "mine",
+      "tier": "normal",
+      "title": "Change 7",
+      "ticket": null,
+      "ageHours": 5,
+      "approvals": 0,
+      "objections": 0,
+      "comments": null,
+      "waiting": false,
+      "holdsMine": true,
+      "draft": null,
+      "prs": [
+        {
+          "repo": "api",
+          "number": 107,
+          "provider": "ado"
+        }
+      ]
+    },
+    {
+      "key": "pr:6",
+      "tab": "mine",
+      "tier": "normal",
+      "title": "Change 6",
+      "ticket": null,
+      "ageHours": 50,
+      "approvals": 0,
+      "objections": 1,
+      "comments": null,
+      "waiting": true,
+      "holdsMine": true,
+      "draft": null,
+      "prs": [
+        {
+          "repo": "api",
+          "number": 106,
+          "provider": "ado"
+        }
+      ]
+    },
+    {
+      "key": "pr:9",
+      "tab": "approved",
+      "tier": "normal",
+      "title": "Change 9",
+      "ticket": null,
+      "ageHours": 72,
+      "approvals": 0,
+      "objections": 0,
+      "comments": null,
+      "waiting": false,
+      "holdsMine": false,
+      "draft": null,
+      "prs": [
+        {
+          "repo": "web",
+          "number": 109,
+          "provider": "github"
+        }
+      ]
+    }
+  ]
+}

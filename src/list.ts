@@ -1,4 +1,4 @@
-import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type InkStatus, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, datesTooltip, draftMarker, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
@@ -472,7 +472,7 @@ function renderSettings(
   /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
   const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => whenBlurred(input, show));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note(), ink: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   // Not in `settings`, so a rollback leaves it as it is.
@@ -503,11 +503,41 @@ function renderSettings(
       if (run === extensionRun) extension.replaceChildren(String(e));
     });
   };
+  // The token stays in Rust: Settings shows dots, and Copy config puts the device's file on the clipboard.
+  const ink = h("div", { class: "ink" });
+  let inkShown = "";
+  const showInk = (s: InkStatus) => {
+    // Re-drawn only on a change, so a re-read during a click keeps its button.
+    if (JSON.stringify(s) === inkShown) return;
+    inkShown = JSON.stringify(s);
+    const button = (text: string, onclick: () => void) => h("button", { type: "button", onclick }, text);
+    const act = (call: () => Promise<InkStatus>, done: string) => call().then((next) => {
+      showInk(next);
+      ok(n.ink, done);
+    }, (e) => fail(n.ink, e));
+    ink.replaceChildren(
+      s.paired
+        ? h("span", { class: "inline" },
+          h("span", { class: "token" }, "•••••••••••••••• saved"),
+          button("Copy config", () => api.copyInkConfig().then(() => ok(n.ink, "Copied"), (e) => fail(n.ink, e))),
+          button("Replace token", () => act(api.pairInk, "Replaced")),
+          button("Remove", () => act(api.unpairInk, "Removed")))
+        : h("span", { class: "inline" }, button("Pair a device", () => act(api.pairInk, "Paired"))),
+      h("span", {}, s.address ? `Laptop address: ${s.address}` : "Laptop address: none, not on Wi-Fi"),
+      h("span", { class: "problem", hidden: !s.problem }, s.problem),
+    );
+  };
+  const checkInk = () => api.inkStatus().then(showInk, (e) => fail(n.ink, e));
+  checkInk();
+
   const recheck = () => {
     if (!extension.isConnected) {
       window.removeEventListener("focus", recheck);
       clearInterval(extensionTimer);
-    } else if (settingUp && !document.hidden && extension.offsetParent !== null) checkExtension();
+      return;
+    }
+    if (settingUp && !document.hidden && extension.offsetParent !== null) checkExtension();
+    if (!document.hidden && ink.offsetParent !== null) checkInk();
   };
   window.addEventListener("focus", recheck);
   const extensionTimer = setInterval(recheck, 3000);
@@ -649,6 +679,10 @@ function renderSettings(
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers), extension),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
+      h("div", { class: "field" },
+        caption("PocketBook", n.ink),
+        h("span", { class: "steps" }, "Shows this list on a PocketBook and acts on its rows. Pair, then save the copied config on the PocketBook as system/config/rado.cfg."),
+        ink),
     ];
   };
   const counter = counterPanel(settings, { note, caption, fail, save });

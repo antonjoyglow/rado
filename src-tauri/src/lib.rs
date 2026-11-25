@@ -3,6 +3,7 @@ mod export;
 mod extension;
 mod github;
 mod group;
+mod ink;
 // Shared with the MCP server binary, which uses the parts the app doesn't.
 #[allow(dead_code)]
 mod queue;
@@ -45,6 +46,7 @@ struct Shared {
     /// Mirrors the session's generation; a change cancels the poll in flight.
     generation: watch::Sender<u64>,
     inner: Mutex<Inner>,
+    pairing: ink::Pairing,
 }
 
 struct Inner {
@@ -408,6 +410,56 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
     session(&app, |s| s.set_hidden(&key, hidden))
 }
 
+impl ink::Rado for AppHandle {
+    fn read<T>(&self, f: impl FnOnce(&Session) -> T) -> T {
+        read(self, f)
+    }
+
+    fn change<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T {
+        session(self, f)
+    }
+
+    /// On the main thread, where the commands open links too. The error is fixed text: the opener's quotes the link.
+    fn open(&self, urls: Vec<String>) -> Result<(), String> {
+        let (sent, opened) = std::sync::mpsc::channel();
+        let app = self.clone();
+        self.run_on_main_thread(move || {
+            let _ = sent.send(open_links(&app, urls));
+        })
+        .map_err(|e| e.to_string())?;
+        match opened.recv() {
+            Ok(Ok(())) => Ok(()),
+            _ => Err("Couldn't open the link on the laptop".into()),
+        }
+    }
+}
+
+#[tauri::command]
+fn ink_status(state: tauri::State<'_, Shared>) -> ink::InkStatus {
+    state.pairing.status()
+}
+
+/// Creates the pairing token, or replaces it so the device paired before stops working.
+#[tauri::command]
+fn pair_ink(state: tauri::State<'_, Shared>) -> Result<ink::InkStatus, String> {
+    state.pairing.pair()?;
+    Ok(state.pairing.status())
+}
+
+/// Removes the pairing token, which stops Rado listening.
+#[tauri::command]
+fn unpair_ink(state: tauri::State<'_, Shared>) -> Result<ink::InkStatus, String> {
+    state.pairing.unpair()?;
+    Ok(state.pairing.status())
+}
+
+/// Puts the device's config file on the clipboard; the token never reaches the window.
+#[tauri::command]
+fn copy_ink_config(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Shared>().pairing.config()?;
+    app.clipboard().write_text(config).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn save_pat(app: AppHandle, workspace: String, pat: String) -> Result<(), String> {
     session(&app, |s| s.save_secret(&workspace, Provider::Ado, &pat))
@@ -605,7 +657,8 @@ pub fn run() {
             let (session, load_warning) = Session::load(store);
             let pill_scale = session.settings().pill_scale;
             let inner = Inner { session, load_warning, list_had_focus: false, newer_release: None };
-            app.manage(Shared { wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
+            let pairing = ink::Pairing::load(Box::new(Keyring::from_env()));
+            app.manage(Shared { wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner), pairing });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
             size_pill(app.handle(), pill_scale, false);
             place_pill(app.handle());
@@ -627,6 +680,8 @@ pub fn run() {
             tauri::async_runtime::spawn(poll_loop(app.handle().clone()));
             tauri::async_runtime::spawn(hover_loop(app.handle().clone()));
             tauri::async_runtime::spawn(releases::release_loop(app.handle().clone()));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move { handle.state::<Shared>().pairing.run(handle.clone()).await });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -640,6 +695,10 @@ pub fn run() {
             open_ticket,
             copy_row,
             set_hidden,
+            ink_status,
+            pair_ink,
+            unpair_ink,
+            copy_ink_config,
             save_pat,
             save_github_token,
             remove_pat,

@@ -129,12 +129,12 @@ impl Saved {
 #[ts(rename = "SessionStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
-    items: Vec<group::ReviewRow>,
+    pub(crate) items: Vec<group::ReviewRow>,
     /// The counter's numbers for `items`.
-    counts: group::Counts,
-    last_refreshed: Option<DateTime<Utc>>,
-    polling: bool,
-    error: Option<String>,
+    pub(crate) counts: group::Counts,
+    pub(crate) last_refreshed: Option<DateTime<Utc>>,
+    pub(crate) polling: bool,
+    pub(crate) error: Option<String>,
     has_pat: bool,
     has_github_token: bool,
     settings: Settings,
@@ -835,7 +835,7 @@ fn mark_hidden(ws: &mut WorkspaceState) {
 
 #[cfg(test)]
 #[allow(non_snake_case)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::score::{PrFacts, ReviewState};
     use crate::store::tests::{MemorySecrets, TempDir};
@@ -920,6 +920,26 @@ mod tests {
             wake: false,
         };
         Fixture { s, secrets, dir }
+    }
+
+    /// A session whose active workspace, `Acme` with a Jira tracker, lists `items` as refreshed at `refreshed`, with
+    /// their links and the agent drafts marked on them. The folder goes when the `TempDir` is dropped.
+    pub(crate) fn listing(
+        name: &str,
+        items: Vec<ReviewItem>,
+        urls: HashMap<i64, String>,
+        drafts: HashMap<i64, Option<String>>,
+        refreshed: DateTime<Utc>,
+    ) -> (Session, TempDir) {
+        let Fixture { mut s, dir, .. } = two_workspaces(name);
+        s.settings.workspaces[0].name = "Acme".into();
+        s.settings.workspaces[0].tracker = Tracker::Jira { site: "acme.atlassian.net".into(), keys: Vec::new() };
+        s.ws.hidden = items.iter().filter(|i| i.hidden).map(|i| i.id).collect();
+        s.ws.items = items;
+        s.ws.urls = urls;
+        s.ws.agent_drafts = drafts;
+        s.ws.last_refreshed = Some(refreshed);
+        (s, dir)
     }
 
     /// Files a GitHub poll listing `prs` at the current generation and returns the ids it would announce.

@@ -278,6 +278,8 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .settings .extension { display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .settings .extension .steps { user-select: text; }
 .settings .extension:empty { display: none; }
+.settings .ink { display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.settings .ink .problem { color: var(--urgent); }
 .settings .caption { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .note { font-size: calc(12px * var(--text-scale, 1)); }
 .note[data-kind="error"] { color: var(--urgent); }
