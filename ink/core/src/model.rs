@@ -10,6 +10,8 @@ use crate::config::Config;
 
 /// Lines per page: ten one-line items and two banners fit the Era Color's 483 logical pixels.
 pub const ITEMS_PER_PAGE: usize = 10;
+/// Tally dots that fit between the margins; the rest show as "+N".
+pub const TALLY_DOTS: usize = 30;
 
 /// Why the last list request got no list.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,11 +61,13 @@ pub struct ListView {
     /// How the load feels, from the reviews waiting: "All clear!" to "Review avalanche!".
     pub mood: &'static str,
     pub heat: Heat,
-    /// Waiting items by tier and newness, across all pages.
+    /// Urgent reviews, and new items, across all pages.
     pub urgent: usize,
     pub new: usize,
-    /// One mark per waiting review, in Rado's order: a tally to read the load and its urgency at a glance.
+    /// One mark per waiting review, in Rado's order, up to `TALLY_DOTS`: the load and its urgency at a glance.
     pub tally: Vec<Tier>,
+    /// Waiting reviews past the tally's dots.
+    pub tally_more: usize,
     /// "updated 14:12", Rado's last refresh in the device's time.
     pub updated: String,
     /// The offline banner, then Rado's source error.
@@ -172,7 +176,8 @@ impl Model {
         }
         banners.extend(list.error.clone());
         let items = self.waiting();
-        let urgent = items.iter().filter(|r| r.tier == Tier::Urgent).count();
+        let reviews_waiting: Vec<Tier> = items.iter().filter(|r| r.tab != Tab::Mine).map(|r| r.tier).collect();
+        let urgent = reviews_waiting.iter().filter(|&&t| t == Tier::Urgent).count();
         let new = items.iter().filter(|r| !self.seen.contains(&seen_key(r))).count();
         let reviews = list.counts.reviews;
         let (mood, heat) = match reviews {
@@ -192,7 +197,8 @@ impl Model {
             heat,
             urgent,
             new,
-            tally: items.iter().filter(|r| r.tab != Tab::Mine).map(|r| r.tier).collect(),
+            tally: reviews_waiting.iter().copied().take(TALLY_DOTS).collect(),
+            tally_more: reviews_waiting.len().saturating_sub(TALLY_DOTS),
             updated: list
                 .last_refreshed
                 .map_or("not updated yet".into(), |at| format!("updated {}", at.with_timezone(&now.timezone()).format("%H:%M"))),
@@ -352,13 +358,18 @@ mod tests {
     }
 
     #[test]
-    fn urgentAndNew_areCountedAcrossPages() {
-        let mut urgent = row("u", Tab::Other, true);
-        urgent.tier = Tier::Urgent;
-        let mut model = loaded(vec![urgent.clone()]);
-        model.fetched(list_of(vec![urgent, row("n", Tab::Other, true)]), at("14:13"));
+    fn urgentNewAndTally_countEveryPage_andTheTallyStopsAtItsDots() {
+        let urgent = |key: &str, tab| Row { tier: Tier::Urgent, ..row(key, tab, true) };
+        let mut rows: Vec<Row> = (0..34).map(|i| row(&format!("r{i}"), Tab::Other, true)).collect();
+        rows.push(urgent("u", Tab::Other));
+        rows.push(urgent("mine", Tab::Mine));
+        let mut model = loaded(rows.clone());
+        rows.push(row("n", Tab::Other, true));
+        model.fetched(list_of(rows), at("14:13"));
         let view = shown(&model, "14:13");
-        assert_eq!((view.urgent, view.new), (1, 1));
+        assert_eq!((view.urgent, view.new), (1, 1), "urgent counts reviews, as the tally does; mine is not one");
+        assert_eq!((view.tally.len(), view.tally_more), (TALLY_DOTS, 6), "36 waiting reviews");
+        assert_eq!(view.items.len(), ITEMS_PER_PAGE);
     }
 
     #[test]
@@ -373,9 +384,12 @@ mod tests {
         };
         assert_eq!(mood(0, vec![row("m", Tab::Mine, true)]), ("No reviews waiting", Heat::Clear));
         assert_eq!(mood(1, vec![]), ("Just one. Quick win?", Heat::Calm));
-        assert_eq!(mood(5, vec![]), ("Getting busy", Heat::Warm));
-        assert_eq!(mood(8, vec![]), ("Stacking up", Heat::Hot));
-        assert_eq!(mood(12, vec![]), ("Review avalanche!", Heat::Hot));
+        assert_eq!(mood(3, vec![]), ("A few waiting", Heat::Calm));
+        assert_eq!(mood(4, vec![]), ("Getting busy", Heat::Warm));
+        assert_eq!(mood(6, vec![]), ("Getting busy", Heat::Warm));
+        assert_eq!(mood(7, vec![]), ("Stacking up", Heat::Hot));
+        assert_eq!(mood(9, vec![]), ("Stacking up", Heat::Hot));
+        assert_eq!(mood(10, vec![]), ("Review avalanche!", Heat::Hot));
     }
 
     #[test]

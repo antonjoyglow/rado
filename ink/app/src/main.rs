@@ -118,6 +118,7 @@ fn draw(ui: &AppWindow, view: &View) {
             ui.set_urgent(list.urgent as i32);
             ui.set_new(list.new as i32);
             ui.set_tally(ModelRc::new(VecModel::from(list.tally.iter().map(|&t| tier(t)).collect::<Vec<_>>())));
+            ui.set_tally_more(list.tally_more as i32);
             let items: Vec<Item> = list
                 .items
                 .iter()

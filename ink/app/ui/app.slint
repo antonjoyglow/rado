@@ -188,6 +188,7 @@ export component AppWindow inherits Window {
     in property <int> urgent;
     in property <int> new;
     in property <[Tier]> tally;
+    in property <int> tally-more;
     in property <string> updated;
     in property <[string]> banners;
     in property <[Item]> items;
@@ -368,6 +369,13 @@ export component AppWindow inherits Window {
                                 height: 7px;
                                 border-radius: 3.5px;
                                 background: tier == Tier.urgent ? Ink.red : tier == Tier.normal ? Ink.blue : Ink.rule;
+                            }
+                            if root.tally-more > 0: Text {
+                                text: "+" + root.tally-more;
+                                font-family: "JetBrains Mono";
+                                font-size: Type.caption;
+                                color: Ink.muted;
+                                vertical-alignment: center;
                             }
                         }
                     }
