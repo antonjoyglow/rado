@@ -363,7 +363,9 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
     class: "row",
     data: { tier, next: String(isNext) },
     // Marked first: a row of several PRs can fail on a later link after the first one opened.
-    onclick: () => {
+    onclick: (e: MouseEvent) => {
+      // A double-click's second click would open every PR of the row again.
+      if (e.detail > 1) return;
       opened(item.key);
       void act(api.openRow(item.key));
     },

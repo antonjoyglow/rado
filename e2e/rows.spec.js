@@ -8,6 +8,12 @@ test("the list renders a row with its title and the tab count", async ({ page })
   await expect(page.locator("#tab-needsReview .n")).toHaveText("1");
 });
 
+test("double-clicking a row opens it once", async ({ page }) => {
+  await open(page, snapshot({ items: [item({ id: 1, key: "k1" })] }));
+  await page.locator(".row .title").dblclick();
+  expect((await calls(page, "open_row")).map((c) => c.args.key)).toEqual(["k1"]);
+});
+
 test.describe("Draft ready chip", () => {
   test("a linked draft is a button titled with its host and opens the draft, not the row", async ({ page }) => {
     const m = member({ id: 7, number: 7, agentDraft: { host: "github.com" } });
