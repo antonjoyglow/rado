@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState};
-use crate::source::{QueueRef, SourceError, SourcePoll, retry_at, throttled};
+use crate::source::{QueueRef, SourceError, SourcePoll, retry_after, retry_at, throttled};
 
 const ENDPOINT: &str = "https://api.github.com/graphql";
 
@@ -204,7 +204,8 @@ pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, Sou
         .await
         .map_err(|e| format!("network: {e}"))?;
     let status = response.status();
-    let retry = retry_at(response.headers(), Utc::now());
+    let now = Utc::now();
+    let retry = retry_at(response.headers(), now);
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("token rejected (expired or revoked)".into());
     }
@@ -212,7 +213,7 @@ pub async fn fetch(token: &str, watched_repos: &[String]) -> Result<Fetched, Sou
         return Err(SourceError::rate_limited(retry));
     }
     if !status.is_success() {
-        return Err(format!("HTTP {status}").into());
+        return Err(SourceError::http(format!("HTTP {status}"), retry_after(response.headers(), now)));
     }
     let body = response.bytes().await.map_err(|e| format!("network: {e}"))?;
     // GraphQL reports a spent rate limit as a 200 with an error and no data.
