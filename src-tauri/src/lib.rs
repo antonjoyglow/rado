@@ -428,24 +428,6 @@ impl ink::Rado for AppHandle {
     fn read<T>(&self, f: impl FnOnce(&Session) -> T) -> T {
         read(self, f)
     }
-
-    fn change<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T {
-        session(self, f)
-    }
-
-    /// On the main thread, where the commands open links too. The error is fixed text: the opener's quotes the link.
-    fn open(&self, urls: Vec<String>) -> Result<(), String> {
-        let (sent, opened) = std::sync::mpsc::channel();
-        let app = self.clone();
-        self.run_on_main_thread(move || {
-            let _ = sent.send(open_links(&app, urls));
-        })
-        .map_err(|e| e.to_string())?;
-        match opened.recv() {
-            Ok(Ok(())) => Ok(()),
-            _ => Err("Couldn't open the link on the laptop".into()),
-        }
-    }
 }
 
 // The pairing commands look up the network adapters, so they stay off the main thread.

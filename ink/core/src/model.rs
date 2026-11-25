@@ -193,8 +193,9 @@ impl Model {
             0 => ("No reviews waiting", Heat::Clear),
             1 => ("Just one. Quick win?", Heat::Calm),
             2..=3 => ("A few waiting", Heat::Calm),
-            4..=6 => ("Getting busy", Heat::Warm),
-            7..=9 => ("Stacking up", Heat::Hot),
+            // Hot and the avalanche at 70% and 100% of the 40 PRs where the laptop's counter turns full red.
+            4..=27 => ("Getting busy", Heat::Warm),
+            28..=39 => ("Stacking up", Heat::Hot),
             _ => ("Review avalanche!", Heat::Hot),
         };
         View::List(ListView {
@@ -418,10 +419,10 @@ mod tests {
         assert_eq!(mood(1, vec![]), ("Just one. Quick win?", Heat::Calm));
         assert_eq!(mood(3, vec![]), ("A few waiting", Heat::Calm));
         assert_eq!(mood(4, vec![]), ("Getting busy", Heat::Warm));
-        assert_eq!(mood(6, vec![]), ("Getting busy", Heat::Warm));
-        assert_eq!(mood(7, vec![]), ("Stacking up", Heat::Hot));
-        assert_eq!(mood(9, vec![]), ("Stacking up", Heat::Hot));
-        assert_eq!(mood(10, vec![]), ("Review avalanche!", Heat::Hot));
+        assert_eq!(mood(27, vec![]), ("Getting busy", Heat::Warm));
+        assert_eq!(mood(28, vec![]), ("Stacking up", Heat::Hot));
+        assert_eq!(mood(39, vec![]), ("Stacking up", Heat::Hot));
+        assert_eq!(mood(40, vec![]), ("Review avalanche!", Heat::Hot));
     }
 
     #[test]

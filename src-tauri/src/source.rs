@@ -62,10 +62,11 @@ pub fn retry_at(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Opt
     })
 }
 
-/// When `Retry-After` (in seconds) says to send the next request, on any response. Azure DevOps's
-/// `X-RateLimit-Reset` is when its usage would drain, not a time to come back, so only a throttled answer reads it.
+/// When `Retry-After` (in seconds) says to send the next request, on any response; 0 or less asks for no wait.
+/// Azure DevOps's `X-RateLimit-Reset` is when its usage would drain, not a time to come back, so only a throttled
+/// answer reads it.
 pub fn retry_after(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    header_number(headers, "retry-after").map(|seconds| now + chrono::Duration::seconds(seconds.clamp(0, DAY_SECONDS)))
+    header_number(headers, "retry-after").filter(|seconds| *seconds > 0).map(|seconds| now + chrono::Duration::seconds(seconds.min(DAY_SECONDS)))
 }
 
 fn header_number(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
@@ -182,6 +183,17 @@ mod tests {
         assert_eq!(retry_after(&headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset)]), now()), None);
         assert_eq!(retry_after(&headers(&[("retry-after", "5")]), now()), Some(now() + chrono::Duration::seconds(5)));
         assert_eq!(retry_after(&headers(&[("retry-after", "99999999999999")]), now()), Some(now() + chrono::Duration::days(1)));
+    }
+
+    #[test]
+    fn retryAfter_zeroOrLess_namesNoTime() {
+        for seconds in ["0", "-5"] {
+            assert_eq!(retry_after(&headers(&[("retry-after", seconds)]), now()), None, "{seconds}");
+            assert_eq!(retry_at(&headers(&[("retry-after", seconds)]), now()), None, "{seconds}");
+        }
+        let reset = now() + chrono::Duration::minutes(20);
+        let with_reset = headers(&[("retry-after", "0"), ("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset.timestamp().to_string())]);
+        assert_eq!(retry_at(&with_reset, now()), Some(reset), "the reset time still counts");
     }
 
     #[test]

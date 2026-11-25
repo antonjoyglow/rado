@@ -142,7 +142,7 @@ To install, click **Set up**: it copies `edge://extensions` (or `chrome://extens
 
 ### PocketBook
 
-A PocketBook e-reader can show the active workspace's list and act on its rows, through the Rado app in `ink/`. Rado serves it over the home Wi-Fi.
+A PocketBook e-reader can show what waits on you in the active workspace, through the Rado app in `ink/`. It only reads: nothing on the device changes Rado. Rado serves it over the home Wi-Fi.
 
 **Pairing** (Settings → General → *PocketBook*):
 1. Click **Pair a device**. Rado makes a pairing token, keeps it in Credential Manager, and starts listening on port 7878 of the laptop's Wi-Fi address, shown as *Laptop address*. It never listens on the VPN or a wired adapter.
@@ -151,7 +151,7 @@ A PocketBook e-reader can show the active workspace's list and act on its rows, 
 
 **Replace token** locks out the device paired before; copy the config to the device again. **Remove** deletes the token and stops Rado listening. Without a token Rado listens to nothing. When the laptop's Wi-Fi address changes, Rado moves to the new address within a minute; the config file then needs the new one.
 
-**What the device can do**, always on the active workspace: read the list (the workspace name, the counter's two numbers, the last refresh, the source error, and each row's tab, tier, title, ticket key, age, counts, draft and PRs as repo and number), refresh now, open a row's PRs, ticket or draft on the laptop in the browser chosen here, and hide or show a row. It never receives links, settings or tokens. Row keys carry the branch name of an aggregate row. Traffic is plain HTTP on the home network.
+**What the device gets**, always for the active workspace: the workspace name, the counter's two numbers, the last refresh, the source error, and each row's tab, tier, title, age, whether it waits on you, and whether an agent drafted a review for it. Rado answers only `GET /v1/list`. It never sends links, settings or tokens. Row keys carry the branch name of an aggregate row. Traffic is plain HTTP on the home network.
 
 ### MCP server
 
