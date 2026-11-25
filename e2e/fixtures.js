@@ -104,3 +104,13 @@ export function snapshot(extra = {}) {
     settings: s,
   };
 }
+
+/** Every fact `rowFacts` can show, a ticket, a PR not assigned to you and a linked agent draft. */
+export function worstCase() {
+  const mine = member({ id: 31, number: 31, agentDraft: { host: "github.com" } });
+  const other = member({ id: 32, number: 32, repo: "api", state: null });
+  return item({
+    members: [mine, other], id: 31, key: "worst", ticket: "TAC-1", required: true, approvals: 2, objections: 1,
+    comments: { total: 3, openThreads: 1 }, draft: true, releaseTarget: true, target: "main",
+  });
+}

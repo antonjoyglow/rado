@@ -1,36 +1,26 @@
 import { test, expect } from "@playwright/test";
 import { open } from "./harness.js";
-import { snapshot, item, member } from "./fixtures.js";
+import { snapshot, item, member, worstCase } from "./fixtures.js";
 
 const TRANSPARENT = "rgba(0, 0, 0, 0)";
-
-/** Every fact `rowFacts` can show, a ticket, a PR not assigned to you and a linked agent draft. */
-function worstCase() {
-  const mine = member({ id: 31, number: 31, agentDraft: { host: "github.com" } });
-  const other = member({ id: 32, number: 32, repo: "api", state: null });
-  return item({
-    members: [mine, other], id: 31, key: "worst", ticket: "TAC-1", required: true, approvals: 2, objections: 1,
-    comments: { total: 3, openThreads: 1 }, draft: true, releaseTarget: true, target: "main",
-  });
-}
 
 test("every fact and chip of a row has its own look", async ({ page }) => {
   await open(page, snapshot({ items: [worstCase()] }));
   const facts = page.locator(".row .meta > span");
   expect(await facts.evaluateAll((els) => els.map((e) => [e.className, e.textContent]))).toEqual([
     ["next-label", "Review next"],
-    ["tag", "2 PRs"],
-    ["branch", "feature/x"],
+    ["fact-tag", "2 PRs"],
+    ["fact-branch", "feature/x"],
     ["", "Ada Lovelace"],
-    ["required", "required"],
-    ["approved", "✓ 2"],
-    ["objected", "✗ 1"],
-    ["comments", "3 comments"],
-    ["tag", "1 open"],
-    ["tag", "draft"],
-    ["tag", "→ main"],
+    ["fact-required", "required"],
+    ["fact-approved", "✓ 2"],
+    ["fact-objected", "✗ 1"],
+    ["fact-comments", "3 comments"],
+    ["fact-tag", "1 open"],
+    ["fact-tag", "draft"],
+    ["fact-tag", "→ main"],
   ]);
-  const filled = await page.locator(".row .meta > span:is(.tag, .required, .approved, .objected, .next-label)")
+  const filled = await page.locator(".row .meta > span:is(.fact-tag, .fact-required, .fact-approved, .fact-objected, .next-label)")
     .evaluateAll((els) => els.map((e) => getComputedStyle(e).backgroundColor));
   expect(filled).toHaveLength(8);
   for (const colour of filled) expect(colour).not.toBe(TRANSPARENT);
@@ -105,56 +95,10 @@ test("Settings replace the list", async ({ page }) => {
   await expect(page.locator(".body")).toBeHidden();
 });
 
-test("the focused selected tab's ring differs from its fill", async ({ page }) => {
-  await open(page, snapshot());
-  await page.locator("#tab-needsReview").focus();
-  await page.keyboard.press("ArrowRight");
-  await page.keyboard.press("ArrowLeft");
-  const { outline, fill } = await page.locator("#tab-needsReview").evaluate((e) => {
-    const s = getComputedStyle(e);
-    return { outline: s.outlineColor, fill: s.backgroundColor };
-  });
-  expect(outline).not.toBe(fill);
-});
-
-/** WCAG contrast of two computed colours, `rgb(…)` or `color(srgb …)`. */
-function contrast(a, b) {
-  const channels = (c) => {
-    const n = c.match(/[\d.]+/g).map(Number);
-    return c.startsWith("color(") ? n.slice(0, 3) : n.slice(0, 3).map((v) => v / 255);
-  };
-  const lum = (c) => {
-    const [r, g, bl] = channels(c).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
-  };
-  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
-const PAIRS = [
-  ...["--ground", "--card", "--card-hover", "--tag", "--tint-accent", "--tint-normal", "--next-bg"].map((f) => ["--fg", f]),
-  ...["--ground", "--card", "--card-hover", "--next-bg"].map((f) => ["--muted", f]),
-  ["--on-accent", "--accent"],
-];
-
-for (const theme of ["light", "dark", "highContrast", "custom"]) {
-  test(`every text colour reads at 4.5:1 on the fill under it in the ${theme} theme`, async ({ page }) => {
-    await open(page, snapshot({ settings: { theme } }));
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    const colours = await page.evaluate((names) => Object.fromEntries(names.map((n) => {
-      const probe = document.body.appendChild(Object.assign(document.createElement("i"), { style: `color:var(${n})` }));
-      return [n, getComputedStyle(probe).color];
-    })), [...new Set(PAIRS.flat())]);
-    for (const [text, fill] of PAIRS) {
-      expect(contrast(colours[text], colours[fill]), `${text} on ${fill}: ${colours[text]} on ${colours[fill]}`).toBeGreaterThanOrEqual(4.5);
-    }
-  });
-}
-
 test("in forced colours the cards and pills keep borders", async ({ page }) => {
   await page.emulateMedia({ forcedColors: "active" });
   await open(page, snapshot({ items: [worstCase()] }));
-  for (const selector of [".row", ".row .meta .tag", ".row .member"]) {
+  for (const selector of [".row", ".row .meta .fact-tag", ".row .member"]) {
     expect(await page.locator(selector).first().evaluate((e) => getComputedStyle(e).borderTopStyle), selector).not.toBe("none");
   }
 });

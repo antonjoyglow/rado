@@ -20,8 +20,9 @@ test.afterAll(async () => {
 });
 
 test("the counter loads in WebView2 and open_list opens the list", async () => {
-  const pill = await byView("pill");
-  expect(pill, "counter page").not.toBeNull();
+  // CDP answers before the counter's page has loaded.
+  let pill;
+  await expect.poll(async () => (pill = await byView("pill")), { timeout: 30_000, message: "counter page" }).not.toBeNull();
   expect(await pill.evaluate(() => navigator.userAgent)).toContain("Edg/");
   await pill.evaluate(() => window.__TAURI_INTERNALS__.invoke("open_list"));
   await expect.poll(async () => (list = await byView("list")), { timeout: 10_000 }).not.toBeNull();
@@ -76,11 +77,14 @@ test("add a workspace, switch with the chip and back with Ctrl+arrow", async () 
   await expect.poll(async () => (await snapshot()).settings.activeWorkspace).toBe(start);
 });
 
-test("the High contrast theme applies", async () => {
+test("each theme applies, shot to shots/webview2-<theme>.png", async () => {
   // A switch to a workspace without a token reopens Settings by itself.
   if ((await list.locator("h1").textContent()) !== "Settings") await list.getByTitle("Settings").click();
   await list.locator("#settings-tab-general").click();
-  await list.getByRole("button", { name: "High contrast" }).click();
-  await expect(list.locator("html")).toHaveAttribute("data-theme", "highContrast");
+  for (const [theme, label] of [["dark", "Dark"], ["light", "Light"], ["highContrast", "High contrast"]]) {
+    await list.getByRole("button", { name: label, exact: true }).click();
+    await expect(list.locator("html")).toHaveAttribute("data-theme", theme);
+    await list.screenshot({ path: `shots/webview2-${theme}.png` });
+  }
   await list.getByRole("button", { name: "System", exact: true }).first().click();
 });
