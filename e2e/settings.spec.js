@@ -211,6 +211,54 @@ test.describe("empty list", () => {
   });
 });
 
+test.describe("PocketBook pairing", () => {
+  /** Opens Settings → General with `start` as the pairing status; each command in `after` answers with its status and
+   * makes it the one `ink_status` reports from then on, as Rado does. */
+  const general = async (page, start, after = {}) => {
+    await open(page, snapshot());
+    await page.evaluate(([start, after]) => {
+      window.__e2e.responses.ink_status = start;
+      for (const [cmd, status] of Object.entries(after)) window.__e2e.handlers[cmd] = () => (window.__e2e.responses.ink_status = status);
+    }, [start, after]);
+    await page.getByTitle("Settings").click();
+    await page.locator("#settings-tab-general").click();
+  };
+  const unpaired = { paired: false, address: "192.168.1.14:7878", problem: null };
+  const paired = { paired: true, address: "192.168.1.14:7878", problem: null };
+
+  test("pairing shows the token as dots and the address, and Copy config goes through Rado", async ({ page }) => {
+    await general(page, unpaired, { pair_ink: paired });
+    await expect(page.getByText("Laptop address: 192.168.1.14:7878")).toBeVisible();
+    await page.getByRole("button", { name: "Pair a device" }).click();
+    await expect(page.getByText("•••••••••••••••• saved")).toBeVisible();
+    await page.getByRole("button", { name: "Copy config" }).click();
+    await expect(page.getByText("Copied", { exact: true })).toBeVisible();
+    expect(await calls(page, "copy_ink_config")).toHaveLength(1);
+  });
+
+  test("a listener problem shows, Replace goes through Rado, and Remove goes back to Pair", async ({ page }) => {
+    await general(page, { ...paired, problem: "Can't listen on 192.168.1.14:7878 (in use)" }, {
+      pair_ink: paired,
+      unpair_ink: { paired: false, address: null, problem: null },
+    });
+    await expect(page.getByText("Can't listen on 192.168.1.14:7878 (in use)")).toBeVisible();
+    await page.getByRole("button", { name: "Replace token" }).click();
+    await expect(page.getByText("Replaced")).toBeVisible();
+    await page.getByRole("button", { name: "Remove" }).click();
+    await expect(page.getByRole("button", { name: "Pair a device" })).toBeVisible();
+    await expect(page.getByText("Laptop address: none, not on Wi-Fi")).toBeVisible();
+    await expect(page.getByText("Can't listen on 192.168.1.14:7878 (in use)")).toBeHidden();
+    expect([(await calls(page, "pair_ink")).length, (await calls(page, "unpair_ink")).length]).toEqual([1, 1]);
+  });
+
+  test("a failed pairing says why", async ({ page }) => {
+    await general(page, unpaired);
+    await setFail(page, "pair_ink", "Credential Manager: access denied");
+    await page.getByRole("button", { name: "Pair a device" }).click();
+    await expect(page.getByText("Credential Manager: access denied")).toBeVisible();
+  });
+});
+
 test("with no token at all Settings opens at start", async ({ page }) => {
   await open(page, snapshot({ items: [], hasPat: false, hasGithubToken: false, saved: { ws1: { pat: false, githubToken: false } } }));
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();

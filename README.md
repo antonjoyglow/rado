@@ -139,6 +139,19 @@ Without it, links open as ordinary tabs. The installer puts the extension in a `
 
 To install, click **Set up**: it copies `edge://extensions` (or `chrome://extensions`), opens a new tab in that browser and shows the folder in Explorer. Browsers don't open their own pages from another app, so paste the address into the tab and press Enter. Switch on **Developer mode**, click **Load unpacked** and pick the folder; the status turns to *loaded* within a few seconds. It asks for `tabs` and `tabGroups` and runs on `dev.azure.com` and `github.com` only. After a Rado update, click **Reload** on its card; the card's version then matches Rado's.
 
+### PocketBook
+
+A PocketBook e-reader can show the active workspace's list and act on its rows, through the Rado app in `ink/`. Rado serves it over the home Wi-Fi.
+
+**Pairing** (Settings → General → *PocketBook*):
+1. Click **Pair a device**. Rado makes a pairing token, keeps it in Credential Manager, and starts listening on port 7878 of the laptop's Wi-Fi address, shown as *Laptop address*. It never listens on the VPN or a wired adapter.
+2. The first time, Windows Firewall asks whether Rado may accept connections: allow it on the network the PocketBook uses.
+3. Click **Copy config** and save the text on the PocketBook, over USB, as `system/config/rado.cfg`. It holds the laptop's address, the port and the token, one `key=value` per line. The token is on the clipboard until you copy something else, and in clipboard history (Win+V) if that is on.
+
+**Replace token** locks out the device paired before; copy the config to the device again. **Remove** deletes the token and stops Rado listening. Without a token Rado listens to nothing. When the laptop's Wi-Fi address changes, Rado moves to the new address within a minute; the config file then needs the new one.
+
+**What the device can do**, always on the active workspace: read the list (the workspace name, the counter's two numbers, the last refresh, the source error, and each row's tab, tier, title, ticket key, age, counts, draft and PRs as repo and number), refresh now, open a row's PRs, ticket or draft on the laptop in the browser chosen here, and hide or show a row. It never receives links, settings or tokens. Row keys carry the branch name of an aggregate row. Traffic is plain HTTP on the home network.
+
 ### MCP server
 
 `rado-mcp.exe` is a stdio MCP server that hands your review queue to a scheduled Claude agent and records what it drafted.
@@ -266,7 +279,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 
 ### Storage
 
-- Tokens: Windows Credential Manager, service `review-bracket`, users `ado-pat:<workspace id>` and `github-token:<workspace id>`. The id never changes, so renaming keeps the tokens. `RADO_KEYRING_SERVICE` overrides the service name, for a dev build that must not touch your real tokens.
+- Tokens: Windows Credential Manager, service `review-bracket`, users `ado-pat:<workspace id>` and `github-token:<workspace id>`, and `ink-token` for the [PocketBook](#pocketbook) pairing. The id never changes, so renaming keeps the tokens. `RADO_KEYRING_SERVICE` overrides the service name, for a dev build that must not touch your real tokens.
 - Everything else is under `%APPDATA%\dev.antonis.rado\`:
   - `settings.json`: settings and workspaces, with the active one. If it is damaged or lists no usable workspace, Rado keeps a copy as `settings.unreadable-<hash>.json`, runs on defaults and saves no settings or tokens that run, so your workspaces are kept: fix it, or put back a good copy, and restart Rado. Deleting it starts over without your workspaces.
   - `.window-state.json`: the counter's position
@@ -274,7 +287,7 @@ After Rado's next poll, PR #88's row shows **Draft ready**, a button that opens 
 
 ### Settings
 
-⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications and start with Windows. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
+⚙ in the list's header. *Workspaces* holds each workspace's sources and tracker, **Make active** and **Delete workspace…**. *General* holds what all workspaces share: **Check every** (polling), text size (80–150%, chips for 90, 100, 115 and 130%, − / + by 5%; larger text makes the tab strip scroll sideways), list width and height, theme, browser, notifications, start with Windows and [PocketBook](#pocketbook) pairing. *Counter* holds the counter's colours, opacity and size (see [Counter](#counter)). Settings reopen on the tab you last chose, or on *Workspaces* when the active workspace has no token.
 
 **Theme:** *System* (default; follows Windows' light or dark mode), *Dark*, *Light*, *High contrast* or *Custom* (a background, text and accent colour, picked or typed as hex such as `#1f2125`; it warns when text or accent reads below 4.5:1). *System*, *Dark* and *Light* use shades of the logo's green as the accent, and the same green marks approvals and OK states. The counter has its own colours, under *Counter*.
 

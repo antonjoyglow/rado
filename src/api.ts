@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ExtensionStatus } from "./bindings/ExtensionStatus";
+import type { InkStatus } from "./bindings/InkStatus";
 import type { Member } from "./bindings/Member";
 import type { Settings } from "./bindings/Settings";
 import type { Snapshot } from "./bindings/Snapshot";
@@ -17,7 +18,7 @@ export type { Saved } from "./bindings/Saved";
 export type { Theme } from "./bindings/Theme";
 export type { Tier } from "./bindings/Tier";
 export type { Tracker } from "./bindings/Tracker";
-export type { ExtensionStatus, Member, Settings, Snapshot, Workspace };
+export type { ExtensionStatus, InkStatus, Member, Settings, Snapshot, Workspace };
 
 /** Which PR, as people write it: provider plus the number shown as `!n` (Azure DevOps) or `#n` (GitHub). */
 export type PrRef = Pick<Member, "repo" | "provider" | "number">;
@@ -50,6 +51,10 @@ export const api = {
   openNewerRelease: () => invoke<void>("open_newer_release"),
   extensionStatus: (browser: "edge" | "chrome") => invoke<ExtensionStatus>("extension_status", { browser }),
   setUpExtension: (browser: "edge" | "chrome") => invoke<void>("set_up_extension", { browser }),
+  inkStatus: () => invoke<InkStatus>("ink_status"),
+  pairInk: () => invoke<InkStatus>("pair_ink"),
+  unpairInk: () => invoke<InkStatus>("unpair_ink"),
+  copyInkConfig: () => invoke<void>("copy_ink_config"),
 };
 
 export async function watchSnapshot(render: (s: Snapshot) => void): Promise<void> {
