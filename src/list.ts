@@ -324,7 +324,8 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
   const aggregate = item.members.length > 1;
   // Spans, not buttons: the chips below are exactly the things that open something.
   const facts = rowFacts(item).map(({ text, kind, title }) => {
-    const fact = h("span", { class: kind }, text);
+    // Prefixed: a kind is data, and must not pick up an existing style such as .pill or .end.
+    const fact = h("span", { class: kind && `fact-${kind}` }, text);
     if (title) fact.title = title;
     return fact;
   });

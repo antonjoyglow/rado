@@ -299,8 +299,10 @@ npm install
 npm test             # TypeScript and browser extension unit tests
 npm run test:rust    # Rust unit tests
 npm run check        # tsc, unit tests, Rust tests and clippy, as CI runs them
+npm run check:node   # tsc and unit tests only
 npm run e2e          # UI in Chromium with Tauri's IPC mocked (first: npx playwright install chromium)
-npm run e2e:webview2 # smoke test of the real app in WebView2; start it with e2e\webview2\start-app.cmd
+npm run e2e:webview2 # smoke test of the real app in WebView2; starts it with e2e\webview2\start-app.cmd and stops it after
+npm run shots        # list screenshots (themes x widths) to shots/; re-shoots docs/screenshots/review-list.png
 npm run app:dev      # run with hot reload
 npm run app:build    # release exe + NSIS installer under src-tauri/target/release/bundle/nsis
 npm run app:update   # build, then update the installed Rado in place and restart it
