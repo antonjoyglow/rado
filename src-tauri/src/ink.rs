@@ -401,8 +401,10 @@ impl Pairing {
     }
 
     pub fn status(&self) -> InkStatus {
-        let problem = self.problem.lock().expect("pairing lock").clone();
-        let paired = self.token.borrow().is_some();
+        let (paired, problem) = {
+            let problem = self.problem.lock().expect("pairing lock");
+            (self.token.borrow().is_some(), problem.clone())
+        };
         InkStatus { paired, address: wifi_socket().map(|at| at.to_string()), problem }
     }
 
@@ -413,8 +415,10 @@ impl Pairing {
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let mut problem = self.problem.lock().expect("pairing lock");
         self.secrets.set(TOKEN_KEY, &token)?;
-        self.token.send_replace(Some(token));
-        *problem = None;
+        // Replacing a token keeps the listener as it is, and with it any reason it can't listen.
+        if self.token.send_replace(Some(token)).is_none() {
+            *problem = None;
+        }
         Ok(())
     }
 
@@ -906,6 +910,25 @@ mod tests {
         assert!(becomes(at, true).await, "paired: listening");
         pairing.unpair().unwrap();
         assert!(becomes(at, false).await, "removed: not listening");
+        assert_eq!(pairing.status().problem, None);
+    }
+
+    #[tokio::test]
+    async fn run_cantListen_saysWhy_untilTheTokenIsRemoved() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, taken.local_addr().unwrap().port());
+        let pairing = Arc::new(Pairing::load(Box::new(crate::store::tests::MemorySecrets::default())));
+        let (running, rado) = (pairing.clone(), fake("cant-listen"));
+        tokio::spawn(async move { running.run(rado, move || Some(at)).await });
+
+        pairing.pair().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(pairing.status().problem.is_some_and(|p| p.starts_with(&format!("Can't listen on {at}"))));
+        pairing.pair().unwrap();
+        assert!(pairing.status().problem.is_some(), "a new token doesn't free the port");
+
+        pairing.unpair().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(pairing.status().problem, None);
     }
 
