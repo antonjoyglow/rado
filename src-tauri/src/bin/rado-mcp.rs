@@ -210,7 +210,7 @@ fn tools() -> Value {
                 "required": ["prId", "commit"],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
         },
     ])
 }
@@ -419,11 +419,19 @@ fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, S
     }
 }
 
+/// Schemes are case-insensitive, but Rado's list opens only lower-case ones, so `HTTPS://` is stored as `https://`.
+fn lower_case_scheme(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => format!("{}://{rest}", scheme.to_ascii_lowercase()),
+        None => url.into(),
+    }
+}
+
 fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let (pr_id, commit) = pr_and_commit(args)?;
     let url = match args.get("draftUrl") {
         None | Some(Value::Null) => None,
-        Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
+        Some(Value::String(url)) if queue::is_draft_url(&lower_case_scheme(url)) => Some(lower_case_scheme(url)),
         Some(_) => return Err(format!(
             "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, with no spaces, quotes, backslashes or non-ASCII characters, and no @ before the host"
         )),
@@ -722,9 +730,19 @@ mod tests {
     }
 
     #[test]
+    fn markDrafted_draftUrlWithAnUpperCaseScheme_isRecordedLowerCase() {
+        let dir = with_queue("upper-url");
+        for (id, sent, kept) in [(1, "HTTPS://github.com/o/R/pull/1", "https://github.com/o/R/pull/1"), (2, "Http://Localhost:8080/x", "http://Localhost:8080/x")] {
+            let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": id, "commit": format!("c{id}"), "draftUrl": sent })));
+            assert_eq!(marked["draftUrl"], kept);
+            assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap()[&id].url, kept);
+        }
+    }
+
+    #[test]
     fn markDrafted_draftUrlNotAnHttpLink_isAnErrorAndRecordsNothing() {
         let dir = with_queue("bad-url");
-        for url in [json!("file:///C:/drafts/1.md"), json!(7)] {
+        for url in [json!("file:///C:/drafts/1.md"), json!("FILE:///C:/drafts/1.md"), json!(7)] {
             let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
             assert!(error.contains("draftUrl must be an http:// or https:// link of at most 2048 characters"), "{error}");
         }
