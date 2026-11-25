@@ -66,7 +66,7 @@ Not verified yet: the SmartScreen prompt on a fresh download, and a fine-grained
 ### Counter
 
 - `reviews`, Rado's bird, `mine`; the bird is white by default. *Reviews* are the review rows waiting on you; *mine* are the rows of your own PRs with a rejection, a waiting-for-author vote or an open thread, not all your open PRs.
-- By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 10 or more.
+- By default each number is coloured by count (*Heat*): blue at 0, then cyan, green, yellow and orange, up to red at 40 or more.
 - `!` and the bird, with no mine number: the active workspace has no token, or a source is failing and the list is older than two refreshes (or that source never loaded). The tooltip starts with the active workspace's name and ends with when the list was last checked. The list's age is the oldest of its sources, so one failing source isn't hidden by another's fresh answer.
 - Always on top. By default it sits at 55% opacity and fades to 8% when the cursor comes within 15% of its bounds. It starts at the bottom right of the primary screen, 12 px from the edges, and reopens where you left it, moved back on screen if it would stick out.
 - **Settings → Counter** changes its look; each change saves as you pick it.

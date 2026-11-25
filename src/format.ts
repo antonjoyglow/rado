@@ -24,7 +24,7 @@ export function ago(iso: string | null, now: Date): string {
 }
 
 /** Count at and above which the pill's number is fully red. */
-export const HEAT_CAP = 10;
+export const HEAT_CAP = 40;
 
 /** Heat colour for a count: blue (hue 225) at 0, through cyan, green and yellow, to red at HEAT_CAP or more. */
 export function heat(count: number): string {
