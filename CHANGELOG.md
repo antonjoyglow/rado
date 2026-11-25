@@ -2,6 +2,25 @@
 
 All notable changes to Rado. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Each section is generated from the `feat` and `fix` pull request titles of its release (`npm run release`), then edited by hand; it becomes that version's GitHub release notes.
 
+## [0.12.0] - 2026-11-25
+
+### Features
+
+- list: soft card rows, pill chips and a pill tab bar (#188)
+- counter: heat reaches full red at 40 PRs instead of 10 (#192)
+- ink: Rado serves its list, read-only, to a paired PocketBook on the same network (#187)
+- ink: a PocketBook app (built from `ink/`, not part of the installer) that shows what waits on you (#189)
+
+### Fixes
+
+- sources: Refresh tries again once a short Retry-After passes; the PocketBook endpoint only reads (#200)
+- settings: show the cleaned organization after saving a pasted Azure DevOps link (#198)
+- list: double-clicking a row opens its PRs once (#197)
+- sources: honour Retry-After on Azure DevOps 200s and on 503s (#196)
+- mcp: mark_drafted accepts HTTPS:// draft links; unmark_drafted no longer claims to be idempotent (#195)
+- mcp: a hung agent holding the drafts lock no longer blocks every mark (#194)
+- sources: Refresh retries a rate limit that named no wait time (#193)
+
 ## [0.11.0] - 2026-11-22
 
 ### Features

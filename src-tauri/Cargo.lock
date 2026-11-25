@@ -3467,11 +3467,13 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rado"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
  "futures-util",
+ "getrandom 0.3.4",
+ "httparse",
  "indexmap 2.14.2",
  "keyring",
  "reqwest",
@@ -3487,6 +3489,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "ts-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

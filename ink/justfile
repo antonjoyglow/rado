@@ -1,0 +1,15 @@
+set windows-shell := ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+# The device UI as a desktop window (config: preview.cfg), against mock-rado.mjs serving target/preview-list.json, a
+# copy of fixtures/list.json: edit it to change the list, stop the mock for the offline banner. Arrows turn pages.
+preview:
+    ./scripts/preview.ps1
+
+# The PocketBook app, cross-built to target/rado-ink.app. The binary links Slint under GPL-3.0, so it is GPL-3.0 as a
+# whole; the ink crates' own source is MIT.
+build:
+    ./scripts/build-device.ps1
+
+# Copies the built app to the PocketBook mounted at `drive` (for example E:)
+copy drive:
+    Copy-Item target/rado-ink.app {{drive}}/applications/rado-ink.app

@@ -1,0 +1,74 @@
+{
+  "workspace": "Acme",
+  "counts": {
+    "reviews": 3,
+    "mine": 1
+  },
+  "lastRefreshed": "2026-11-25T09:30:00Z",
+  "error": null,
+  "rows": [
+    {
+      "key": "pr:1",
+      "tab": "needsReview",
+      "tier": "urgent",
+      "title": "Change 1",
+      "ageHours": 30,
+      "waiting": true,
+      "draft": {}
+    },
+    {
+      "key": "pr:8",
+      "tab": "hidden",
+      "tier": "low",
+      "title": "Change 8",
+      "ageHours": 2,
+      "waiting": false,
+      "draft": null
+    },
+    {
+      "key": "pr:4",
+      "tab": "reReview",
+      "tier": "normal",
+      "title": "Change 4",
+      "ageHours": 12,
+      "waiting": true,
+      "draft": null
+    },
+    {
+      "key": "branch:GitHub:feature/shared",
+      "tab": "needsReview",
+      "tier": "normal",
+      "title": "Change 2",
+      "ageHours": 48,
+      "waiting": true,
+      "draft": {}
+    },
+    {
+      "key": "pr:7",
+      "tab": "mine",
+      "tier": "normal",
+      "title": "Change 7",
+      "ageHours": 5,
+      "waiting": false,
+      "draft": null
+    },
+    {
+      "key": "pr:6",
+      "tab": "mine",
+      "tier": "normal",
+      "title": "Change 6",
+      "ageHours": 50,
+      "waiting": true,
+      "draft": null
+    },
+    {
+      "key": "pr:9",
+      "tab": "approved",
+      "tier": "normal",
+      "title": "Change 9",
+      "ageHours": 72,
+      "waiting": false,
+      "draft": null
+    }
+  ]
+}

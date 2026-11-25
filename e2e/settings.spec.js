@@ -96,23 +96,39 @@ test.describe("organization field", () => {
     await expect(page.getByLabel("Organization")).toHaveValue("contoso");
   });
 
-  test("after a save the field keeps the pasted link", async ({ page }) => {
+  test("after a save the field shows the organization the pasted link was cleaned to", async ({ page }) => {
     await openSettings(page);
     await page.evaluate(() => {
-      window.__e2e.handlers.save_workspace = ({ workspace }) => {
-        const s = window.__e2e.responses.get_snapshot;
-        s.settings.workspaces[0] = { ...workspace, azureDevOps: { ...workspace.azureDevOps, organization: "fabrikam" } };
-        setTimeout(() => {
-          window.__e2e.emit("snapshot", s);
-          window.__e2e.snapshotSent = true;
-        }, 10);
-        return null;
-      };
+      window.__e2e.handlers.save_workspace = () => "fabrikam";
     });
     await page.getByLabel("Organization").fill("https://dev.azure.com/fabrikam/Proj/_git/web");
     await page.getByLabel("Organization").press("Tab");
-    await page.waitForFunction(() => window.__e2e.snapshotSent);
-    await expect(page.getByLabel("Organization")).toHaveValue("https://dev.azure.com/fabrikam/Proj/_git/web");
+    await expect(page.getByLabel("Organization")).toHaveValue("fabrikam");
+
+    // A later failed save puts back the cleaned organization, not the link.
+    await setFail(page, "save_workspace", "Not saved: disk full");
+    await page.getByLabel("My teams").fill("Alpha");
+    await page.getByLabel("My teams").press("Tab");
+    await expect(page.getByText("Not saved: disk full")).toBeVisible();
+    expect((await calls(page, "save_workspace")).at(-1).args.workspace.azureDevOps.organization).toBe("fabrikam");
+    await expect(page.getByLabel("Organization")).toHaveValue("fabrikam");
+  });
+
+  test("an organization entered while the link saves is not replaced by the cleaned one", async ({ page }) => {
+    await openSettings(page);
+    await page.evaluate(() => {
+      window.__e2e.handlers.save_workspace = ({ workspace }) => workspace.azureDevOps.organization.startsWith("https:") ? "fabrikam" : workspace.azureDevOps.organization;
+    });
+    await setDelay(page, "save_workspace", 300);
+    await page.getByLabel("Organization").fill("https://dev.azure.com/fabrikam/Proj/_git/web");
+    await page.getByLabel("Organization").press("Tab");
+    await page.getByLabel("Organization").fill("northwind");
+    await page.getByLabel("Organization").press("Tab");
+    await page.getByLabel("My teams").fill("Alpha");
+    await page.getByLabel("My teams").press("Tab");
+    await settle(page, "save_workspace");
+    await expect(page.getByLabel("Organization")).toHaveValue("northwind");
+    expect((await calls(page, "save_workspace")).at(-1).args.workspace.azureDevOps.organization).toBe("northwind");
   });
 });
 
@@ -137,7 +153,7 @@ test.describe("save queue", () => {
     await openSettings(page);
     await page.evaluate(() => {
       let n = 0;
-      window.__e2e.handlers.save_workspace = () => new Promise((res, rej) => setTimeout(() => (++n === 1 ? rej("disk full") : res(null)), 200));
+      window.__e2e.handlers.save_workspace = () => new Promise((res, rej) => setTimeout(() => (++n === 1 ? rej("disk full") : res("contoso")), 200));
     });
     await page.getByLabel("My teams").fill("T1");
     await page.getByLabel("My teams").press("Tab");
@@ -208,6 +224,54 @@ test.describe("empty list", () => {
     await open(page, snapshot({ items: [], hasGithubToken: true, settings: { workspaces: ws, activeWorkspace: "b" } }));
     await page.getByRole("button", { name: "Watched repos" }).click();
     await expect(page.locator('.ws-item[aria-pressed="true"]')).toContainText("B");
+  });
+});
+
+test.describe("PocketBook pairing", () => {
+  /** Opens Settings → General with `start` as the pairing status; each command in `after` answers with its status and
+   * makes it the one `ink_status` reports from then on, as Rado does. */
+  const general = async (page, start, after = {}) => {
+    await open(page, snapshot());
+    await page.evaluate(([start, after]) => {
+      window.__e2e.responses.ink_status = start;
+      for (const [cmd, status] of Object.entries(after)) window.__e2e.handlers[cmd] = () => (window.__e2e.responses.ink_status = status);
+    }, [start, after]);
+    await page.getByTitle("Settings").click();
+    await page.locator("#settings-tab-general").click();
+  };
+  const unpaired = { paired: false, address: "192.168.1.14:7878", problem: null };
+  const paired = { paired: true, address: "192.168.1.14:7878", problem: null };
+
+  test("pairing shows the token as dots and the address, and Copy config goes through Rado", async ({ page }) => {
+    await general(page, unpaired, { pair_ink: paired });
+    await expect(page.getByText("Laptop address: 192.168.1.14:7878")).toBeVisible();
+    await page.getByRole("button", { name: "Pair a device" }).click();
+    await expect(page.getByText("•••••••••••••••• saved")).toBeVisible();
+    await page.getByRole("button", { name: "Copy config" }).click();
+    await expect(page.getByText("Copied", { exact: true })).toBeVisible();
+    expect(await calls(page, "copy_ink_config")).toHaveLength(1);
+  });
+
+  test("a listener problem shows, Replace goes through Rado, and Remove goes back to Pair", async ({ page }) => {
+    await general(page, { ...paired, problem: "Can't listen on 192.168.1.14:7878 (in use)" }, {
+      pair_ink: paired,
+      unpair_ink: { paired: false, address: null, problem: null },
+    });
+    await expect(page.getByText("Can't listen on 192.168.1.14:7878 (in use)")).toBeVisible();
+    await page.getByRole("button", { name: "Replace token" }).click();
+    await expect(page.getByText("Replaced")).toBeVisible();
+    await page.getByRole("button", { name: "Remove" }).click();
+    await expect(page.getByRole("button", { name: "Pair a device" })).toBeVisible();
+    await expect(page.getByText("Laptop address: none, not on Wi-Fi")).toBeVisible();
+    await expect(page.getByText("Can't listen on 192.168.1.14:7878 (in use)")).toBeHidden();
+    expect([(await calls(page, "pair_ink")).length, (await calls(page, "unpair_ink")).length]).toEqual([1, 1]);
+  });
+
+  test("a failed pairing says why", async ({ page }) => {
+    await general(page, unpaired);
+    await setFail(page, "pair_ink", "Credential Manager: access denied");
+    await page.getByRole("button", { name: "Pair a device" }).click();
+    await expect(page.getByText("Credential Manager: access denied")).toBeVisible();
   });
 });
 

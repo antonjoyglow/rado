@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Rado tab groups",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Titles the PR tabs Rado opens repo:branch and puts an aggregate's tabs into a tab group named after the branch. Works in Edge and Chrome.",
   "icons": { "16": "icon-16.png", "32": "icon-32.png", "48": "icon-48.png", "128": "icon-128.png" },
   "permissions": ["tabs", "tabGroups"],

@@ -3,6 +3,7 @@ mod export;
 mod extension;
 mod github;
 mod group;
+mod ink;
 // Shared with the MCP server binary, which uses the parts the app doesn't.
 #[allow(dead_code)]
 mod queue;
@@ -45,6 +46,7 @@ struct Shared {
     /// Mirrors the session's generation; a change cancels the poll in flight.
     generation: watch::Sender<u64>,
     inner: Mutex<Inner>,
+    pairing: ink::Pairing,
 }
 
 struct Inner {
@@ -99,12 +101,13 @@ fn session<T>(app: &AppHandle, change: impl FnOnce(&mut Session) -> T) -> T {
 
 async fn poll_loop(app: AppHandle) {
     let mut me: Option<(u64, String)> = None;
+    let retry_after = ado::RetryAfter::default();
     loop {
         let shared = app.state::<Shared>();
         // Subscribed before the ticket reads the generation: a switch after this point cancels the poll below.
         let mut changed = shared.generation.subscribe();
         if let Some(ticket) = session(&app, |s| s.begin_poll(Utc::now())) {
-            poll_workspace(&app, ticket, &mut me, &mut changed).await;
+            poll_workspace(&app, ticket, &mut me, &retry_after, &mut changed).await;
         }
         let wait = {
             let inner = shared.inner.lock().expect("state lock");
@@ -123,14 +126,20 @@ async fn poll_loop(app: AppHandle) {
 
 /// Polls one workspace for its ticket: a switch while it runs drops the result rather than filing it under the
 /// workspace switched to.
-async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
+async fn poll_workspace(
+    app: &AppHandle,
+    ticket: Ticket,
+    me: &mut Option<(u64, String)>,
+    retry_after: &ado::RetryAfter,
+    changed: &mut watch::Receiver<u64>,
+) {
     let Ticket { workspace, generation, pat, github_token, settled, held } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
             Ok(None) => Poll::Off,
             _ if held.contains(&Provider::Ado) => Poll::Held,
             Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})").into()),
-            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &settled).await {
+            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, retry_after, &settled).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(error.named("Azure DevOps")),
             },
@@ -158,9 +167,10 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
 const THREAD_REQUESTS: usize = 6;
 
 /// Comment counts and last activity for the PRs in my list that need them; a PR whose threads fail to load keeps
-/// what the last poll knew. A throttled threads request fails the whole poll, so the source backs off.
+/// what the last poll knew. A throttled threads request, or one that names a time to come back, fails the whole poll,
+/// so the source backs off.
 async fn fetch_threads(
-    client: &ado::Client,
+    client: &ado::Client<'_>,
     prs: &[ado::PullRequest],
     me: &ado::Me<'_>,
     settled: &HashMap<i64, String>,
@@ -191,13 +201,19 @@ async fn poll_ado(
     pat: &str,
     generation: u64,
     me: &mut Option<(u64, String)>,
+    retry_after: &ado::RetryAfter,
     settled: &HashMap<i64, String>,
 ) -> Result<ado::Fetched, source::SourceError> {
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
     }
-    let client = ado::Client::new(&source.organization, pat);
-    if me.as_ref().is_none_or(|(g, _)| *g != generation) {
+    let new_generation = me.as_ref().is_none_or(|(g, _)| *g != generation);
+    if new_generation {
+        // A token save or a change of workspace or organization ends any wait, as it ends a backoff.
+        *retry_after.lock().expect("retry-after lock") = None;
+    }
+    let client = ado::Client::new(&source.organization, pat, retry_after);
+    if new_generation {
         *me = Some((generation, client.my_id().await?.to_lowercase()));
     }
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
@@ -408,6 +424,41 @@ fn set_hidden(app: AppHandle, key: String, hidden: bool) -> Result<(), String> {
     session(&app, |s| s.set_hidden(&key, hidden))
 }
 
+impl ink::Rado for AppHandle {
+    fn read<T>(&self, f: impl FnOnce(&Session) -> T) -> T {
+        read(self, f)
+    }
+}
+
+// The pairing commands look up the network adapters, so they stay off the main thread.
+#[tauri::command(async)]
+fn ink_status(app: AppHandle) -> ink::InkStatus {
+    app.state::<Shared>().pairing.status()
+}
+
+/// Creates the pairing token, or replaces it so the device paired before stops working.
+#[tauri::command(async)]
+fn pair_ink(app: AppHandle) -> Result<ink::InkStatus, String> {
+    let pairing = &app.state::<Shared>().pairing;
+    pairing.pair()?;
+    Ok(pairing.status())
+}
+
+/// Removes the pairing token, which stops Rado listening.
+#[tauri::command(async)]
+fn unpair_ink(app: AppHandle) -> Result<ink::InkStatus, String> {
+    let pairing = &app.state::<Shared>().pairing;
+    pairing.unpair()?;
+    Ok(pairing.status())
+}
+
+/// Puts the device's config file on the clipboard; the token never reaches the window.
+#[tauri::command(async)]
+fn copy_ink_config(app: AppHandle) -> Result<(), String> {
+    let config = app.state::<Shared>().pairing.config()?;
+    app.clipboard().write_text(config).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn save_pat(app: AppHandle, workspace: String, pat: String) -> Result<(), String> {
     session(&app, |s| s.save_secret(&workspace, Provider::Ado, &pat))
@@ -447,9 +498,9 @@ fn add_workspace(app: AppHandle, name: String) -> Result<String, String> {
     session(&app, |s| s.add_workspace(&name))
 }
 
-/// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker.
+/// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker, and returns the organization as saved.
 #[tauri::command]
-fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<(), String> {
+fn save_workspace(app: AppHandle, workspace: Workspace) -> Result<String, String> {
     session(&app, |s| s.save_workspace(workspace))
 }
 
@@ -605,7 +656,8 @@ pub fn run() {
             let (session, load_warning) = Session::load(store);
             let pill_scale = session.settings().pill_scale;
             let inner = Inner { session, load_warning, list_had_focus: false, newer_release: None };
-            app.manage(Shared { wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner) });
+            let pairing = ink::Pairing::load(Box::new(Keyring::from_env()));
+            app.manage(Shared { wake: Notify::new(), generation: watch::Sender::new(0), inner: Mutex::new(inner), pairing });
             // The saved position is the top-left of the already-scaled pill, so size it without moving it.
             size_pill(app.handle(), pill_scale, false);
             place_pill(app.handle());
@@ -627,6 +679,8 @@ pub fn run() {
             tauri::async_runtime::spawn(poll_loop(app.handle().clone()));
             tauri::async_runtime::spawn(hover_loop(app.handle().clone()));
             tauri::async_runtime::spawn(releases::release_loop(app.handle().clone()));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move { handle.state::<Shared>().pairing.run(handle.clone(), ink::wifi_socket).await });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -640,6 +694,10 @@ pub fn run() {
             open_ticket,
             copy_row,
             set_hidden,
+            ink_status,
+            pair_ink,
+            unpair_ink,
+            copy_ink_config,
             save_pat,
             save_github_token,
             remove_pat,

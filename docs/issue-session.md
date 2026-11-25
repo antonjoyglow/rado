@@ -2,7 +2,7 @@
 
 One session owns one GitHub issue of antonjoyglow/rado and ships it as one PR into `<release branch>` (for example `release/0.12.0`). An orchestrator session starts the issue sessions and runs the release-level steps at the end.
 
-Keep a good pace: no tests after every edit, only the full check (step 4). Don't spend time on anything that doesn't change the result.
+Keep a good pace: no tests after every edit, only the check at the end (step 4). Don't spend time on anything that doesn't change the result.
 
 ## Steps
 
@@ -17,18 +17,18 @@ Keep a good pace: no tests after every edit, only the full check (step 4). Don't
    - no dead code;
    - English only;
    - test names in the file's existing style.
-4. **Check once at the end:** `npm ci` (once), then `npm run check` (tsc, vitest, Rust tests, clippy `--all-targets -D warnings`).
+4. **Check once at the end:** `npm ci` (once), then `npm run check` (tsc, vitest, Rust tests, clippy `--all-targets -D warnings`) when `src-tauri/` or `src/bindings` changed, otherwise `npm run check:node` (tsc, vitest) and `npm run e2e`.
    - All sessions share one Rust target dir: set `CARGO_TARGET_DIR=C:\Users\AntonisCharalampidis\dev\repos\personal\rado\src-tauri\target` (sessions mostly run one at a time).
    - The first build takes minutes: run it in the background, with the output in a file you grep afterwards for `test result`, `error` and `warning`.
    - `scripts\msvc.cmd` passes the command's exit code through, so a failing step fails `npm run check`.
    - Commit the ts-rs bindings under `src/bindings` if they change.
-5. **Review the code.** Give your diff (`git diff origin/<release branch>`) to a blind reviewer subagent (opus, effort high). Ask for bugs and for what to delete or simplify, with the code, not your conclusions. Fix what is valid, then run a second fresh review. **After the second round, only a real bug or a medium/high finding starts another round**; wording and style don't. Re-run step 4 if code changed.
+5. **Review the code.** Give your diff (`git diff origin/<release branch>`) to a blind reviewer subagent (opus, effort high). Ask for bugs and for what to delete or simplify, with the code, not your conclusions. Fix what is valid, then run a second fresh review. **After the second round, only a real bug or a medium/high finding starts another round**; wording and style don't. A further round reviews only the delta since the last one, and is skipped when each fix comes with an e2e case that fails without it, unless the fix changes behaviour beyond its finding. Re-run step 4 if code changed.
 6. **PR.** One commit or a few, Conventional Commits.
    - The PR title becomes the squash subject and the changelog line, so write it for a user: `fix(area): …` or `feat(area): …`.
    - End commit messages with the `Co-Authored-By` line the session gives you.
    - Push as GitHub account `antonjoyglow` (the active gh account).
    - Open the PR into `<release branch>`. Body: what changed, how it was checked (test counts), what is not verified, a `Closes #n` line per issue (or `Part of #n` when the issue keeps open parts), and last the generated-with line. Merging closes the `Closes`/`Fixes` issues (`.github/workflows/close-issues-on-release-merge.yml`); don't close them by hand.
-   - Merge with `gh pr merge <pr> -R antonjoyglow/rado --auto --squash` and stop; don't watch CI yourself. If CI fails or the base moved, the orchestrator tells you: merge `origin/<release branch>` into your branch (never rebase or force push), re-test, push.
+   - The owner's "start #n" approves the merge, and the PR body plus the step-7 report are the results shown, so don't ask. Merge with `gh pr merge <pr> -R antonjoyglow/rado --auto --squash` and stop; don't watch CI yourself. If CI fails or the base moved, the orchestrator tells you: merge `origin/<release branch>` into your branch (never rebase or force push), re-test, push.
 7. **Report** in your last message, under 150 words: PR link, merge state, test counts, review rounds and what they found, and anything not verified (UI you didn't see in `e2e/` or the running app).
 
 ## Several issues in one session

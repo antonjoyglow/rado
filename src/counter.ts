@@ -1,6 +1,6 @@
 import type { CounterStyle, Settings } from "./api";
 import { h } from "./dom";
-import { heat, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
+import { heat, HEAT_CAP, parseScale, parseWhole, SCALE_MAX, SCALE_MIN, stepScale } from "./format";
 import { parseHex } from "./theme";
 
 import { COUNTER_DEFAULT, COUNTER_HOVER_OPACITY as HOVER_RANGE, COUNTER_REST_OPACITY as REST_RANGE, DEFAULT_PILL_SCALE as DEFAULT_SCALE } from "./bindings/limits";
@@ -11,7 +11,7 @@ const REST_CHOICES = [30, 55, 80, 100];
 const HOVER_CHOICES = [0, 8, 25, 50];
 const SWATCHES = ["#ffffff", "#ffd60a", "#ff9f43", "#f26b6b", "#c792ea", "#6d9ef6", "#4cc07f"];
 
-/** The preview's numbers: heat colours them green and blue, as on a typical day. */
+/** The preview's numbers: heat colours them blue, as on a typical day. */
 const SAMPLE = { reviews: 5, mine: 1 };
 
 /** A number's colour: the picked one, or heat for its count. */
@@ -101,7 +101,7 @@ export function counterPanel(settings: Settings, ui: Ui): { element: HTMLElement
 
   const colourField = (key: "reviews" | "mine" | "logo", label: string) => {
     const n = ui.note();
-    const heatChip = key === "logo" ? null : h("button", { type: "button", class: "chip", title: "Blue at 0, through green and yellow, to red at 10 or more", onclick: () => commit(n, { [key]: null }) }, "Heat");
+    const heatChip = key === "logo" ? null : h("button", { type: "button", class: "chip", title: `Blue at 0, through green and yellow, to red at ${HEAT_CAP} or more`, onclick: () => commit(n, { [key]: null }) }, "Heat");
     const swatches = SWATCHES.map((c) => {
       const swatch = h("button", { type: "button", class: "swatch", title: c, ariaLabel: `${label}: ${c}`, onclick: () => commit(n, { [key]: c }) });
       swatch.style.background = c;

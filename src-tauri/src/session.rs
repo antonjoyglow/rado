@@ -55,7 +55,8 @@ struct Backoff {
     /// Failed polls in a row.
     failures: u32,
     until: DateTime<Utc>,
-    rate_limited: bool,
+    /// When the source said to come back (`Retry-After` or a rate limit's reset); a bare 429 names nothing.
+    named: Option<DateTime<Utc>>,
     /// The failure, named for its source; `status` adds the time.
     message: String,
 }
@@ -67,16 +68,17 @@ impl Backoff {
         let interval = chrono::Duration::minutes(i64::from(interval_minutes));
         let cap = MAX_BACKOFF_MINUTES.max(i64::from(interval_minutes));
         let doubled = now + chrono::Duration::minutes((i64::from(interval_minutes) << (failures - 1).min(16)).min(cap));
-        let (until, rate_limited) = match error.kind {
-            FailureKind::RateLimited { until: asked } => (asked.map_or(doubled, |at| at.max(now + interval)), true),
-            FailureKind::Other => (doubled, false),
+        let (until, named) = match error.kind {
+            FailureKind::RateLimited { until: Some(at) } => (at.max(now + interval), Some(at)),
+            FailureKind::RateLimited { until: None } | FailureKind::Other => (doubled, None),
         };
-        Self { failures, until, rate_limited, message: error.message }
+        Self { failures, until, named, message: error.message }
     }
 
-    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true).
+    /// The status line's text at `now`, with the time of the next try (formatted now, so "tomorrow" stays true). It
+    /// says "until" only when the source's own time sets the next try, since Refresh passes once that time has come.
     fn status(&self, now: DateTime<Utc>) -> String {
-        match (self.rate_limited, self.failures) {
+        match (self.named.is_some_and(|at| at >= self.until), self.failures) {
             (true, _) => format!("{} until {}", self.message, clock(self.until, now)),
             (false, 1) => self.message.clone(),
             (false, _) => format!("{} · next try {}", self.message, clock(self.until, now)),
@@ -129,12 +131,12 @@ impl Saved {
 #[ts(rename = "SessionStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
-    items: Vec<group::ReviewRow>,
+    pub(crate) items: Vec<group::ReviewRow>,
     /// The counter's numbers for `items`.
-    counts: group::Counts,
-    last_refreshed: Option<DateTime<Utc>>,
-    polling: bool,
-    error: Option<String>,
+    pub(crate) counts: group::Counts,
+    pub(crate) last_refreshed: Option<DateTime<Utc>>,
+    pub(crate) polling: bool,
+    pub(crate) error: Option<String>,
     has_pat: bool,
     has_github_token: bool,
     settings: Settings,
@@ -366,22 +368,22 @@ impl Session {
             .filter_map(|i| Some((i.id, self.ws.threads_at.get(&i.id)?.clone())))
             .collect();
         // The slack lets the poll that wakes for a next try make it even if the clock moved back a little; a rate
-        // limit gets none, since a request inside it can extend it.
+        // limit that named its end gets none, since a request inside it can extend it.
         let held = self
             .ws
             .backoff
             .iter()
-            .filter(|(_, b)| b.until > now + chrono::Duration::seconds(if b.rate_limited { 0 } else { 30 }))
+            .filter(|(_, b)| b.until > now + chrono::Duration::seconds(if b.named.is_some() { 0 } else { 30 }))
             .map(|(p, _)| *p)
             .collect();
         Some(Ticket { workspace, generation: self.generation, pat, github_token, settled, held })
     }
 
-    /// Polls now, as the Refresh button and the tray's Refresh now ask: a failing source is tried again at once,
-    /// unless a rate limit asked to wait.
+    /// Polls now, as the Refresh button and the tray's Refresh now ask: a failing source is tried again at once, or
+    /// at the time it named if that is still ahead.
     pub fn refresh(&mut self, now: DateTime<Utc>) {
-        for backoff in self.ws.backoff.values_mut().filter(|b| !b.rate_limited) {
-            backoff.until = backoff.until.min(now);
+        for backoff in self.ws.backoff.values_mut() {
+            backoff.until = backoff.until.min(backoff.named.map_or(now, |at| at.max(now)));
         }
         self.wake = true;
     }
@@ -688,7 +690,8 @@ impl Session {
     /// Saves a workspace's name, Azure DevOps organization and teams, watched GitHub repos, and tracker. A changed
     /// source starts a new baseline, and on the active workspace makes the poll in flight stale and polls again.
     /// Written before it is applied: after any error the workspace is as it was, which is what the editor's rollback relies on.
-    pub fn save_workspace(&mut self, workspace: Workspace) -> Result<(), String> {
+    /// Returns the organization as saved: a pasted link cleaned to its name.
+    pub fn save_workspace(&mut self, workspace: Workspace) -> Result<String, String> {
         if let Some(repo) = workspace.bad_repo() {
             return Err(format!("Not saved: “{repo}” isn't a GitHub repo (owner/name)"));
         }
@@ -712,6 +715,7 @@ impl Session {
         let org_changed = !old_org.eq_ignore_ascii_case(&workspace.azure_dev_ops.organization);
         let github_changed = slot.github != workspace.github;
         let id = workspace.id.clone();
+        let organization = workspace.azure_dev_ops.organization.clone();
         *slot = workspace;
         // Before the settings, which would otherwise make the votes pass for the new organization's after a restart.
         if org_changed {
@@ -742,7 +746,7 @@ impl Session {
             self.generation += 1;
             self.wake = true;
         }
-        Ok(())
+        Ok(organization)
     }
 
     pub fn switch(&mut self, id: &str) -> Result<(), String> {
@@ -835,7 +839,7 @@ fn mark_hidden(ws: &mut WorkspaceState) {
 
 #[cfg(test)]
 #[allow(non_snake_case)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::score::{PrFacts, ReviewState};
     use crate::store::tests::{MemorySecrets, TempDir};
@@ -920,6 +924,18 @@ mod tests {
             wake: false,
         };
         Fixture { s, secrets, dir }
+    }
+
+    /// A session whose active workspace, `Acme`, lists `items` as refreshed at `refreshed`, with the agent drafts
+    /// marked on them. The folder goes when the `TempDir` is dropped.
+    pub(crate) fn listing(name: &str, items: Vec<ReviewItem>, drafts: HashMap<i64, Option<String>>, refreshed: DateTime<Utc>) -> (Session, TempDir) {
+        let Fixture { mut s, dir, .. } = two_workspaces(name);
+        s.settings.workspaces[0].name = "Acme".into();
+        s.ws.hidden = items.iter().filter(|i| i.hidden).map(|i| i.id).collect();
+        s.ws.items = items;
+        s.ws.agent_drafts = drafts;
+        s.ws.last_refreshed = Some(refreshed);
+        (s, dir)
     }
 
     /// Files a GitHub poll listing `prs` at the current generation and returns the ids it would announce.
@@ -1171,14 +1187,20 @@ mod tests {
     #[test]
     fn backoff_rateLimited_waitsAtLeastAsAsked_andSaysUntilWhen() {
         let asked = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(90))).named("GitHub"), 3, t0());
-        assert_eq!((asked.until, asked.rate_limited), (t0() + minutes(90), true));
+        assert_eq!((asked.until, asked.named), (t0() + minutes(90), Some(t0() + minutes(90))));
         assert_eq!(asked.status(t0()), format!("GitHub: rate limited until {}", clock(t0() + minutes(90), t0())));
         let soon = Backoff::after(1, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(soon.until, t0() + minutes(3), "never sooner than the next poll anyway");
+        assert_eq!(soon.status(t0()), "GitHub: rate limited", "the interval, not the source, sets that try");
         let after_failures = Backoff::after(5, SourceError::rate_limited(Some(t0() + minutes(1))).named("GitHub"), 3, t0());
         assert_eq!(after_failures.until, t0() + minutes(3), "a named time replaces the doubling");
+    }
+
+    #[test]
+    fn backoff_rateLimitNamingNoTime_doublesLikeAnyFailure() {
         let unnamed = Backoff::after(3, SourceError::rate_limited(None).named("GitHub"), 3, t0());
-        assert_eq!(unnamed.until, t0() + minutes(12));
+        assert_eq!((unnamed.until, unnamed.named), (t0() + minutes(12), None));
+        assert_eq!(unnamed.status(t0()), format!("GitHub: rate limited · next try {}", clock(t0() + minutes(12), t0())));
     }
 
     #[test]
@@ -1238,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_retriesAHeldSourceAtOnce_butNotInsideARateLimit() {
+    fn refresh_retriesAHeldSourceAtOnce_butNotInsideANamedRateLimit() {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-refresh");
         file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
         file_github(&mut s, Poll::Failed("GitHub: network: offline".into()), t0());
@@ -1251,6 +1273,32 @@ mod tests {
         s.refresh(t0() + minutes(1));
         assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]));
         assert!(!s.begin_poll(t0() + minutes(30) - chrono::Duration::seconds(10)).expect("a ticket").held.is_empty(), "no slack inside a rate limit");
+
+        file_github(&mut s, github(&[1]), t0());
+        for _ in 0..3 {
+            file_github(&mut s, Poll::Failed(SourceError::rate_limited(None).named("GitHub")), t0());
+        }
+        assert_eq!(s.begin_poll(t0() + minutes(7)).expect("a ticket").held, HashSet::from([Provider::GitHub]), "automatic polls keep the doubled wait");
+        s.refresh(t0() + minutes(7));
+        assert!(s.begin_poll(t0() + minutes(7)).expect("a ticket").held.is_empty(), "a 429 that named no time doesn't lock Refresh");
+    }
+
+    #[test]
+    fn refresh_aShortRetryAfter_holdsOnlyUntilTheNamedTime_notTheWholeInterval() {
+        let Fixture { mut s, dir: _dir, .. } = two_workspaces("backoff-503");
+        let seconds = chrono::Duration::seconds;
+        file_github(&mut s, Poll::Failed(SourceError::http("HTTP 503 Service Unavailable".into(), Some(t0() + seconds(5))).named("GitHub")), t0());
+        assert_eq!(s.ws.backoff[&Provider::GitHub].status(t0()), "GitHub: HTTP 503 Service Unavailable", "no \"until\" the interval: Refresh passes sooner");
+        assert_eq!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held, HashSet::from([Provider::GitHub]), "automatic polls wait an interval");
+
+        s.refresh(t0() + seconds(2));
+        assert_eq!(s.next_try(t0() + seconds(2)), Some(t0() + seconds(5)), "a Refresh inside the named time tries when it ends");
+        assert!(!s.begin_poll(t0() + seconds(2)).expect("a ticket").held.is_empty());
+        assert!(s.begin_poll(t0() + seconds(5)).expect("a ticket").held.is_empty());
+
+        file_github(&mut s, Poll::Failed(SourceError::http("HTTP 503 Service Unavailable".into(), Some(t0() + seconds(5))).named("GitHub")), t0());
+        s.refresh(t0() + minutes(1));
+        assert!(s.begin_poll(t0() + minutes(1)).expect("a ticket").held.is_empty(), "past the named time, Refresh tries at once");
     }
 
     #[test]
@@ -1552,7 +1600,7 @@ mod tests {
         let Fixture { mut s, dir: _dir, .. } = two_workspaces("save-workspace-org-link");
         let mut changed = s.settings.workspaces[0].clone();
         changed.azure_dev_ops.organization = "https://dev.azure.com/acme/Project/_git/web".into();
-        s.save_workspace(changed.clone()).expect("saved");
+        assert_eq!(s.save_workspace(changed.clone()).expect("saved"), "acme");
         assert_eq!(s.settings.workspaces[0].azure_dev_ops.organization, "acme");
 
         changed.azure_dev_ops.organization = "my org".into();

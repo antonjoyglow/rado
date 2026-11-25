@@ -1,4 +1,4 @@
-import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
+import { api, watchFresh, watchSnapshot, type Browser, type CustomTheme, type InkStatus, type Member, type ReviewItem, type Settings, type Snapshot, type Theme, type Tier } from "./api";
 import { applyTheme, parseHex, unreadable } from "./theme";
 import {
   ageColumn, datesTooltip, draftMarker, hideButton, LIST_HEIGHT_PERCENT, LIST_WIDTH_PERCENT, newestFirst, nextReview, parseWhole, parseMinutes, prLabel, rowFacts, stepScale, TEXT_CHOICES, TEXT_SCALE, TEXT_STEP,
@@ -6,7 +6,7 @@ import {
 import { POLL_MINUTES } from "./bindings/limits";
 import { h, whenBlurred } from "./dom";
 import { bird, glow, yawn } from "./bird";
-import { glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
+import { checkedText, glows, listActions, newReviewsText, onFocus, onFresh, onSnapshot, refreshTitle, showStatus, statusLine, type Yawn } from "./status";
 import { counterPanel } from "./counter";
 import { DROPPED, lastingSaver, type LastingSaver } from "./save";
 import { extensionMessage } from "./extension";
@@ -200,6 +200,7 @@ export function mountList(root: HTMLElement): void {
 
   let snapshot: Snapshot | null = null;
   let pollingSince: number | null = null;
+  const endChecked = h("span");
 
   const renderStatus = () => {
     if (!snapshot || document.hidden) return;
@@ -213,6 +214,7 @@ export function mountList(root: HTMLElement): void {
     status.hidden = !showStatus(line, snapshot.warning, actionText.textContent || null, snapshot.newerRelease);
     refreshButton.dataset.busy = String(snapshot.polling);
     refreshButton.title = refreshTitle(snapshot.lastRefreshed, snapshot.settings.pollMinutes, now);
+    endChecked.textContent = checkedText(snapshot.lastRefreshed, now);
   };
 
   // A hidden list can't have focus (it hides when it loses it), so a yawn waits for the next focus.
@@ -266,6 +268,11 @@ export function mountList(root: HTMLElement): void {
     ));
     const tracker = trackerName(activeWorkspace(snapshot.settings));
     for (const item of items) body.append(row(item, tracker, item.key === next?.key, act));
+    if (items.length > 0) body.append(h("div", { class: "end" },
+      h("span", { class: "end-bird", ariaHidden: "true" }),
+      h("span", { class: "end-count" }, `That's all ${items.length}`),
+      endChecked,
+    ));
   };
 
   void watchSnapshot((s) => {
@@ -315,10 +322,10 @@ const TIER_LABEL: Record<Tier, string> = { urgent: "Urgent", normal: "Normal", l
 
 function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType<typeof listActions>): HTMLElement {
   const aggregate = item.members.length > 1;
-  // Plain text, so the outlined chips are exactly the things that open something. The separating dots are
-  // drawn by the stylesheet inside each phrase, so a line never starts with one.
+  // Spans, not buttons: the chips below are exactly the things that open something.
   const facts = rowFacts(item).map(({ text, kind, title }) => {
-    const fact = h("span", { class: kind }, text);
+    // Prefixed: a kind is data, and must not pick up an existing style such as .pill or .end.
+    const fact = h("span", { class: kind && `fact-${kind}` }, text);
     if (title) fact.title = title;
     return fact;
   });
@@ -329,19 +336,13 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
       type: "button",
       title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
       data: { assigned: String(m.state !== null) },
-      onclick: (e: MouseEvent) => {
-        e.stopPropagation();
-        void act(api.openPr(m.id).then(() => opened(item.key)));
-      },
+      onclick: chipClick(() => void act(api.openPr(m.id).then(() => opened(item.key)))),
     }, prLabel(m)), draftChip(m, item.key)]);
   const ticket = item.ticket && h("button", {
-    class: "member",
+    class: "member ticket",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
-    onclick: (e: MouseEvent) => {
-      e.stopPropagation();
-      void act(api.openTicket(item.key));
-    },
+    onclick: chipClick(() => void act(api.openTicket(item.key))),
   }, item.ticket);
   const copy: HTMLButtonElement = h("button", {
     class: "action",
@@ -356,7 +357,9 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
     class: "row",
     data: { tier, next: String(isNext) },
     // Marked first: a row of several PRs can fail on a later link after the first one opened.
-    onclick: () => {
+    onclick: (e: MouseEvent) => {
+      // A double-click's second click would open every PR of the row again.
+      if (e.detail > 1) return;
       opened(item.key);
       void act(api.openRow(item.key));
     },
@@ -396,15 +399,23 @@ function draftChip(m: Member, rowKey: string): HTMLElement | null {
     class: "member agent-draft",
     type: "button",
     title: marker.title,
-    onclick: (e: MouseEvent) => {
-      e.stopPropagation();
+    onclick: chipClick(() => {
       api.openDraft(m.id).then(() => opened(rowKey), (error: unknown) => {
         open.title = `${marker.title}\nCouldn't open it: ${String(error)}`;
         flash(open, "Failed");
       });
-    },
+    }),
   }, "Draft ready");
   return open;
+}
+
+/** A chip's click: it opens its own link, not the row's, and a double-click's second click opens nothing. */
+function chipClick(open: () => void): (e: MouseEvent) => void {
+  return (e) => {
+    e.stopPropagation();
+    if (e.detail > 1) return;
+    open();
+  };
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -440,7 +451,7 @@ function renderSettings(
   onSelect: (key: SettingsTab) => void,
   showFailure: (error: string) => void,
 ): { update: (s: Snapshot) => void; select: (key: SettingsTab) => void } {
-  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, api.saveSettings));
+  const saver = (settingsSaver ??= lastingSaver(snapshot.settings, (s) => api.saveSettings(s).then(() => s)));
   // This saver is the only writer of these settings, and the snapshot can lag a save just made.
   const settings = { ...saver.latest };
   // Each field reports its own save next to its caption; errors stay until the next attempt. Notes sit inside
@@ -472,7 +483,7 @@ function renderSettings(
   /** Re-shows `input` from `settings` after a rollback; while it has focus, once it loses it. */
   const shown = (input: HTMLInputElement, show: () => void) => generalShows.push(() => whenBlurred(input, show));
   const caption = (text: string, n: HTMLElement) => h("span", { class: "caption" }, text, n);
-  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note() };
+  const n = { minutes: note(), text: note(), width: note(), height: note(), theme: note(), custom: note(), browser: note(), notify: note(), autostart: note(), ink: note() };
   const workspaces = workspacesPanel(snapshot, { note, ok, fail, caption });
 
   // Not in `settings`, so a rollback leaves it as it is.
@@ -503,11 +514,41 @@ function renderSettings(
       if (run === extensionRun) extension.replaceChildren(String(e));
     });
   };
+  // The token stays in Rust: Settings shows dots, and Copy config puts the device's file on the clipboard.
+  const ink = h("div", { class: "ink" });
+  let inkShown = "";
+  const showInk = (s: InkStatus) => {
+    // Re-drawn only on a change, so a re-read during a click keeps its button.
+    if (JSON.stringify(s) === inkShown) return;
+    inkShown = JSON.stringify(s);
+    const button = (text: string, onclick: () => void) => h("button", { type: "button", onclick }, text);
+    const act = (call: () => Promise<InkStatus>, done: string) => call().then((next) => {
+      showInk(next);
+      ok(n.ink, done);
+    }, (e) => fail(n.ink, e));
+    ink.replaceChildren(
+      s.paired
+        ? h("span", { class: "inline" },
+          h("span", { class: "token" }, "•••••••••••••••• saved"),
+          button("Copy config", () => api.copyInkConfig().then(() => ok(n.ink, "Copied"), (e) => fail(n.ink, e))),
+          button("Replace token", () => act(api.pairInk, "Replaced")),
+          button("Remove", () => act(api.unpairInk, "Removed")))
+        : h("span", { class: "inline" }, button("Pair a device", () => act(api.pairInk, "Paired"))),
+      h("span", {}, s.address ? `Laptop address: ${s.address}` : "Laptop address: none, not on Wi-Fi"),
+      h("span", { class: "problem", hidden: !s.problem }, s.problem),
+    );
+  };
+  const checkInk = () => api.inkStatus().then(showInk, (e) => fail(n.ink, e));
+  checkInk();
+
   const recheck = () => {
     if (!extension.isConnected) {
       window.removeEventListener("focus", recheck);
       clearInterval(extensionTimer);
-    } else if (settingUp && !document.hidden && extension.offsetParent !== null) checkExtension();
+      return;
+    }
+    if (settingUp && !document.hidden && extension.offsetParent !== null) checkExtension();
+    if (!document.hidden && ink.offsetParent !== null) checkInk();
   };
   window.addEventListener("focus", recheck);
   const extensionTimer = setInterval(recheck, 3000);
@@ -649,6 +690,10 @@ function renderSettings(
       h("div", { class: "field" }, caption("Open links in", n.browser), h("span", { class: "inline" }, ...browsers), extension),
       h("label", { class: "check" }, notify, "Notify me about new reviews", n.notify),
       startWithWindows,
+      h("div", { class: "field" },
+        caption("PocketBook", n.ink),
+        h("span", { class: "steps" }, "Shows what waits on you on a PocketBook. Pair, then save the copied config on the PocketBook as system/config/rado.cfg."),
+        ink),
     ];
   };
   const counter = counterPanel(settings, { note, caption, fail, save });

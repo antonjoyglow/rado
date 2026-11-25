@@ -132,7 +132,7 @@ impl CustomTheme {
     }
 }
 
-/// The counter's look. A number colour of `None` is heat: blue at 0 through to red at 10 or more.
+/// The counter's look. A number colour of `None` is heat: blue at 0 through to red at 40 or more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CounterStyle {

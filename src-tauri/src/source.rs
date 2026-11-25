@@ -27,6 +27,14 @@ impl SourceError {
         Self { kind: FailureKind::RateLimited { until }, message: "rate limited".into() }
     }
 
+    /// A failed response that isn't throttling; a `Retry-After` on it (a 503's, say) still sets the next try.
+    pub fn http(message: String, retry_after: Option<DateTime<Utc>>) -> Self {
+        match retry_after {
+            Some(at) => Self { kind: FailureKind::RateLimited { until: Some(at) }, message },
+            None => message.into(),
+        }
+    }
+
     /// The same error under a source's name, such as `Azure DevOps: `.
     pub fn named(self, source: &str) -> Self {
         Self { message: format!("{source}: {}", self.message), ..self }
@@ -48,15 +56,44 @@ impl From<&str> for SourceError {
 /// When a throttled response says to come back: `Retry-After` in seconds, or else the `X-RateLimit-Reset` epoch
 /// second when no requests remain. Azure DevOps and GitHub both send these. Never more than a day away.
 pub fn retry_at(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    const DAY: i64 = 86_400;
-    let number = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok();
-    if let Some(seconds) = number("retry-after") {
-        return Some(now + chrono::Duration::seconds(seconds.clamp(0, DAY)));
+    retry_after(headers, now).or_else(|| {
+        let reset = header_number(headers, "x-ratelimit-reset").filter(|_| header_number(headers, "x-ratelimit-remaining") == Some(0))?;
+        DateTime::from_timestamp(reset, 0).map(|at| at.min(now + chrono::Duration::seconds(DAY_SECONDS)))
+    })
+}
+
+/// When `Retry-After` (in seconds) says to send the next request, on any response; 0 or less asks for no wait.
+/// Azure DevOps's `X-RateLimit-Reset` is when its usage would drain, not a time to come back, so only a throttled
+/// answer reads it.
+pub fn retry_after(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    header_number(headers, "retry-after").filter(|seconds| *seconds > 0).map(|seconds| now + chrono::Duration::seconds(seconds.min(DAY_SECONDS)))
+}
+
+fn header_number(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+const DAY_SECONDS: i64 = 86_400;
+
+/// The longest a request waits for a `Retry-After` inside a poll; a longer one ends the poll as a rate limit.
+pub const RETRY_AFTER_SLEEP_SECONDS: i64 = 30;
+
+/// What a request does before sending, given the latest `Retry-After` time its source named.
+#[derive(Debug, PartialEq)]
+pub enum Pace {
+    Send,
+    Sleep(std::time::Duration),
+    /// Too long to wait inside a poll.
+    Hold(DateTime<Utc>),
+}
+
+pub fn pace(retry_after: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Pace {
+    let Some(at) = retry_after.filter(|at| *at > now) else { return Pace::Send };
+    let wait = at - now;
+    if wait > chrono::Duration::seconds(RETRY_AFTER_SLEEP_SECONDS) {
+        return Pace::Hold(at);
     }
-    if number("x-ratelimit-remaining") == Some(0) {
-        return DateTime::from_timestamp(number("x-ratelimit-reset")?, 0).map(|at| at.min(now + chrono::Duration::seconds(DAY)));
-    }
-    None
+    Pace::Sleep(wait.to_std().unwrap_or_default())
 }
 
 /// Whether a response is throttling: a 429, or a 403 that carries the rate-limit headers (GitHub's way).
@@ -138,6 +175,44 @@ mod tests {
         assert!(throttled(StatusCode::FORBIDDEN, later));
         assert!(!throttled(StatusCode::FORBIDDEN, None), "a 403 without the headers is a permission error");
         assert!(!throttled(StatusCode::OK, later));
+    }
+
+    #[test]
+    fn retryAfter_readsOnlyRetryAfter_notTheResetTime() {
+        let reset = (now() + chrono::Duration::minutes(20)).timestamp().to_string();
+        assert_eq!(retry_after(&headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset)]), now()), None);
+        assert_eq!(retry_after(&headers(&[("retry-after", "5")]), now()), Some(now() + chrono::Duration::seconds(5)));
+        assert_eq!(retry_after(&headers(&[("retry-after", "99999999999999")]), now()), Some(now() + chrono::Duration::days(1)));
+    }
+
+    #[test]
+    fn retryAfter_zeroOrLess_namesNoTime() {
+        for seconds in ["0", "-5"] {
+            assert_eq!(retry_after(&headers(&[("retry-after", seconds)]), now()), None, "{seconds}");
+            assert_eq!(retry_at(&headers(&[("retry-after", seconds)]), now()), None, "{seconds}");
+        }
+        let reset = now() + chrono::Duration::minutes(20);
+        let with_reset = headers(&[("retry-after", "0"), ("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", &reset.timestamp().to_string())]);
+        assert_eq!(retry_at(&with_reset, now()), Some(reset), "the reset time still counts");
+    }
+
+    #[test]
+    fn http_namedTime_waitsLikeARateLimit_keepingItsMessage() {
+        let later = now() + chrono::Duration::minutes(10);
+        let named = SourceError::http("HTTP 503 Service Unavailable".into(), Some(later));
+        assert_eq!(named.kind, FailureKind::RateLimited { until: Some(later) });
+        assert_eq!(named.message, "HTTP 503 Service Unavailable");
+        assert_eq!(SourceError::http("HTTP 503 Service Unavailable".into(), None).kind, FailureKind::Other);
+    }
+
+    #[test]
+    fn pace_sleepsThroughAShortRetryAfter_andHoldsForALongOne() {
+        let seconds = |s| Some(now() + chrono::Duration::seconds(s));
+        assert_eq!(pace(None, now()), Pace::Send);
+        assert_eq!(pace(seconds(-1), now()), Pace::Send, "a past time asks for nothing");
+        assert_eq!(pace(seconds(0), now()), Pace::Send);
+        assert_eq!(pace(seconds(30), now()), Pace::Sleep(std::time::Duration::from_secs(30)));
+        assert_eq!(pace(seconds(31), now()), Pace::Hold(now() + chrono::Duration::seconds(31)));
     }
 
     #[test]

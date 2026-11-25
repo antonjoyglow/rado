@@ -24,7 +24,7 @@ export function ago(iso: string | null, now: Date): string {
 }
 
 /** Count at and above which the pill's number is fully red. */
-export const HEAT_CAP = 10;
+export const HEAT_CAP = 40;
 
 /** Heat colour for a count: blue (hue 225) at 0, through cyan, green and yellow, to red at HEAT_CAP or more. */
 export function heat(count: number): string {
@@ -109,10 +109,10 @@ export function ageColumn(createdAt: string, updatedAt: string | null, now: Date
   };
 }
 
-/** One phrase of a row's details line; `kind` names the ones with a colour of their own. */
+/** One phrase of a row's details line; `kind` names how it is drawn, and plain text has none. */
 export interface RowFact {
   text: string;
-  kind?: "required" | "approved" | "objected";
+  kind?: "tag" | "branch" | "comments" | "required" | "approved" | "objected";
   title?: string;
 }
 
@@ -120,16 +120,15 @@ export interface RowFact {
 export function rowFacts(item: ReviewItem): RowFact[] {
   const { approvals, objections, comments } = item;
   const facts: (RowFact | false | null)[] = [
-    ...(item.members.length > 1 ? [{ text: `${item.members.length} PRs` }, { text: item.branch }] : []),
+    ...(item.members.length > 1 ? [{ text: `${item.members.length} PRs`, kind: "tag" as const }, { text: item.branch, kind: "branch" as const }] : []),
     { text: item.author },
     item.required && { text: "required", kind: "required" },
     approvals > 0 && { text: `✓ ${approvals}`, kind: "approved", title: `${approvals} approved` },
     objections > 0 && { text: `✗ ${objections}`, kind: "objected", title: `${objections} rejected or waiting for author` },
-    comments && comments.total > 0 && {
-      text: `${comments.total} comment${comments.total === 1 ? "" : "s"}${comments.openThreads > 0 ? ` (${comments.openThreads} open)` : ""}`,
-    },
-    item.draft && { text: "draft" },
-    item.releaseTarget && { text: `→ ${item.target}`, title: `Merges into ${item.target}` },
+    comments && comments.total > 0 && { text: `${comments.total} comment${comments.total === 1 ? "" : "s"}`, kind: "comments" },
+    comments && comments.openThreads > 0 && { text: `${comments.openThreads} open`, kind: "tag", title: `${comments.openThreads} open thread${comments.openThreads === 1 ? "" : "s"}` },
+    item.draft && { text: "draft", kind: "tag" },
+    item.releaseTarget && { text: `→ ${item.target}`, kind: "tag", title: `Merges into ${item.target}` },
   ];
   return facts.filter((f): f is RowFact => Boolean(f));
 }

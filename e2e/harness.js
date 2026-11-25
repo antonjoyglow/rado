@@ -11,6 +11,7 @@ export async function open(page, snap) {
     window.__e2e.responses.get_snapshot = s;
     window.__e2e.responses.get_autostart = false;
     window.__e2e.responses.extension_status = { folder: "extension", state: "notLoaded" };
+    window.__e2e.responses.ink_status = { paired: false, address: "192.168.1.14:7878", problem: null };
   }, snap);
   await page.goto("/?view=list");
   await page.waitForFunction(() => window.__e2e.calls.some((c) => c.cmd === "get_snapshot"));

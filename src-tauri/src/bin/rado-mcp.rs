@@ -7,9 +7,10 @@
 mod queue;
 
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ use queue::{DRAFT_LINKS_FILE, DRAFTS_FILE, DRAFTS_LOCK_FILE, DraftLink, DraftLin
 /// The newest protocol version this server speaks, answered to a client asking for one it doesn't know.
 const PROTOCOL: &str = "2025-11-25";
 const PROTOCOLS: [&str; 4] = [PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"];
+const DRAFTS_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 fn main() {
     let dir = data_dir();
@@ -208,7 +210,7 @@ fn tools() -> Value {
                 "required": ["prId", "commit"],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+            "annotations": { "title": "Unmark PR drafted", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
         },
     ])
 }
@@ -417,11 +419,19 @@ fn read_links(path: &Path, writing_a_link: bool) -> Result<Option<DraftLinks>, S
     }
 }
 
+/// Schemes are case-insensitive, but Rado's list opens only lower-case ones, so `HTTPS://` is stored as `https://`.
+fn lower_case_scheme(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => format!("{}://{rest}", scheme.to_ascii_lowercase()),
+        None => url.into(),
+    }
+}
+
 fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     let (pr_id, commit) = pr_and_commit(args)?;
     let url = match args.get("draftUrl") {
         None | Some(Value::Null) => None,
-        Some(Value::String(url)) if queue::is_draft_url(url) => Some(url.clone()),
+        Some(Value::String(url)) if queue::is_draft_url(&lower_case_scheme(url)) => Some(lower_case_scheme(url)),
         Some(_) => return Err(format!(
             "draftUrl must be an http:// or https:// link of at most {MAX_DRAFT_URL} characters, with no spaces, quotes, backslashes or non-ASCII characters, and no @ before the host"
         )),
@@ -442,7 +452,7 @@ fn mark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     } else if prs().any(|p| p.number == pr_id && p.source_commit.as_deref() == Some(commit)) {
         return Err(format!("{pr_id} is a PR number; pass the prId from list_review_queue"));
     }
-    let _lock = lock_drafts(dir)?;
+    let _lock = lock_drafts(dir, DRAFTS_LOCK_WAIT)?;
     let (path, links_path) = (dir.join(DRAFTS_FILE), dir.join(DRAFT_LINKS_FILE));
     let mut drafts = read_drafts(&path)?;
     let read = read_links(&links_path, url.is_some())?;
@@ -474,7 +484,7 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     if !path.exists() {
         return Err(unmarked());
     }
-    let _lock = lock_drafts(&ws.dir)?;
+    let _lock = lock_drafts(&ws.dir, DRAFTS_LOCK_WAIT)?;
     let mut drafts = read_drafts(&path)?;
     if drafts.get(&pr_id).map(String::as_str) != Some(commit) {
         return Err(unmarked());
@@ -485,13 +495,29 @@ fn unmark_drafted(ws: &Workspace, args: &Value) -> Result<Value, String> {
     Ok(json!({ "prId": pr_id, "commit": commit }))
 }
 
-/// Waits for other `rado-mcp` processes to finish recording; the lock goes when the file is dropped or its process
-/// ends, so a crashed agent can't leave it held.
-fn lock_drafts(dir: &Path) -> Result<File, String> {
+/// Waits up to `wait` for other `rado-mcp` processes to finish recording, then gives up, so an agent that hung while
+/// recording can't block every mark. The lock goes when the file is dropped or its process ends, so a crashed agent
+/// can't leave it held.
+fn lock_drafts(dir: &Path, wait: Duration) -> Result<File, String> {
     let path = dir.join(DRAFTS_LOCK_FILE);
     let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    file.lock().map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(file)
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "{} has been held for {} s by another agent recording a draft. Try again; if this keeps happening, end the hung session's rado-mcp.",
+                        path.display(),
+                        wait.as_secs_f32()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -704,9 +730,19 @@ mod tests {
     }
 
     #[test]
+    fn markDrafted_draftUrlWithAnUpperCaseScheme_isRecordedLowerCase() {
+        let dir = with_queue("upper-url");
+        for (id, sent, kept) in [(1, "HTTPS://github.com/o/R/pull/1", "https://github.com/o/R/pull/1"), (2, "Http://Localhost:8080/x", "http://Localhost:8080/x")] {
+            let marked = text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": id, "commit": format!("c{id}"), "draftUrl": sent })));
+            assert_eq!(marked["draftUrl"], kept);
+            assert_eq!(queue::read_json::<DraftLinks>(&links_at(&dir)).unwrap()[&id].url, kept);
+        }
+    }
+
+    #[test]
     fn markDrafted_draftUrlNotAnHttpLink_isAnErrorAndRecordsNothing() {
         let dir = with_queue("bad-url");
-        for url in [json!("file:///C:/drafts/1.md"), json!(7)] {
+        for url in [json!("file:///C:/drafts/1.md"), json!("FILE:///C:/drafts/1.md"), json!(7)] {
             let error = error_text(&call_tool(&dir.0, at(1), "mark_drafted", json!({ "prId": 1, "commit": "c1", "draftUrl": url })));
             assert!(error.contains("draftUrl must be an http:// or https:// link of at most 2048 characters"), "{error}");
         }
@@ -912,6 +948,20 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Workspace Work (id w1): Cannot read") && text.ends_with("Try again."), "{result}");
         assert_eq!(queue::read_json::<Drafts>(&path).unwrap(), Drafts::from([(9, "c9".to_string())]));
+    }
+
+    #[test]
+    fn lockDrafts_heldByAHungAgent_givesUpNamingTheLockFile() {
+        let dir = TempDir::new("hung");
+        let path = dir.0.join(DRAFTS_LOCK_FILE);
+        let held = File::options().create(true).truncate(false).write(true).open(&path).unwrap();
+        held.lock().unwrap();
+
+        let error = lock_drafts(&dir.0, Duration::from_millis(100)).unwrap_err();
+        drop(held);
+
+        assert!(error.starts_with(&format!("{} has been held for 0.1 s by another agent", path.display())), "{error}");
+        assert!(lock_drafts(&dir.0, Duration::from_millis(100)).is_ok());
     }
 
     #[test]

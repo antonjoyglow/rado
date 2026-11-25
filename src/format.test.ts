@@ -70,7 +70,9 @@ describe("ago", () => {
 describe("heat", () => {
   it.each([
     [0, "hsl(225, 100%, 58%)"],
-    [5, "hsl(113, 100%, 58%)"],
+    [5, "hsl(197, 100%, 58%)"],
+    [20, "hsl(113, 100%, 58%)"],
+    [39, "hsl(6, 100%, 58%)"],
     [HEAT_CAP, "hsl(0, 100%, 58%)"],
     [123, "hsl(0, 100%, 58%)"],
     [-1, "hsl(225, 100%, 58%)"],
@@ -147,7 +149,11 @@ describe("rowFacts", () => {
   it("singlePr_isJustTheAuthor", () => expect(rowFacts(item({ members: [member({})] }))).toEqual([{ text: "a" }]));
 
   it("aggregate_splitsCountBranchAndAuthorIntoSeparatePhrases", () =>
-    expect(rowFacts(item({ members: [member({}), member({ id: 2 })] })).map((f) => f.text)).toEqual(["2 PRs", "feature/x", "a"]));
+    expect(rowFacts(item({ members: [member({}), member({ id: 2 })] }))).toEqual([
+      { text: "2 PRs", kind: "tag" },
+      { text: "feature/x", kind: "branch" },
+      { text: "a" },
+    ]));
 
   it("everyFact_inDisplayOrderWithItsKindAndTooltip", () =>
     expect(rowFacts(item({
@@ -157,13 +163,14 @@ describe("rowFacts", () => {
       { text: "required", kind: "required" },
       { text: "✓ 2", kind: "approved", title: "2 approved" },
       { text: "✗ 1", kind: "objected", title: "1 rejected or waiting for author" },
-      { text: "3 comments (1 open)" },
-      { text: "draft" },
-      { text: "→ main", title: "Merges into main" },
+      { text: "3 comments", kind: "comments" },
+      { text: "1 open", kind: "tag", title: "1 open thread" },
+      { text: "draft", kind: "tag" },
+      { text: "→ main", kind: "tag", title: "Merges into main" },
     ]));
 
   it("oneComment_isSingularAndNoOpenThreadsAreLeftOut", () =>
-    expect(rowFacts(item({ comments: { total: 1, openThreads: 0 } }))[1]).toEqual({ text: "1 comment" }));
+    expect(rowFacts(item({ comments: { total: 1, openThreads: 0 } })).slice(1)).toEqual([{ text: "1 comment", kind: "comments" }]));
 
   it("noComments_isLeftOut", () =>
     expect(rowFacts(item({ comments: { total: 0, openThreads: 0 } }))).toEqual([{ text: "a" }]));
