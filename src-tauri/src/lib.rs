@@ -101,12 +101,13 @@ fn session<T>(app: &AppHandle, change: impl FnOnce(&mut Session) -> T) -> T {
 
 async fn poll_loop(app: AppHandle) {
     let mut me: Option<(u64, String)> = None;
+    let retry_after = ado::RetryAfter::default();
     loop {
         let shared = app.state::<Shared>();
         // Subscribed before the ticket reads the generation: a switch after this point cancels the poll below.
         let mut changed = shared.generation.subscribe();
         if let Some(ticket) = session(&app, |s| s.begin_poll(Utc::now())) {
-            poll_workspace(&app, ticket, &mut me, &mut changed).await;
+            poll_workspace(&app, ticket, &mut me, &retry_after, &mut changed).await;
         }
         let wait = {
             let inner = shared.inner.lock().expect("state lock");
@@ -125,14 +126,20 @@ async fn poll_loop(app: AppHandle) {
 
 /// Polls one workspace for its ticket: a switch while it runs drops the result rather than filing it under the
 /// workspace switched to.
-async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, String)>, changed: &mut watch::Receiver<u64>) {
+async fn poll_workspace(
+    app: &AppHandle,
+    ticket: Ticket,
+    me: &mut Option<(u64, String)>,
+    retry_after: &ado::RetryAfter,
+    changed: &mut watch::Receiver<u64>,
+) {
     let Ticket { workspace, generation, pat, github_token, settled, held } = ticket;
     let ado = async {
         match pat.as_ref().map(Option::as_deref) {
             Ok(None) => Poll::Off,
             _ if held.contains(&Provider::Ado) => Poll::Held,
             Err(error) => Poll::Failed(format!("Azure DevOps: can't read the PAT ({error})").into()),
-            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, &settled).await {
+            Ok(Some(pat)) => match poll_ado(&workspace.azure_dev_ops, pat, generation, me, retry_after, &settled).await {
                 Ok(poll) => Poll::Fresh(poll),
                 Err(error) => Poll::Failed(error.named("Azure DevOps")),
             },
@@ -160,9 +167,10 @@ async fn poll_workspace(app: &AppHandle, ticket: Ticket, me: &mut Option<(u64, S
 const THREAD_REQUESTS: usize = 6;
 
 /// Comment counts and last activity for the PRs in my list that need them; a PR whose threads fail to load keeps
-/// what the last poll knew. A throttled threads request fails the whole poll, so the source backs off.
+/// what the last poll knew. A throttled threads request, or one that names a time to come back, fails the whole poll,
+/// so the source backs off.
 async fn fetch_threads(
-    client: &ado::Client,
+    client: &ado::Client<'_>,
     prs: &[ado::PullRequest],
     me: &ado::Me<'_>,
     settled: &HashMap<i64, String>,
@@ -193,12 +201,13 @@ async fn poll_ado(
     pat: &str,
     generation: u64,
     me: &mut Option<(u64, String)>,
+    retry_after: &ado::RetryAfter,
     settled: &HashMap<i64, String>,
 ) -> Result<ado::Fetched, source::SourceError> {
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
     }
-    let client = ado::Client::new(&source.organization, pat);
+    let client = ado::Client::new(&source.organization, pat, retry_after);
     if me.as_ref().is_none_or(|(g, _)| *g != generation) {
         *me = Some((generation, client.my_id().await?.to_lowercase()));
     }

@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::group::Related;
 use crate::score::{self, CommentStats, PrFacts, PrThreads, Provider, ReviewItem, ReviewState, VoteMemory, VotedAt};
-use crate::source::{QueueRef, SourceError, SourcePoll, retry_at, throttled};
+use crate::source::{Pace, QueueRef, SourceError, SourcePoll, pace, retry_after, retry_at, throttled};
 
 const API: &str = "api-version=7.1";
 const PAGE: usize = 500;
@@ -138,14 +138,19 @@ fn last_activity(threads: &[Thread]) -> Option<DateTime<Utc>> {
     threads.iter().filter(|t| !t.is_deleted).filter_map(|t| t.last_updated_date).max()
 }
 
-pub struct Client {
+/// The latest time a `Retry-After` named, on any answer: Azure DevOps sends it on a 200 when a client nears its
+/// limit, and asks for no request before then. It outlives the poll, so a Refresh right after honours it too.
+pub type RetryAfter = std::sync::Mutex<Option<DateTime<Utc>>>;
+
+pub struct Client<'a> {
     http: reqwest::Client,
     org: String,
     auth: String,
+    retry_after: &'a RetryAfter,
 }
 
-impl Client {
-    pub fn new(org: &str, pat: &str) -> Self {
+impl<'a> Client<'a> {
+    pub fn new(org: &str, pat: &str, retry_after: &'a RetryAfter) -> Self {
         let token = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
         Self {
             http: reqwest::Client::builder()
@@ -154,6 +159,7 @@ impl Client {
                 .expect("static reqwest config"),
             org: org.to_string(),
             auth: format!("Basic {token}"),
+            retry_after,
         }
     }
 
@@ -168,6 +174,15 @@ impl Client {
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, SourceError> {
+        // Looked at again after a sleep: another request may have been asked to wait longer meanwhile.
+        loop {
+            let asked = *self.retry_after.lock().expect("retry-after lock");
+            match pace(asked, Utc::now()) {
+                Pace::Send => break,
+                Pace::Sleep(wait) => tokio::time::sleep(wait).await,
+                Pace::Hold(until) => return Err(SourceError::rate_limited(Some(until))),
+            }
+        }
         let response = self
             .http
             .get(url)
@@ -180,13 +195,19 @@ impl Client {
         if status == reqwest::StatusCode::NON_AUTHORITATIVE_INFORMATION || status == reqwest::StatusCode::UNAUTHORIZED {
             return Err("PAT rejected (expired or missing Code: Read scope)".into());
         }
-        let retry = retry_at(response.headers(), Utc::now());
+        let now = Utc::now();
+        let asked = retry_after(response.headers(), now);
+        if let Some(at) = asked {
+            let mut latest = self.retry_after.lock().expect("retry-after lock");
+            *latest = latest.max(Some(at));
+        }
+        let retry = retry_at(response.headers(), now);
         if throttled(status, retry) {
             return Err(SourceError::rate_limited(retry));
         }
         let endpoint = url.split('?').next().unwrap_or(url).rsplit("_apis/").next().unwrap_or(url);
         if !status.is_success() {
-            return Err(format!("HTTP {status} from {endpoint}").into());
+            return Err(SourceError::http(format!("HTTP {status} from {endpoint}"), asked));
         }
         let body = response.bytes().await.map_err(|e| format!("network: {e}"))?;
         Ok(serde_json::from_slice::<T>(&body).map_err(|e| format!("unexpected {endpoint} response: {e}"))?)
