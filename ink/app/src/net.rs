@@ -16,7 +16,6 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub type Outcome = Result<Fetched, Failure>;
 
-/// Polls until the UI hangs up.
 pub fn spawn(config: Config, tx: Sender<Outcome>) {
     thread::spawn(move || {
         let mut etag = None;

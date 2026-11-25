@@ -71,6 +71,8 @@ pub struct TabView {
     pub label: &'static str,
     pub count: usize,
     pub selected: bool,
+    /// The tab holds *Review next*.
+    pub next: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,6 +157,7 @@ impl Model {
         banners.extend(list.error.clone());
         let tab = self.tab.unwrap_or(Tab::NeedsReview);
         let next = review_next(&list.rows);
+        let next_key = next.map(|r| r.key.as_str());
         let in_tab = self.rows_in_tab();
         View::List(ListView {
             workspace: list.workspace.clone(),
@@ -166,13 +169,19 @@ impl Model {
             banners,
             tabs: TABS
                 .iter()
-                .map(|&(t, label)| TabView { tab: t, label, count: list.rows.iter().filter(|r| r.tab == t).count(), selected: t == tab })
+                .map(|&(t, label)| TabView {
+                    tab: t,
+                    label,
+                    count: list.rows.iter().filter(|r| r.tab == t).count(),
+                    selected: t == tab,
+                    next: next.is_some_and(|r| r.tab == t),
+                })
                 .collect(),
             rows: in_tab
                 .iter()
                 .skip(self.page * ROWS_PER_PAGE)
                 .take(ROWS_PER_PAGE)
-                .map(|row| row_view(row, next == Some(row.key.as_str())))
+                .map(|row| row_view(row, next_key == Some(row.key.as_str())))
                 .collect(),
             page: self.page + 1,
             pages: self.pages(),
@@ -190,8 +199,8 @@ impl Model {
 }
 
 /// The list window's rule for rows nobody opened yet: the first row, in Rado's order, waiting on my review.
-fn review_next(rows: &[Row]) -> Option<&str> {
-    rows.iter().find(|r| r.waiting && r.tab != Tab::Mine).map(|r| r.key.as_str())
+fn review_next(rows: &[Row]) -> Option<&Row> {
+    rows.iter().find(|r| r.waiting && r.tab != Tab::Mine)
 }
 
 /// The first of Review, Re-review and Mine with rows, else Review.
@@ -273,7 +282,6 @@ mod tests {
             objections: 0,
             comments: None,
             waiting,
-            holds_mine: tab == Tab::Mine,
             draft: None,
             prs: vec![Pr { repo: "api".into(), number: 1, provider: Provider::Ado }],
         }
@@ -360,6 +368,8 @@ mod tests {
         ]);
         let marked = |model: &Model| shown(model, "14:20").rows.into_iter().filter(|r| r.review_next).map(|r| r.key).collect::<Vec<_>>();
         assert!(marked(&model).is_empty(), "the next review is on the Re-review tab");
+        let tabs: Vec<_> = shown(&model, "14:20").tabs.iter().map(|t| t.next).collect();
+        assert_eq!(tabs, [false, true, false, false]);
         model.select_tab(Tab::ReReview);
         assert_eq!(marked(&model), ["b"]);
     }
@@ -460,7 +470,7 @@ mod tests {
         r.age_hours = 0;
         r.objections = 2;
         r.comments = Some(Comments { total: 1, open_threads: 0 });
-        r.draft = Some(Draft { linked: false });
+        r.draft = Some(Draft {});
         let view = row_view(&r, false);
         assert_eq!(view.facts, ["new", "2 objections", "1 comment"]);
         assert!(view.draft_ready);

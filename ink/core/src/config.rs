@@ -21,6 +21,7 @@ pub fn load(path: &str, read: std::io::Result<String>) -> Result<Config, String>
 
 /// Reads `host=`, `port=` and `token=` lines. The error says what is missing or wrong.
 fn parse(text: &str) -> Result<Config, String> {
+    let text = text.trim_start_matches('\u{feff}');
     let value = |key: &str| {
         text.lines()
             .filter_map(|line| line.split_once('='))
@@ -43,7 +44,7 @@ mod tests {
 
     #[test]
     fn parse_radosCopiedConfig() {
-        let text = "host=192.168.1.14\r\nport=7878\r\ntoken=abc-DEF_123\r\n";
+        let text = "\u{feff}host=192.168.1.14\r\nport=7878\r\ntoken=abc-DEF_123\r\n";
         assert_eq!(parse(text), Ok(Config { host: "192.168.1.14".into(), port: 7878, token: "abc-DEF_123".into() }));
     }
 

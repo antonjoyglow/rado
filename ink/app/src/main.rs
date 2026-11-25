@@ -15,14 +15,13 @@ use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
-/// How often the UI takes the network thread's news; the screen redraws only when the view changed.
+/// How often the UI takes the network thread's news.
 const TICK: Duration = Duration::from_secs(1);
 
 fn now() -> chrono::DateTime<chrono::FixedOffset> {
     chrono::Local::now().fixed_offset()
 }
 
-/// Builds the window, starts the network thread and runs the event loop until Exit.
 fn run(config_path: &str) -> Result<(), slint::PlatformError> {
     let config = config::load(config_path, std::fs::read_to_string(config_path));
     let ui = AppWindow::new()?;
@@ -110,7 +109,7 @@ fn draw(ui: &AppWindow, view: &View) {
             let tabs: Vec<TabItem> = list
                 .tabs
                 .iter()
-                .map(|t| TabItem { label: t.label.into(), count: t.count as i32, selected: t.selected })
+                .map(|t| TabItem { label: t.label.into(), count: t.count as i32, selected: t.selected, next: t.next })
                 .collect();
             ui.set_tabs(ModelRc::new(VecModel::from(tabs)));
             let rows: Vec<RowItem> = list
@@ -162,19 +161,28 @@ fn main() {
         }
     }
 
+    /// Closes the app the InkView way when the UI thread ends, by Exit or by a panic, so the device never keeps a
+    /// frozen page.
+    struct CloseOnDrop(&'static Inkview);
+    impl Drop for CloseOnDrop {
+        fn drop(&mut self) {
+            // SAFETY: CloseApp takes no arguments; InkView returns to where the app was started from.
+            unsafe { self.0.CloseApp() };
+        }
+    }
+
     let iv: &'static Inkview = Box::leak(Box::new(inkview::load()));
     let (events, ui_events) = mpsc::channel();
     std::thread::spawn({
         let events = events.clone();
         move || {
+            let _close = CloseOnDrop(iv);
             // The framebuffer exists only once InkView has sent Init.
             while !matches!(ui_events.recv(), Ok(SlintEvent::InkviewEvent(Event::Init))) {}
             match WhichScreen::new(iv) {
                 WhichScreen::BB8(screen) => run_on(screen, events, ui_events),
                 WhichScreen::RGB24(screen) => run_on(screen, events, ui_events),
             }
-            // SAFETY: the UI is gone; close the app the InkView way, back to where it was started from.
-            unsafe { iv.CloseApp() };
         }
     });
     inkview::iv_main(iv, move |event| {

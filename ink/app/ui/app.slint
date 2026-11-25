@@ -7,6 +7,7 @@ export struct TabItem {
     label: string,
     count: int,
     selected: bool,
+    next: bool,
 }
 
 export enum Tier { low, normal, urgent }
@@ -232,7 +233,7 @@ export component AppWindow inherits Window {
                         border-width: 1px;
                         border-color: black;
                         Text {
-                            text: tab.label + " " + tab.count;
+                            text: tab.label + " " + tab.count + (tab.next ? " •" : "");
                             color: tab.selected ? white : black;
                             font-size: 9px;
                             font-weight: tab.selected ? 700 : 400;

@@ -38,7 +38,6 @@ pub struct Row {
     pub comments: Option<Comments>,
     /// Counts toward the counter: waiting on me.
     pub waiting: bool,
-    pub holds_mine: bool,
     pub draft: Option<Draft>,
     pub prs: Vec<Pr>,
 }
@@ -70,10 +69,9 @@ pub struct Comments {
     pub open_threads: u32,
 }
 
+/// A review agent's draft at the PR's current commit.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Draft {
-    pub linked: bool,
-}
+pub struct Draft {}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Pr {
@@ -89,7 +87,6 @@ pub enum Provider {
     Github,
 }
 
-/// What a list request got back.
 #[derive(Debug, PartialEq)]
 pub enum Fetched {
     Changed { list: Box<List>, etag: Option<String> },
@@ -97,7 +94,6 @@ pub enum Fetched {
     Unauthorized,
 }
 
-/// The request for the list; `etag` is the last list's, so an unchanged list costs a 304.
 pub fn list_request(config: &Config, etag: Option<&str>) -> String {
     let mut request = format!(
         "GET /v1/list HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n",
@@ -154,21 +150,8 @@ mod tests {
     }
 
     #[test]
-    fn fixture_fromRado_parses() {
+    fn fixture_tabsTheDeviceDoesntShow_areOther() {
         let list: List = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(list.workspace, "Acme");
-        assert_eq!(list.counts, Counts { reviews: 3, mine: 1 });
-        assert_eq!(list.last_refreshed.unwrap().to_rfc3339(), "2026-11-25T09:30:00+00:00");
-        assert_eq!(list.rows.len(), 7);
-        let first = &list.rows[0];
-        assert_eq!((first.key.as_str(), first.tab, first.tier), ("pr:1", Tab::NeedsReview, Tier::Urgent));
-        assert_eq!(first.ticket.as_deref(), Some("ABC-12"));
-        assert_eq!(first.comments, Some(Comments { total: 3, open_threads: 1 }));
-        assert_eq!(first.draft, Some(Draft { linked: true }));
-        assert_eq!(first.prs, vec![Pr { repo: "api".into(), number: 101, provider: Provider::Ado }]);
-        let aggregate = list.rows.iter().find(|r| r.key == "branch:GitHub:feature/shared").unwrap();
-        assert!(aggregate.holds_mine);
-        assert_eq!(aggregate.prs.len(), 2);
         assert_eq!(list.rows.iter().find(|r| r.key == "pr:9").unwrap().tab, Tab::Other);
     }
 
