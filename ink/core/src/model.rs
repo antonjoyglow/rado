@@ -6,7 +6,8 @@ use chrono::{DateTime, FixedOffset};
 use crate::api::{Fetched, List, Row, Tab, Tier};
 use crate::config::Config;
 
-pub const ROWS_PER_PAGE: usize = 7;
+/// Cards per page: six three-line cards and two banners fit the Era Color's 483 logical pixels.
+pub const ROWS_PER_PAGE: usize = 6;
 
 /// The tabs in strip order, labelled as in the list window.
 const TABS: [(Tab, &str); 4] = [(Tab::NeedsReview, "Review"), (Tab::ReReview, "Re-review"), (Tab::Mine, "Mine"), (Tab::Hidden, "Hidden")];
@@ -63,6 +64,8 @@ pub struct ListView {
     /// The page shown, from 1, and how many the tab has.
     pub page: usize,
     pub pages: usize,
+    /// "That's all 9", under the last card when its page has room.
+    pub end: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,13 +82,29 @@ pub struct TabView {
 pub struct RowView {
     pub key: String,
     pub title: String,
-    /// "api !101 · web #102".
-    pub prs: String,
-    /// Age, PR count, votes, comments and ticket, in that order.
-    pub facts: Vec<String>,
     pub tier: Tier,
-    pub draft_ready: bool,
     pub review_next: bool,
+    /// Age, PR count, votes and comments, in that order.
+    pub facts: Vec<Fact>,
+    pub draft_ready: bool,
+    pub ticket: Option<String>,
+    /// "api !101", "web #102".
+    pub prs: Vec<String>,
+}
+
+/// A fact on a card, as the list window's `rowFacts` styles it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fact {
+    pub text: String,
+    pub kind: FactKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactKind {
+    Plain,
+    Pill,
+    Approved,
+    Objected,
 }
 
 impl Model {
@@ -185,6 +204,8 @@ impl Model {
                 .collect(),
             page: self.page + 1,
             pages: self.pages(),
+            end: (self.page + 1 == self.pages() && !in_tab.is_empty() && in_tab.len() - self.page * ROWS_PER_PAGE < ROWS_PER_PAGE)
+                .then(|| format!("That's all {}", in_tab.len())),
         })
     }
 
@@ -224,35 +245,38 @@ fn plural(n: u32, one: &str) -> String {
 }
 
 fn row_view(row: &Row, review_next: bool) -> RowView {
-    let prs = row
-        .prs
-        .iter()
-        .map(|pr| format!("{} {}{}", pr.repo, if pr.provider == crate::api::Provider::Github { "#" } else { "!" }, pr.number))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let mut facts = vec![age(row.age_hours)];
+    let fact = |text: String, kind| Fact { text, kind };
+    let mut facts = vec![fact(age(row.age_hours), FactKind::Pill)];
     if row.prs.len() > 1 {
-        facts.push(format!("{} PRs", row.prs.len()));
+        facts.push(fact(format!("{} PRs", row.prs.len()), FactKind::Pill));
     }
     if row.approvals > 0 {
-        facts.push(format!("{} approved", row.approvals));
+        facts.push(fact(format!("{} approved", row.approvals), FactKind::Approved));
     }
     if row.objections > 0 {
-        facts.push(plural(row.objections, "objection"));
+        facts.push(fact(plural(row.objections, "objection"), FactKind::Objected));
     }
-    if let Some(c) = row.comments.as_ref().filter(|c| c.total > 0) {
-        let open = if c.open_threads > 0 { format!(" ({} open)", c.open_threads) } else { String::new() };
-        facts.push(format!("{}{open}", plural(c.total, "comment")));
+    if let Some(c) = &row.comments {
+        if c.total > 0 {
+            facts.push(fact(plural(c.total, "comment"), FactKind::Plain));
+        }
+        if c.open_threads > 0 {
+            facts.push(fact(format!("{} open", c.open_threads), FactKind::Pill));
+        }
     }
-    facts.extend(row.ticket.clone());
     RowView {
         key: row.key.clone(),
         title: row.title.clone(),
-        prs,
-        facts,
         tier: row.tier,
-        draft_ready: row.draft.is_some(),
         review_next,
+        facts,
+        draft_ready: row.draft.is_some(),
+        ticket: row.ticket.clone(),
+        prs: row
+            .prs
+            .iter()
+            .map(|pr| format!("{} {}{}", pr.repo, if pr.provider == crate::api::Provider::Github { "#" } else { "!" }, pr.number))
+            .collect(),
     }
 }
 
@@ -317,6 +341,10 @@ mod tests {
         view.rows.iter().map(|r| r.key.as_str()).collect()
     }
 
+    fn texts(facts: &[Fact]) -> Vec<(&str, FactKind)> {
+        facts.iter().map(|f| (f.text.as_str(), f.kind)).collect()
+    }
+
     #[test]
     fn fixture_showsTheHeaderTabsAndRows() {
         let fixture = include_str!("../../fixtures/list.json");
@@ -329,11 +357,15 @@ mod tests {
         assert_eq!(tabs, [("Review", 2, true), ("Re-review", 1, false), ("Mine", 2, false), ("Hidden", 1, false)]);
         assert_eq!(keys(&view), ["pr:1", "branch:GitHub:feature/shared"]);
         let first = &view.rows[0];
-        assert_eq!(first.prs, "api !101");
-        assert_eq!(first.facts, ["1d", "1 approved", "3 comments (1 open)", "ABC-12"]);
+        assert_eq!((first.ticket.as_deref(), first.prs.as_slice()), (Some("ABC-12"), ["api !101".to_string()].as_slice()));
+        assert_eq!(
+            texts(&first.facts),
+            [("1d", FactKind::Pill), ("1 approved", FactKind::Approved), ("3 comments", FactKind::Plain), ("1 open", FactKind::Pill)]
+        );
         assert_eq!((first.tier, first.draft_ready, first.review_next), (Tier::Urgent, true, true));
-        assert_eq!(view.rows[1].prs, "web #102 · app #103");
-        assert_eq!(view.rows[1].facts, ["2d", "2 PRs"]);
+        assert_eq!(view.rows[1].prs, ["web #102", "app #103"]);
+        assert_eq!(texts(&view.rows[1].facts), [("2d", FactKind::Pill), ("2 PRs", FactKind::Pill)]);
+        assert_eq!(view.end.as_deref(), Some("That's all 2"));
     }
 
     #[test]
@@ -375,34 +407,35 @@ mod tests {
     }
 
     #[test]
-    fn pages_holdSevenRows_turnWithinTheTab_andResetOnATabChange() {
-        let rows: Vec<Row> = (0..16).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect();
+    fn pages_holdSixCards_turnWithinTheTab_andResetOnATabChange() {
+        let rows: Vec<Row> = (0..14).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect();
         let mut model = loaded(rows);
         let view = shown(&model, "14:12");
-        assert_eq!((view.rows.len(), view.page, view.pages), (7, 1, 3));
+        assert_eq!((view.rows.len(), view.page, view.pages, view.end), (6, 1, 3, None));
         model.turn_page(false);
         assert_eq!(shown(&model, "14:12").page, 1);
         model.turn_page(true);
         model.turn_page(true);
         model.turn_page(true);
         let view = shown(&model, "14:12");
-        assert_eq!((keys(&view), view.page), (vec!["r14", "r15"], 3));
+        assert_eq!((keys(&view), view.page), (vec!["r12", "r13"], 3));
+        assert_eq!(view.end.as_deref(), Some("That's all 14"));
 
         model.select_tab(Tab::Hidden);
         let view = shown(&model, "14:12");
-        assert_eq!((view.rows.len(), view.page, view.pages), (0, 1, 1));
+        assert_eq!((view.rows.len(), view.page, view.pages, view.end), (0, 1, 1, None));
         model.select_tab(Tab::NeedsReview);
         assert_eq!(shown(&model, "14:12").page, 1);
     }
 
     #[test]
     fn pages_aShorterList_keepsThePageInRange() {
-        let mut model = loaded((0..16).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect());
+        let mut model = loaded((0..14).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect());
         model.turn_page(true);
         model.turn_page(true);
-        model.fetched(list_of((0..8).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect()), at("14:13"));
+        model.fetched(list_of((0..7).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect()), at("14:13"));
         let view = shown(&model, "14:13");
-        assert_eq!((keys(&view), view.page, view.pages), (vec!["r7"], 2, 2));
+        assert_eq!((keys(&view), view.page, view.pages), (vec!["r6"], 2, 2));
     }
 
     #[test]
@@ -472,7 +505,7 @@ mod tests {
         r.comments = Some(Comments { total: 1, open_threads: 0 });
         r.draft = Some(Draft {});
         let view = row_view(&r, false);
-        assert_eq!(view.facts, ["new", "2 objections", "1 comment"]);
+        assert_eq!(texts(&view.facts), [("new", FactKind::Pill), ("2 objections", FactKind::Objected), ("1 comment", FactKind::Plain)]);
         assert!(view.draft_ready);
     }
 }

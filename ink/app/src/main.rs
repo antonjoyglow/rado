@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ink_core::api::Tier as CoreTier;
 use ink_core::config;
-use ink_core::model::{Model, View};
+use ink_core::model::{FactKind as CoreFactKind, Model, View};
 use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -117,21 +117,36 @@ fn draw(ui: &AppWindow, view: &View) {
                 .iter()
                 .map(|r| RowItem {
                     title: r.title.as_str().into(),
-                    prs: r.prs.as_str().into(),
-                    facts: r.facts.join(" · ").into(),
                     tier: match r.tier {
                         CoreTier::Low => Tier::Low,
                         CoreTier::Normal => Tier::Normal,
                         CoreTier::Urgent => Tier::Urgent,
                     },
-                    draft_ready: r.draft_ready,
                     review_next: r.review_next,
+                    facts: ModelRc::new(VecModel::from(
+                        r.facts
+                            .iter()
+                            .map(|f| FactItem {
+                                text: f.text.as_str().into(),
+                                kind: match f.kind {
+                                    CoreFactKind::Plain => FactKind::Plain,
+                                    CoreFactKind::Pill => FactKind::Pill,
+                                    CoreFactKind::Approved => FactKind::Approved,
+                                    CoreFactKind::Objected => FactKind::Objected,
+                                },
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                    draft_ready: r.draft_ready,
+                    ticket: r.ticket.as_deref().unwrap_or_default().into(),
+                    prs: ModelRc::new(VecModel::from(r.prs.iter().map(SharedString::from).collect::<Vec<_>>())),
                 })
                 .collect();
             ui.set_rows(ModelRc::new(VecModel::from(rows)));
             ui.set_page(format!("Page {} of {}", list.page, list.pages).into());
             ui.set_has_previous(list.page > 1);
             ui.set_has_next(list.page < list.pages);
+            ui.set_end(list.end.as_deref().unwrap_or_default().into());
         }
     }
 }

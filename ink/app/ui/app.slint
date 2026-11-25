@@ -1,5 +1,6 @@
 // Sizes are logical pixels: on the Era Color one is 3.48 physical pixels (300 dpi times its 1.16 scale), so the
-// screen is about 363 by 483.
+// screen is about 363 by 483. The look is the list window's card design, on paper: grey cards on white, pills for
+// facts and chips, and colour only in the tier pill.
 import "fonts/AtkinsonHyperlegibleNext.ttf";
 import "fonts/JetBrainsMono.ttf";
 import { Palette } from "std-widgets.slint";
@@ -13,33 +14,64 @@ export struct TabItem {
 
 export enum Tier { low, normal, urgent }
 
+export enum FactKind { plain, pill, approved, objected }
+
+export struct FactItem {
+    text: string,
+    kind: FactKind,
+}
+
 export struct RowItem {
     title: string,
-    prs: string,
-    facts: string,
     tier: Tier,
-    draft-ready: bool,
     review-next: bool,
+    facts: [FactItem],
+    draft-ready: bool,
+    /// Empty when the row names no ticket.
+    ticket: string,
+    prs: [string],
 }
 
 export enum Mode { setup, waiting, list }
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> fill: white;
+    in property <color> ink: black;
+    in property <bool> bold;
+    height: 13px;
+    border-radius: 6.5px;
+    background: fill;
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 8px;
+            font-weight: root.bold ? 700 : 500;
+            vertical-alignment: center;
+        }
+    }
+}
 
 component Button inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     callback clicked();
+    min-width: 40px;
+    height: 22px;
+    border-radius: 11px;
     border-width: 1px;
-    border-color: enabled ? black : #999;
-    border-radius: 4px;
-    min-width: 36px;
-    min-height: 24px;
+    border-color: enabled ? black : #aaa;
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
         Text {
             text: root.text;
-            color: root.enabled ? black : #999;
+            color: root.enabled ? black : #aaa;
             font-size: 9px;
+            font-weight: 600;
             vertical-alignment: center;
             horizontal-alignment: center;
         }
@@ -53,9 +85,9 @@ component Button inherits Rectangle {
 // Kaleido colour is faint, so the fills are dark and saturated and the word alone says the tier.
 component TierPill inherits Rectangle {
     in property <Tier> tier;
-    width: 46px;
-    height: 16px;
-    border-radius: 8px;
+    width: 42px;
+    height: 14px;
+    border-radius: 7px;
     border-width: 1px;
     border-color: tier == Tier.low ? black : transparent;
     background: tier == Tier.urgent ? #a0001c : tier == Tier.normal ? #1b3f8b : white;
@@ -69,44 +101,62 @@ component TierPill inherits Rectangle {
     }
 }
 
-component RowView inherits Rectangle {
+component Card inherits Rectangle {
     in property <RowItem> item;
-    height: 48px;
-    background: item.review-next ? #e8e8e8 : white;
-    Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        background: #bbb;
-    }
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
+    height: 52px;
+    border-radius: 10px;
+    background: item.review-next ? #d4d4d4 : #ececec;
+    clip: true;
+    VerticalLayout {
         padding-top: 4px;
         padding-bottom: 4px;
-        spacing: 6px;
-        VerticalLayout {
-            alignment: start;
-            spacing: 2px;
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 2px;
+        HorizontalLayout {
+            height: 14px;
+            spacing: 6px;
             Text {
                 text: item.title;
+                horizontal-stretch: 1;
                 font-size: 10px;
                 font-weight: 700;
+                vertical-alignment: center;
                 overflow: elide;
             }
-            Text {
-                text: item.prs;
-                font-size: 8px;
-                overflow: elide;
+            TierPill { tier: item.tier; }
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: 3px;
+            if item.review-next: Pill {
+                text: "Review next";
+                fill: black;
+                ink: white;
+                bold: true;
             }
-            Text {
-                text: (item.review-next ? "Review next · " : "") + item.facts + (item.draft-ready ? " · Draft ready" : "");
-                font-size: 8px;
-                overflow: elide;
+            for fact in item.facts: Pill {
+                text: fact.text;
+                fill: fact.kind == FactKind.plain ? transparent : fact.kind == FactKind.objected ? #4a4a4a : white;
+                ink: fact.kind == FactKind.objected ? white : black;
+                bold: fact.kind == FactKind.approved || fact.kind == FactKind.objected;
+            }
+            if item.draft-ready: Pill {
+                text: "Draft ready";
+                fill: black;
+                ink: white;
+                bold: true;
             }
         }
-        VerticalLayout {
+        HorizontalLayout {
             alignment: start;
-            TierPill { tier: item.tier; }
+            spacing: 3px;
+            if item.ticket != "": Pill {
+                text: item.ticket;
+                fill: #b8b8b8;
+                bold: true;
+            }
+            for pr in item.prs: Pill { text: pr; }
         }
     }
 }
@@ -126,6 +176,8 @@ export component AppWindow inherits Window {
     in property <string> page;
     in property <bool> has-previous;
     in property <bool> has-next;
+    /// "That's all 9", under the last card when its page has room; empty otherwise.
+    in property <string> end;
     callback select-tab(int);
     callback turn-page(bool);
     callback exit();
@@ -155,33 +207,37 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             HorizontalLayout {
-                padding: 8px;
+                padding-left: 8px;
+                padding-right: 6px;
                 spacing: 8px;
-                height: 40px;
+                height: 34px;
                 Text {
                     text: mode == Mode.list ? root.workspace : "Rado";
                     horizontal-stretch: 1;
                     font-size: 12px;
-                    font-weight: 700;
+                    font-weight: 800;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 if mode == Mode.list: Text {
                     text: root.reviews + " reviews · " + root.mine + " mine";
                     font-family: "JetBrains Mono";
-                    font-size: 10px;
+                    font-size: 9px;
                     vertical-alignment: center;
                 }
                 if mode == Mode.list: Text {
                     text: root.updated;
                     font-family: "JetBrains Mono";
                     font-size: 8px;
+                    color: #444;
                     vertical-alignment: center;
-                    horizontal-alignment: right;
                 }
-                Button {
-                    text: "Exit";
-                    clicked => { root.exit(); }
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Exit";
+                        clicked => { root.exit(); }
+                    }
                 }
             }
 
@@ -218,7 +274,7 @@ export component AppWindow inherits Window {
 
             if mode == Mode.list: VerticalLayout {
                 for banner in root.banners: Rectangle {
-                    height: 20px;
+                    height: 18px;
                     background: black;
                     Text {
                         text: banner;
@@ -231,18 +287,29 @@ export component AppWindow inherits Window {
                     }
                 }
                 HorizontalLayout {
-                    height: 28px;
+                    padding: 4px;
+                    spacing: 4px;
+                    height: 30px;
                     for tab[index] in root.tabs: Rectangle {
-                        background: tab.selected ? black : white;
-                        border-width: 1px;
-                        border-color: black;
-                        Text {
-                            text: tab.label + " " + tab.count + (tab.next ? " •" : "");
-                            color: tab.selected ? white : black;
-                            font-size: 9px;
-                            font-weight: tab.selected ? 700 : 400;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        border-radius: 11px;
+                        background: tab.selected ? black : #ececec;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text {
+                                text: tab.label;
+                                color: tab.selected ? white : black;
+                                font-size: 9px;
+                                font-weight: tab.selected ? 700 : 500;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: tab.count + (tab.next ? " •" : "");
+                                color: tab.selected ? white : #444;
+                                font-family: "JetBrains Mono";
+                                font-size: 9px;
+                                vertical-alignment: center;
+                            }
                         }
                         TouchArea {
                             clicked => { root.select-tab(index); }
@@ -252,7 +319,10 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     alignment: start;
                     vertical-stretch: 1;
-                    for row in root.rows: RowView { item: row; }
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 4px;
+                    for row in root.rows: Card { item: row; }
                     if root.rows.length == 0: Text {
                         text: "Nothing here.";
                         font-size: 10px;
@@ -260,26 +330,43 @@ export component AppWindow inherits Window {
                         height: 48px;
                         vertical-alignment: center;
                     }
+                    if root.end != "": Text {
+                        text: root.end;
+                        font-size: 10px;
+                        font-weight: 800;
+                        color: #666;
+                        horizontal-alignment: center;
+                        height: 30px;
+                        vertical-alignment: center;
+                    }
                 }
                 HorizontalLayout {
-                    padding: 6px;
-                    height: 36px;
-                    Button {
-                        text: "‹ Back";
-                        enabled: root.has-previous;
-                        clicked => { root.turn-page(false); }
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    height: 32px;
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: "‹ Back";
+                            enabled: root.has-previous;
+                            clicked => { root.turn-page(false); }
+                        }
                     }
                     Text {
                         text: root.page;
+                        horizontal-stretch: 1;
                         font-family: "JetBrains Mono";
                         font-size: 9px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    Button {
-                        text: "Next ›";
-                        enabled: root.has-next;
-                        clicked => { root.turn-page(true); }
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Next ›";
+                            enabled: root.has-next;
+                            clicked => { root.turn-page(true); }
+                        }
                     }
                 }
             }
