@@ -46,6 +46,9 @@ struct WorkspaceState {
     backoff: HashMap<Provider, Backoff>,
 }
 
+/// How `set_hidden` starts its error when the change applied but the hidden list wasn't saved; the rest names the file.
+pub const NOT_SAVED: &str = "Changed, but not saved";
+
 /// The longest wait between tries of a failing source, unless a rate limit asks for longer.
 const MAX_BACKOFF_MINUTES: i64 = 60;
 
@@ -597,7 +600,7 @@ impl Session {
         mark_hidden(ws);
         self.store
             .save_hidden(&self.settings.active_workspace, &hidden_file(&self.ws))
-            .map_err(|e| format!("Changed, but not saved: {e}"))
+            .map_err(|e| format!("{NOT_SAVED}: {e}"))
     }
 
     /// Saves a workspace's PAT or GitHub token, trimmed.

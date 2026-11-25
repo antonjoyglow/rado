@@ -434,27 +434,30 @@ impl ink::Rado for AppHandle {
     }
 }
 
-#[tauri::command]
-fn ink_status(state: tauri::State<'_, Shared>) -> ink::InkStatus {
-    state.pairing.status()
+// The pairing commands look up the network adapters, so they stay off the main thread.
+#[tauri::command(async)]
+fn ink_status(app: AppHandle) -> ink::InkStatus {
+    app.state::<Shared>().pairing.status()
 }
 
 /// Creates the pairing token, or replaces it so the device paired before stops working.
-#[tauri::command]
-fn pair_ink(state: tauri::State<'_, Shared>) -> Result<ink::InkStatus, String> {
-    state.pairing.pair()?;
-    Ok(state.pairing.status())
+#[tauri::command(async)]
+fn pair_ink(app: AppHandle) -> Result<ink::InkStatus, String> {
+    let pairing = &app.state::<Shared>().pairing;
+    pairing.pair()?;
+    Ok(pairing.status())
 }
 
 /// Removes the pairing token, which stops Rado listening.
-#[tauri::command]
-fn unpair_ink(state: tauri::State<'_, Shared>) -> Result<ink::InkStatus, String> {
-    state.pairing.unpair()?;
-    Ok(state.pairing.status())
+#[tauri::command(async)]
+fn unpair_ink(app: AppHandle) -> Result<ink::InkStatus, String> {
+    let pairing = &app.state::<Shared>().pairing;
+    pairing.unpair()?;
+    Ok(pairing.status())
 }
 
 /// Puts the device's config file on the clipboard; the token never reaches the window.
-#[tauri::command]
+#[tauri::command(async)]
 fn copy_ink_config(app: AppHandle) -> Result<(), String> {
     let config = app.state::<Shared>().pairing.config()?;
     app.clipboard().write_text(config).map_err(|e| e.to_string())
@@ -681,7 +684,7 @@ pub fn run() {
             tauri::async_runtime::spawn(hover_loop(app.handle().clone()));
             tauri::async_runtime::spawn(releases::release_loop(app.handle().clone()));
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move { handle.state::<Shared>().pairing.run(handle.clone()).await });
+            tauri::async_runtime::spawn(async move { handle.state::<Shared>().pairing.run(handle.clone(), ink::wifi_socket).await });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

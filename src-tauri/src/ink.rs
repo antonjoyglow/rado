@@ -2,7 +2,7 @@
 //! token exists. Every answer comes from the same session and row operations the list window uses.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -15,13 +15,13 @@ use tokio::sync::watch;
 
 use crate::group::{self, Counts, ReviewRow};
 use crate::score::{CommentStats, Provider, ReviewState, Tier};
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::store::Secrets;
 
 pub const PORT: u16 = 7878;
 const TOKEN_KEY: &str = "ink-token";
 const MAX_REQUEST: usize = 16 * 1024;
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the listener checks whether the Wi-Fi address changed, and retries after it couldn't listen.
 const ADDRESS_CHECK: Duration = Duration::from_secs(60);
 
@@ -156,7 +156,7 @@ pub trait Rado {
     fn open(&self, urls: Vec<String>) -> Result<(), String>;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -228,7 +228,11 @@ pub fn handle(rado: &impl Rado, token: Option<&str>, request: &Request) -> Respo
             Err(r) => r,
         },
         ("POST", "/v1/hidden") => match body::<HiddenAction>(request) {
-            Ok(a) => on_row(rado, &a.key, |_| rado.change(|s| s.set_hidden(&a.key, a.hidden))),
+            Ok(a) => on_row(rado, &a.key, |_| {
+                // The rest of the text is a path on the laptop.
+                let hidden = rado.change(|s| s.set_hidden(&a.key, a.hidden));
+                hidden.map_err(|e| if e.starts_with(session::NOT_SAVED) { format!("{}: Rado couldn't save the hidden list", session::NOT_SAVED) } else { e })
+            }),
             Err(r) => r,
         },
         _ => Response::error(404, "not found"),
@@ -339,27 +343,31 @@ fn encode(response: &Response) -> Vec<u8> {
     [head.as_bytes(), body.as_bytes()].concat()
 }
 
-/// Reads a request, answers it and closes the connection.
-async fn serve<R: Rado + Clone + Send + 'static>(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), rado: R, token: Option<String>) {
-    let response = match tokio::time::timeout(READ_TIMEOUT, read_request(stream)).await {
-        Err(_) => return,
-        Ok(Err(response)) => response,
-        // Row actions start the browser and write files; keep them off the async threads.
-        Ok(Ok(request)) => tokio::task::spawn_blocking(move || handle(&rado, token.as_deref(), &request))
-            .await
-            .unwrap_or_else(|_| Response::error(500, "Rado failed to answer")),
+/// Reads a request, answers it with the token current by then, and closes the connection.
+async fn serve<R: Rado + Clone + Send + 'static>(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), rado: R, token: &watch::Receiver<Option<String>>) {
+    let response = match read_request(stream).await {
+        Err(response) => response,
+        Ok(request) => {
+            let token = token.borrow().clone();
+            // Row actions start the browser and write files; keep them off the async threads.
+            tokio::task::spawn_blocking(move || handle(&rado, token.as_deref(), &request))
+                .await
+                .unwrap_or_else(|_| Response::error(500, "Rado failed to answer"))
+        }
     };
     let _ = stream.write_all(&encode(&response)).await;
     let _ = stream.shutdown().await;
 }
 
-/// One connection at a time: there is one device, and it bounds what a stranger on the network can hold open.
+/// One connection at a time, each cut off after `CONNECTION_TIMEOUT`: there is one device, and it bounds what a
+/// stranger on the network can hold open. Returns when the listener fails, so `run` binds again.
 async fn accept<R: Rado + Clone + Send + 'static>(listener: TcpListener, rado: R, token: watch::Receiver<Option<String>>) {
     loop {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let current = token.borrow().clone();
-            serve(&mut stream, rado.clone(), current).await;
-        }
+        let Ok((mut stream, _)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            return;
+        };
+        let _ = tokio::time::timeout(CONNECTION_TIMEOUT, serve(&mut stream, rado.clone(), &token)).await;
     }
 }
 
@@ -394,7 +402,7 @@ impl Pairing {
     pub fn status(&self) -> InkStatus {
         InkStatus {
             paired: self.token.borrow().is_some(),
-            address: wifi_address().map(|ip| format!("{ip}:{PORT}")),
+            address: wifi_socket().map(|at| at.to_string()),
             problem: self.problem.lock().expect("pairing lock").clone(),
         }
     }
@@ -419,7 +427,7 @@ impl Pairing {
     /// The text of the device's config file, `system/config/rado.cfg` on the PocketBook.
     pub fn config(&self) -> Result<String, String> {
         let token = self.token.borrow().clone().ok_or("Pair a device first")?;
-        let host = wifi_address().ok_or(NO_WIFI)?;
+        let host = wifi_address().ok_or("No Wi-Fi connection: connect the laptop to the Wi-Fi the PocketBook uses")?;
         Ok(format!("host={host}\nport={PORT}\ntoken={token}\n"))
     }
 
@@ -427,32 +435,36 @@ impl Pairing {
         *self.problem.lock().expect("pairing lock") = problem;
     }
 
-    /// Listens on the Wi-Fi address while a token exists, and moves when the address changes.
-    pub async fn run<R: Rado + Clone + Send + 'static>(&self, rado: R) {
+    /// Listens on `address()` (the Wi-Fi address and `PORT` in the app) while a token exists, and moves when the
+    /// address changes. Off Wi-Fi it listens nowhere, and Settings shows no address.
+    pub async fn run<R: Rado + Clone + Send + 'static>(&self, rado: R, address: impl Fn() -> Option<SocketAddrV4>) {
         let mut token = self.token.subscribe();
         loop {
             if token.borrow_and_update().is_none() {
+                self.report(None);
                 if token.changed().await.is_err() {
                     return;
                 }
                 continue;
             }
-            let address = wifi_address();
-            let bound = match address {
-                None => Err(NO_WIFI.to_string()),
-                Some(ip) => TcpListener::bind((ip, PORT)).await.map_err(|e| format!("Can't listen on {ip}:{PORT} ({e})")),
+            let at = address();
+            let bound = match at {
+                None => None,
+                Some(at) => Some(TcpListener::bind(at).await.map_err(|e| format!("Can't listen on {at} ({e})"))),
             };
-            self.report(bound.as_ref().err().cloned());
+            if self.token.borrow().is_some() {
+                self.report(bound.as_ref().and_then(|b| b.as_ref().err().cloned()));
+            }
             let serving = async {
                 match bound {
-                    Ok(listener) => accept(listener, rado.clone(), token.clone()).await,
-                    Err(_) => tokio::time::sleep(ADDRESS_CHECK).await,
+                    Some(Ok(listener)) => accept(listener, rado.clone(), token.clone()).await,
+                    _ => tokio::time::sleep(ADDRESS_CHECK).await,
                 }
             };
             let moved = async {
                 loop {
                     tokio::time::sleep(ADDRESS_CHECK).await;
-                    if wifi_address() != address {
+                    if address() != at {
                         return;
                     }
                 }
@@ -467,7 +479,10 @@ impl Pairing {
     }
 }
 
-const NO_WIFI: &str = "No Wi-Fi connection: connect the laptop to the Wi-Fi the PocketBook uses";
+/// The Wi-Fi address with `PORT`, where the app listens.
+pub fn wifi_socket() -> Option<SocketAddrV4> {
+    wifi_address().map(|ip| SocketAddrV4::new(ip, PORT))
+}
 
 /// One network adapter, as far as choosing the Wi-Fi address goes.
 #[derive(Debug, Clone, Copy)]
@@ -781,7 +796,18 @@ mod tests {
     }
 
     #[test]
-    fn refresh_wakesThePoller() {
+    fn hidden_changedButNotSaved_saysSoWithoutTheLaptopsPaths() {
+        let rado = fake("unsaved");
+        // A file where the workspace folders go makes saving the hidden list fail.
+        std::fs::write(rado._dir.0.join("workspaces"), "").unwrap();
+        let response = send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4", "hidden": true })));
+        let expected = Some(r#"{"error":"Changed, but not saved: Rado couldn't save the hidden list"}"#);
+        assert_eq!((response.status, response.body.as_deref()), (409, expected));
+        assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "hidden");
+    }
+
+    #[test]
+    fn refresh_asksTheSessionForAPollNow() {
         let rado = fake("refresh");
         assert_eq!(send(&rado, &request("POST", "/v1/refresh", Value::Null)).status, 204);
         assert!(rado.change(|s| s.take_wake()));
@@ -852,6 +878,33 @@ mod tests {
 
         assert!(answer.starts_with("HTTP/1.1 204 No Content\r\n"), "{answer}");
         assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "hidden");
+    }
+
+    /// Whether connecting to `at` succeeds (`open`) or fails within about two seconds.
+    async fn becomes(at: SocketAddrV4, open: bool) -> bool {
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(at).await.is_ok() == open {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn run_listensOnlyWhileATokenExists() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, free);
+        let pairing = Arc::new(Pairing::load(Box::new(crate::store::tests::MemorySecrets::default())));
+        let (running, rado) = (pairing.clone(), fake("run"));
+        tokio::spawn(async move { running.run(rado, move || Some(at)).await });
+
+        assert!(becomes(at, false).await, "no token: nothing listens");
+        pairing.pair().unwrap();
+        assert!(becomes(at, true).await, "paired: listening");
+        pairing.unpair().unwrap();
+        assert!(becomes(at, false).await, "removed: not listening");
+        assert_eq!(pairing.status().problem, None);
     }
 
     #[test]

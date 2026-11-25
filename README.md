@@ -150,7 +150,7 @@ A PocketBook e-reader can show the active workspace's list and act on its rows, 
 
 **Replace token** locks out the device paired before; copy the config to the device again. **Remove** deletes the token and stops Rado listening. Without a token Rado listens to nothing. When the laptop's Wi-Fi address changes, Rado moves to the new address within a minute; the config file then needs the new one.
 
-**What the device can do:** read the list (the workspace name, the counter's two numbers, the last refresh, the source error, and each row's tab, tier, title, ticket key, age, counts, draft and PRs as repo and number), refresh now, open a row's PRs, ticket or draft on the laptop in the browser chosen here, and hide or show a row. It never receives links, settings or tokens. Row keys carry the branch name of an aggregate row. Traffic is plain HTTP on the home network.
+**What the device can do**, always on the active workspace: read the list (the workspace name, the counter's two numbers, the last refresh, the source error, and each row's tab, tier, title, ticket key, age, counts, draft and PRs as repo and number), refresh now, open a row's PRs, ticket or draft on the laptop in the browser chosen here, and hide or show a row. It never receives links, settings or tokens. Row keys carry the branch name of an aggregate row. Traffic is plain HTTP on the home network.
 
 ### MCP server
 
