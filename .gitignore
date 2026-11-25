@@ -29,3 +29,5 @@ spike/probe-result.json
 
 # Playwright output
 test-results/
+# npm run shots
+shots/

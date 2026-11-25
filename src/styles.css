@@ -292,14 +292,14 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 }
 .row .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: var(--fg); font-size: calc(12px * var(--text-scale, 1)); }
 .row .meta > span { max-width: 100%; overflow-wrap: anywhere; }
-.row .meta .branch, .row .meta .comments { color: var(--muted); }
-.row .meta .comments::before {
+.row .meta .fact-branch, .row .meta .fact-comments { color: var(--muted); }
+.row .meta .fact-comments::before {
   content: ""; display: inline-block; width: 1.05em; height: 1.05em; margin-right: 0.3em; vertical-align: -0.2em; background: currentColor;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M3 2.5h10a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H7.5L4.5 14v-2.5H3A1.5 1.5 0 0 1 1.5 10V4A1.5 1.5 0 0 1 3 2.5z'/%3E%3C/svg%3E") center / contain no-repeat;
 }
-.row .meta :is(.tag, .required, .approved, .objected, .next-label) { padding: 0 0.65em; border-radius: 999px; background: var(--tag); line-height: 1.5; }
-.row .meta :is(.required, .objected) { background: var(--tint-normal); font-weight: 700; }
-.row .meta .approved { background: var(--tint-accent); font-weight: 700; }
+.row .meta :is(.fact-tag, .fact-required, .fact-approved, .fact-objected, .next-label) { padding: 0 0.65em; border-radius: 999px; background: var(--tag); line-height: 1.5; }
+.row .meta :is(.fact-required, .fact-objected) { background: var(--tint-normal); font-weight: 700; }
+.row .meta .fact-approved { background: var(--tint-accent); font-weight: 700; }
 .row .meta .next-label { background: var(--accent); color: var(--on-accent); font-weight: 700; }
 /* The times and the actions share one cell, as wide as the wider of the two, so swapping them never re-wraps the title. */
 .row .side { display: grid; }
@@ -349,7 +349,7 @@ header .refresh[data-busy="true"] .refresh-glyph { animation: spin 1s linear inf
 .settings .inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg); }
 .settings input.minutes, .settings input.scale { flex: none; width: calc(64px * var(--text-scale, 1)); }
 .settings input.side { flex: none; width: calc(72px * var(--text-scale, 1)); }
-.settings .field[hidden] { display: none; }
+.settings :is(.field, label)[hidden] { display: none; }
 .settings .colour-name { width: calc(76px * var(--text-scale, 1)); }
 .settings input.hex { flex: none; width: calc(84px * var(--text-scale, 1)); }
 .settings input[type="color"] { width: 34px; height: 26px; padding: 1px 2px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg); }
@@ -414,9 +414,9 @@ header { position: relative; }
   .tab .next-dot { background: Highlight; }
   .row { border: 1px solid CanvasText; }
   .row[data-next="true"] { border-left: 4px solid Highlight; }
-  .row .meta :is(.tag, .required, .approved, .objected, .next-label), .row .member, .row .age > span, .row .action, .ws-chip { border: 1px solid CanvasText; }
+  .row .meta :is(.fact-tag, .fact-required, .fact-approved, .fact-objected, .next-label), .row .member, .row .age > span, .row .action, .ws-chip { border: 1px solid CanvasText; }
   .row .member[data-assigned="false"] { border-style: dashed; }
-  .row .meta .comments::before { forced-color-adjust: none; background: CanvasText; }
+  .row .meta .fact-comments::before { forced-color-adjust: none; background: CanvasText; }
   #app > .tabs .tab[aria-selected="true"], #app > .tabs .tab[aria-selected="true"] .n { forced-color-adjust: none; background: Highlight; color: HighlightText; }
   #app > .tabs .tab[aria-selected="true"] .next-dot { background: HighlightText; }
 }
