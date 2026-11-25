@@ -139,7 +139,8 @@ fn last_activity(threads: &[Thread]) -> Option<DateTime<Utc>> {
 }
 
 /// The latest time a `Retry-After` named, on any answer: Azure DevOps sends it on a 200 when a client nears its
-/// limit, and asks for no request before then. It outlives the poll, so a Refresh right after honours it too.
+/// limit, and asks for no request before then. It outlives the poll, so a Refresh right after honours it too,
+/// until a token, source or workspace change.
 pub type RetryAfter = std::sync::Mutex<Option<DateTime<Utc>>>;
 
 pub struct Client<'a> {

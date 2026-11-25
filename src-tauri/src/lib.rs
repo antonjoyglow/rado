@@ -207,8 +207,13 @@ async fn poll_ado(
     if source.organization.is_empty() {
         return Err("set the organization for this workspace in settings".into());
     }
+    let new_generation = me.as_ref().is_none_or(|(g, _)| *g != generation);
+    if new_generation {
+        // A token save or a change of workspace or organization ends any wait, as it ends a backoff.
+        *retry_after.lock().expect("retry-after lock") = None;
+    }
     let client = ado::Client::new(&source.organization, pat, retry_after);
-    if me.as_ref().is_none_or(|(g, _)| *g != generation) {
+    if new_generation {
         *me = Some((generation, client.my_id().await?.to_lowercase()));
     }
     let my_id = me.as_ref().map(|(_, id)| id.clone()).unwrap_or_default();
