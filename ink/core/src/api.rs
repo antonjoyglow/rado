@@ -31,25 +31,18 @@ pub struct Row {
     pub tab: Tab,
     pub tier: Tier,
     pub title: String,
-    pub ticket: Option<String>,
     pub age_hours: i64,
-    pub approvals: u32,
-    pub objections: u32,
-    pub comments: Option<Comments>,
     /// Counts toward the counter: waiting on me.
     pub waiting: bool,
     pub draft: Option<Draft>,
-    pub prs: Vec<Pr>,
 }
 
-/// The tabs the device shows; Rado's Author, Approved and Quiet rows, and any tab added later, are `Other`.
+/// The tabs the device tells apart; every other tab, and any added later, is `Other`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Tab {
-    NeedsReview,
     ReReview,
     Mine,
-    Hidden,
     #[serde(other)]
     Other,
 }
@@ -64,32 +57,9 @@ pub enum Tier {
     Normal,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Comments {
-    pub total: u32,
-    pub open_threads: u32,
-}
-
 /// A review agent's draft at the PR's current commit.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Draft {}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Pr {
-    pub repo: String,
-    pub number: i64,
-    pub provider: Provider,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Provider {
-    Github,
-    /// Also any provider a later Rado adds.
-    #[serde(other)]
-    Ado,
-}
 
 #[derive(Debug, PartialEq)]
 pub enum Fetched {
@@ -154,15 +124,14 @@ mod tests {
     }
 
     #[test]
-    fn fixture_tabsTheDeviceDoesntShow_areOther() {
+    fn fixture_tabsTheDeviceDoesntTellApart_areOther() {
         let list: List = serde_json::from_str(FIXTURE).unwrap();
-        assert_eq!(list.rows.iter().find(|r| r.key == "pr:9").unwrap().tab, Tab::Other);
+        let tab = |key: &str| list.rows.iter().find(|r| r.key == key).unwrap().tab;
+        assert_eq!((tab("pr:9"), tab("pr:1"), tab("pr:8"), tab("pr:4")), (Tab::Other, Tab::Other, Tab::Other, Tab::ReReview));
     }
 
     #[test]
-    fn valuesALaterRadoAdds_stillRead() {
-        let pr: Pr = serde_json::from_str(r#"{"repo":"r","number":1,"provider":"gitlab"}"#).unwrap();
-        assert_eq!(pr.provider, Provider::Ado);
+    fn aTierALaterRadoAdds_readsAsNormal() {
         assert_eq!(serde_json::from_str::<Tier>(r#""critical""#).unwrap(), Tier::Normal);
     }
 

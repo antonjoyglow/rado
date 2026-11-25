@@ -1,16 +1,15 @@
-//! What the device knows, and the view it draws from that. The clock comes in as local time, so every time on
-//! screen is the device's.
+//! What the device knows, and the view it draws from that: a notifier for what waits on me, not a copy of the list
+//! window. The clock comes in as local time, so every time on screen is the device's.
+
+use std::collections::HashSet;
 
 use chrono::{DateTime, FixedOffset};
 
 use crate::api::{Fetched, List, Row, Tab, Tier};
 use crate::config::Config;
 
-/// Cards per page: six three-line cards and two banners fit the Era Color's 483 logical pixels.
-pub const ROWS_PER_PAGE: usize = 6;
-
-/// The tabs in strip order, labelled as in the list window.
-const TABS: [(Tab, &str); 4] = [(Tab::NeedsReview, "Review"), (Tab::ReReview, "Re-review"), (Tab::Mine, "Mine"), (Tab::Hidden, "Hidden")];
+/// Lines per page: ten one-line items and two banners fit the Era Color's 483 logical pixels.
+pub const ITEMS_PER_PAGE: usize = 10;
 
 /// Why the last list request got no list.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,8 +35,8 @@ pub struct Model {
     list: Option<List>,
     /// When Rado last answered: the list was current then.
     heard_at: Option<DateTime<FixedOffset>>,
-    /// Chosen once, on the first loaded list, so the tab doesn't jump as counts change.
-    tab: Option<Tab>,
+    /// Row keys I have seen: everything on the first list, and everything listed when I last acknowledged.
+    seen: HashSet<String>,
     page: usize,
 }
 
@@ -53,71 +52,46 @@ pub enum View {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListView {
     pub workspace: String,
+    /// The counter's two numbers.
     pub reviews: u32,
     pub mine: u32,
+    /// "2 urgent · 3 new", or "All clear" when nothing waits.
+    pub summary: String,
+    /// Something listed is new, so acknowledging would change the page.
+    pub has_new: bool,
     /// "updated 14:12", Rado's last refresh in the device's time.
     pub updated: String,
     /// The offline banner, then Rado's source error.
     pub banners: Vec<String>,
-    pub tabs: Vec<TabView>,
-    pub rows: Vec<RowView>,
-    /// The page shown, from 1, and how many the tab has.
+    pub items: Vec<ItemView>,
+    /// The page shown, from 1, and how many there are.
     pub page: usize,
     pub pages: usize,
-    /// "That's all 9", under the last card when its page has room.
-    pub end: Option<String>,
 }
 
+/// One thing waiting on me: a review, then my own PRs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TabView {
-    pub tab: Tab,
-    pub label: &'static str,
-    pub count: usize,
-    pub selected: bool,
-    /// The tab holds *Review next*.
-    pub next: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RowView {
-    pub key: String,
+pub struct ItemView {
     pub title: String,
+    /// "<1h", "5h", "2d".
+    pub age: String,
     pub tier: Tier,
-    pub review_next: bool,
-    /// Age, PR count, votes and comments, in that order.
-    pub facts: Vec<Fact>,
-    pub draft_ready: bool,
-    pub ticket: Option<String>,
-    /// "api !101", "web #102".
-    pub prs: Vec<String>,
-}
-
-/// A fact on a card, as the list window's `rowFacts` styles it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Fact {
-    pub text: String,
-    pub kind: FactKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactKind {
-    Plain,
-    Pill,
-    Approved,
-    Objected,
+    pub new: bool,
+    pub re_review: bool,
+    pub yours: bool,
+    pub draft: bool,
 }
 
 impl Model {
     pub fn new(config: Result<Config, String>) -> Self {
-        Model { config, link: Link::Connecting, list: None, heard_at: None, tab: None, page: 0 }
+        Model { config, link: Link::Connecting, list: None, heard_at: None, seen: HashSet::new(), page: 0 }
     }
 
     pub fn fetched(&mut self, fetched: Fetched, now: DateTime<FixedOffset>) {
         match fetched {
             Fetched::Changed { list, .. } => {
-                // Rado lists nothing until its sources first answer; an empty Review tab then means nothing yet.
-                if list.last_refreshed.is_some() || !list.rows.is_empty() {
-                    self.tab.get_or_insert_with(|| default_tab(&list.rows));
+                if self.list.is_none() {
+                    self.seen.extend(list.rows.iter().map(|r| r.key.clone()));
                 }
                 self.list = Some(*list);
                 self.page = self.page.min(self.pages() - 1);
@@ -136,14 +110,12 @@ impl Model {
         self.link = Link::Failing(failure);
     }
 
-    pub fn select_tab(&mut self, tab: Tab) {
-        if self.tab != Some(tab) {
-            self.tab = Some(tab);
-            self.page = 0;
-        }
+    /// I looked: nothing listed now is new any more.
+    pub fn acknowledge(&mut self) {
+        self.seen.extend(self.list.iter().flat_map(|l| &l.rows).map(|r| r.key.clone()));
     }
 
-    /// Turns a page forward or back, staying within the tab's pages.
+    /// Turns a page forward or back, staying within the pages.
     pub fn turn_page(&mut self, forward: bool) {
         self.page = if forward { (self.page + 1).min(self.pages() - 1) } else { self.page.saturating_sub(1) };
     }
@@ -174,109 +146,62 @@ impl Model {
             });
         }
         banners.extend(list.error.clone());
-        let tab = self.tab.unwrap_or(Tab::NeedsReview);
-        let next = review_next(&list.rows);
-        let next_key = next.map(|r| r.key.as_str());
-        let in_tab = self.rows_in_tab();
+        let items = self.waiting();
+        let urgent = items.iter().filter(|r| r.tier == Tier::Urgent).count();
+        let new = items.iter().filter(|r| !self.seen.contains(&r.key)).count();
+        let summary = match (items.is_empty(), urgent, new) {
+            (true, ..) => "All clear".to_string(),
+            (false, 0, 0) => String::new(),
+            (false, urgent, 0) => format!("{urgent} urgent"),
+            (false, 0, new) => format!("{new} new"),
+            (false, urgent, new) => format!("{urgent} urgent · {new} new"),
+        };
         View::List(ListView {
             workspace: list.workspace.clone(),
             reviews: list.counts.reviews,
             mine: list.counts.mine,
+            summary,
+            has_new: new > 0,
             updated: list
                 .last_refreshed
                 .map_or("not updated yet".into(), |at| format!("updated {}", at.with_timezone(&now.timezone()).format("%H:%M"))),
             banners,
-            tabs: TABS
+            items: items
                 .iter()
-                .map(|&(t, label)| TabView {
-                    tab: t,
-                    label,
-                    count: list.rows.iter().filter(|r| r.tab == t).count(),
-                    selected: t == tab,
-                    next: next.is_some_and(|r| r.tab == t),
+                .skip(self.page * ITEMS_PER_PAGE)
+                .take(ITEMS_PER_PAGE)
+                .map(|row| ItemView {
+                    title: row.title.clone(),
+                    age: age(row.age_hours),
+                    tier: row.tier,
+                    new: !self.seen.contains(&row.key),
+                    re_review: row.tab == Tab::ReReview,
+                    yours: row.tab == Tab::Mine,
+                    draft: row.draft.is_some(),
                 })
-                .collect(),
-            rows: in_tab
-                .iter()
-                .skip(self.page * ROWS_PER_PAGE)
-                .take(ROWS_PER_PAGE)
-                .map(|row| row_view(row, next_key == Some(row.key.as_str())))
                 .collect(),
             page: self.page + 1,
             pages: self.pages(),
-            end: (self.page + 1 == self.pages() && !in_tab.is_empty() && in_tab.len() - self.page * ROWS_PER_PAGE < ROWS_PER_PAGE)
-                .then(|| format!("That's all {}", in_tab.len())),
         })
     }
 
-    fn rows_in_tab(&self) -> Vec<&Row> {
-        let tab = self.tab.unwrap_or(Tab::NeedsReview);
-        self.list.iter().flat_map(|l| &l.rows).filter(|r| r.tab == tab).collect()
+    /// What the counter counts, reviews first and then my own PRs, each in Rado's order.
+    fn waiting(&self) -> Vec<&Row> {
+        let rows: Vec<&Row> = self.list.iter().flat_map(|l| &l.rows).filter(|r| r.waiting).collect();
+        let (yours, reviews): (Vec<&Row>, Vec<&Row>) = rows.into_iter().partition(|r| r.tab == Tab::Mine);
+        reviews.into_iter().chain(yours).collect()
     }
 
     fn pages(&self) -> usize {
-        self.rows_in_tab().len().div_ceil(ROWS_PER_PAGE).max(1)
+        self.waiting().len().div_ceil(ITEMS_PER_PAGE).max(1)
     }
-}
-
-/// The list window's rule for rows nobody opened yet: the first row, in Rado's order, waiting on my review.
-fn review_next(rows: &[Row]) -> Option<&Row> {
-    rows.iter().find(|r| r.waiting && r.tab != Tab::Mine)
-}
-
-/// The first of Review, Re-review and Mine with rows, else Review.
-fn default_tab(rows: &[Row]) -> Tab {
-    [Tab::NeedsReview, Tab::ReReview, Tab::Mine]
-        .into_iter()
-        .find(|&t| rows.iter().any(|r| r.tab == t))
-        .unwrap_or(Tab::NeedsReview)
 }
 
 fn age(hours: i64) -> String {
     match hours {
-        ..1 => "new".into(),
+        ..1 => "<1h".into(),
         1..24 => format!("{hours}h"),
         _ => format!("{}d", hours / 24),
-    }
-}
-
-fn plural(n: u32, one: &str) -> String {
-    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
-}
-
-fn row_view(row: &Row, review_next: bool) -> RowView {
-    let fact = |text: String, kind| Fact { text, kind };
-    let mut facts = vec![fact(age(row.age_hours), FactKind::Pill)];
-    if row.prs.len() > 1 {
-        facts.push(fact(format!("{} PRs", row.prs.len()), FactKind::Pill));
-    }
-    if row.approvals > 0 {
-        facts.push(fact(format!("{} approved", row.approvals), FactKind::Approved));
-    }
-    if row.objections > 0 {
-        facts.push(fact(plural(row.objections, "objection"), FactKind::Objected));
-    }
-    if let Some(c) = &row.comments {
-        if c.total > 0 {
-            facts.push(fact(plural(c.total, "comment"), FactKind::Plain));
-        }
-        if c.open_threads > 0 {
-            facts.push(fact(format!("{} open", c.open_threads), FactKind::Pill));
-        }
-    }
-    RowView {
-        key: row.key.clone(),
-        title: row.title.clone(),
-        tier: row.tier,
-        review_next,
-        facts,
-        draft_ready: row.draft.is_some(),
-        ticket: row.ticket.clone(),
-        prs: row
-            .prs
-            .iter()
-            .map(|pr| format!("{} {}{}", pr.repo, if pr.provider == crate::api::Provider::Github { "#" } else { "!" }, pr.number))
-            .collect(),
     }
 }
 
@@ -284,7 +209,7 @@ fn row_view(row: &Row, review_next: bool) -> RowView {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::api::{Comments, Counts, Draft, Pr, Provider};
+    use crate::api::{Counts, Draft};
 
     fn at(hm: &str) -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339(&format!("2026-11-25T{hm}:00+02:00")).unwrap()
@@ -295,20 +220,7 @@ mod tests {
     }
 
     fn row(key: &str, tab: Tab, waiting: bool) -> Row {
-        Row {
-            key: key.into(),
-            tab,
-            tier: Tier::Normal,
-            title: format!("Change {key}"),
-            ticket: None,
-            age_hours: 5,
-            approvals: 0,
-            objections: 0,
-            comments: None,
-            waiting,
-            draft: None,
-            prs: vec![Pr { repo: "api".into(), number: 1, provider: Provider::Ado }],
-        }
+        Row { key: key.into(), tab, tier: Tier::Normal, title: format!("Change {key}"), age_hours: 5, waiting, draft: None }
     }
 
     fn list_of(rows: Vec<Row>) -> Fetched {
@@ -337,115 +249,90 @@ mod tests {
         }
     }
 
-    fn keys(view: &ListView) -> Vec<&str> {
-        view.rows.iter().map(|r| r.key.as_str()).collect()
-    }
-
-    fn texts(facts: &[Fact]) -> Vec<(&str, FactKind)> {
-        facts.iter().map(|f| (f.text.as_str(), f.kind)).collect()
+    fn titles(view: &ListView) -> Vec<&str> {
+        view.items.iter().map(|i| i.title.as_str()).collect()
     }
 
     #[test]
-    fn fixture_showsTheHeaderTabsAndRows() {
+    fn fixture_showsWhatWaitsOnMe_reviewsThenMine() {
         let fixture = include_str!("../../fixtures/list.json");
         let mut model = Model::new(Ok(config()));
         model.fetched(Fetched::Changed { list: serde_json::from_str(fixture).unwrap(), etag: None }, at("14:12"));
         let view = shown(&model, "14:12");
         assert_eq!((view.workspace.as_str(), view.reviews, view.mine), ("Acme", 3, 1));
         assert_eq!(view.updated, "updated 11:30", "Rado's 09:30 UTC in the device's +02:00");
-        let tabs: Vec<_> = view.tabs.iter().map(|t| (t.label, t.count, t.selected)).collect();
-        assert_eq!(tabs, [("Review", 2, true), ("Re-review", 1, false), ("Mine", 2, false), ("Hidden", 1, false)]);
-        assert_eq!(keys(&view), ["pr:1", "branch:GitHub:feature/shared"]);
-        let first = &view.rows[0];
-        assert_eq!((first.ticket.as_deref(), first.prs.as_slice()), (Some("ABC-12"), ["api !101".to_string()].as_slice()));
-        assert_eq!(
-            texts(&first.facts),
-            [("1d", FactKind::Pill), ("1 approved", FactKind::Approved), ("3 comments", FactKind::Plain), ("1 open", FactKind::Pill)]
-        );
-        assert_eq!((first.tier, first.draft_ready, first.review_next), (Tier::Urgent, true, true));
-        assert_eq!(view.rows[1].prs, ["web #102", "app #103"]);
-        assert_eq!(texts(&view.rows[1].facts), [("2d", FactKind::Pill), ("2 PRs", FactKind::Pill)]);
-        assert_eq!(view.end.as_deref(), Some("That's all 2"));
+        assert_eq!(view.summary, "1 urgent");
+        assert_eq!(titles(&view), ["Change 1", "Change 4", "Change 2", "Change 6"], "waiting rows; Hidden, Approved and an unwaiting Mine row left out");
+        let first = &view.items[0];
+        assert_eq!((first.age.as_str(), first.tier, first.draft, first.new), ("1d", Tier::Urgent, true, false));
+        assert!(view.items[1].re_review);
+        assert!(view.items[3].yours);
     }
 
     #[test]
-    fn defaultTab_isTheFirstOfReviewReReviewMineWithRows_chosenOnce() {
-        let model = loaded(vec![row("h", Tab::Hidden, false), row("m", Tab::Mine, true), row("r", Tab::ReReview, true)]);
-        assert!(shown(&model, "14:12").tabs[1].selected);
-
-        let mut model = loaded(vec![row("h", Tab::Hidden, false)]);
-        assert!(shown(&model, "14:12").tabs[0].selected);
-        model.fetched(list_of(vec![row("m", Tab::Mine, true)]), at("14:13"));
-        assert!(shown(&model, "14:13").tabs[0].selected, "a later list doesn't move the tab");
-    }
-
-    #[test]
-    fn defaultTab_waitsForRadosFirstPoll() {
-        let mut model = Model::new(Ok(config()));
-        let Fetched::Changed { mut list, etag } = list_of(vec![]) else { unreachable!() };
-        list.last_refreshed = None;
-        model.fetched(Fetched::Changed { list, etag }, at("14:12"));
-        assert_eq!(shown(&model, "14:12").updated, "not updated yet");
-        model.fetched(list_of(vec![row("m", Tab::Mine, true)]), at("14:13"));
-        assert!(shown(&model, "14:13").tabs[2].selected);
-    }
-
-    #[test]
-    fn reviewNext_isTheFirstRowWaitingOnMyReview_inRadosOrder() {
-        let mut model = loaded(vec![
-            row("mine", Tab::Mine, true),
-            row("quiet", Tab::NeedsReview, false),
-            row("b", Tab::ReReview, true),
-            row("a", Tab::NeedsReview, true),
-        ]);
-        let marked = |model: &Model| shown(model, "14:20").rows.into_iter().filter(|r| r.review_next).map(|r| r.key).collect::<Vec<_>>();
-        assert!(marked(&model).is_empty(), "the next review is on the Re-review tab");
-        let tabs: Vec<_> = shown(&model, "14:20").tabs.iter().map(|t| t.next).collect();
-        assert_eq!(tabs, [false, true, false, false]);
-        model.select_tab(Tab::ReReview);
-        assert_eq!(marked(&model), ["b"]);
-    }
-
-    #[test]
-    fn pages_holdSixCards_turnWithinTheTab_andResetOnATabChange() {
-        let rows: Vec<Row> = (0..14).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect();
-        let mut model = loaded(rows);
+    fn nothingWaiting_isAllClear() {
+        let model = loaded(vec![row("m", Tab::Mine, false), row("o", Tab::Other, false)]);
         let view = shown(&model, "14:12");
-        assert_eq!((view.rows.len(), view.page, view.pages, view.end), (6, 1, 3, None));
+        assert_eq!((view.summary.as_str(), view.items.len()), ("All clear", 0));
+    }
+
+    #[test]
+    fn rowsThatArrive_areNew_untilAcknowledged() {
+        let mut model = loaded(vec![row("a", Tab::Other, true)]);
+        assert!(shown(&model, "14:12").items.iter().all(|i| !i.new), "the first list is not news");
+
+        model.fetched(list_of(vec![row("b", Tab::Other, true), row("a", Tab::Other, true)]), at("14:13"));
+        let view = shown(&model, "14:13");
+        assert_eq!(view.items.iter().map(|i| i.new).collect::<Vec<_>>(), [true, false]);
+        assert_eq!((view.summary.as_str(), view.has_new), ("1 new", true));
+
+        model.acknowledge();
+        let view = shown(&model, "14:14");
+        assert!(view.items.iter().all(|i| !i.new));
+        assert_eq!((view.summary.as_str(), view.has_new), ("", false));
+    }
+
+    #[test]
+    fn summary_countsUrgentAndNew() {
+        let mut urgent = row("u", Tab::Other, true);
+        urgent.tier = Tier::Urgent;
+        let mut model = loaded(vec![urgent.clone()]);
+        model.fetched(list_of(vec![urgent, row("n", Tab::Other, true)]), at("14:13"));
+        assert_eq!(shown(&model, "14:13").summary, "1 urgent · 1 new");
+    }
+
+    #[test]
+    fn pages_holdTenItems_andTurnWithinThem() {
+        let mut model = loaded((0..23).map(|i| row(&format!("r{i}"), Tab::Other, true)).collect());
+        let view = shown(&model, "14:12");
+        assert_eq!((view.items.len(), view.page, view.pages), (10, 1, 3));
         model.turn_page(false);
         assert_eq!(shown(&model, "14:12").page, 1);
-        model.turn_page(true);
-        model.turn_page(true);
-        model.turn_page(true);
+        for _ in 0..3 {
+            model.turn_page(true);
+        }
         let view = shown(&model, "14:12");
-        assert_eq!((keys(&view), view.page), (vec!["r12", "r13"], 3));
-        assert_eq!(view.end.as_deref(), Some("That's all 14"));
-
-        model.select_tab(Tab::Hidden);
-        let view = shown(&model, "14:12");
-        assert_eq!((view.rows.len(), view.page, view.pages, view.end), (0, 1, 1, None));
-        model.select_tab(Tab::NeedsReview);
-        assert_eq!(shown(&model, "14:12").page, 1);
+        assert_eq!((titles(&view), view.page), (vec!["Change r20", "Change r21", "Change r22"], 3));
     }
 
     #[test]
     fn pages_aShorterList_keepsThePageInRange() {
-        let mut model = loaded((0..14).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect());
+        let mut model = loaded((0..23).map(|i| row(&format!("r{i}"), Tab::Other, true)).collect());
         model.turn_page(true);
         model.turn_page(true);
-        model.fetched(list_of((0..7).map(|i| row(&format!("r{i}"), Tab::NeedsReview, true)).collect()), at("14:13"));
+        model.fetched(list_of((0..11).map(|i| row(&format!("r{i}"), Tab::Other, true)).collect()), at("14:13"));
         let view = shown(&model, "14:13");
-        assert_eq!((keys(&view), view.page, view.pages), (vec!["r6"], 2, 2));
+        assert_eq!((titles(&view), view.page, view.pages), (vec!["Change r10"], 2, 2));
     }
 
     #[test]
     fn offline_keepsTheListUnderABannerWithTheLastAnswersTime_untilRadoAnswersAgain() {
-        let mut model = loaded(vec![row("a", Tab::NeedsReview, true)]);
+        let mut model = loaded(vec![row("a", Tab::Other, true)]);
         model.fetched(Fetched::NotModified, at("14:20"));
         model.failed(Failure::Unreachable);
         let view = shown(&model, "14:31");
         assert_eq!(view.banners, ["Offline, list from 14:20"]);
-        assert_eq!(keys(&view), ["a"]);
+        assert_eq!(titles(&view), ["Change a"]);
 
         model.failed(Failure::Answer("Rado answered 404".into()));
         assert_eq!(shown(&model, "14:31").banners, ["Rado answered 404 · list from 14:20"], "a bad answer is not offline");
@@ -467,9 +354,12 @@ mod tests {
         let mut model = Model::new(Ok(config()));
         let Fetched::Changed { mut list, etag } = list_of(vec![]) else { unreachable!() };
         list.error = Some("Azure DevOps: 503; next try 14:15".into());
+        list.last_refreshed = None;
         model.fetched(Fetched::Changed { list, etag }, at("14:12"));
         model.failed(Failure::Unreachable);
-        assert_eq!(shown(&model, "14:13").banners, ["Offline, list from 14:12", "Azure DevOps: 503; next try 14:15"]);
+        let view = shown(&model, "14:13");
+        assert_eq!(view.banners, ["Offline, list from 14:12", "Azure DevOps: 503; next try 14:15"]);
+        assert_eq!(view.updated, "not updated yet");
     }
 
     #[test]
@@ -490,22 +380,22 @@ mod tests {
 
     #[test]
     fn rejectedToken_isSetup_untilRadoAnswersWithAList() {
-        let mut model = loaded(vec![row("a", Tab::NeedsReview, true)]);
+        let mut model = loaded(vec![row("a", Tab::Other, true)]);
         model.fetched(Fetched::Unauthorized, at("14:13"));
         assert!(matches!(model.view(at("14:13")), View::Setup { problem } if problem.contains("rejected the token")));
         model.fetched(Fetched::NotModified, at("14:14"));
-        assert_eq!(keys(&shown(&model, "14:14")), ["a"]);
+        assert_eq!(titles(&shown(&model, "14:14")), ["Change a"]);
     }
 
     #[test]
-    fn rowFacts_countsAndAge() {
-        let mut r = row("a", Tab::NeedsReview, true);
-        r.age_hours = 0;
-        r.objections = 2;
-        r.comments = Some(Comments { total: 1, open_threads: 0 });
-        r.draft = Some(Draft {});
-        let view = row_view(&r, false);
-        assert_eq!(texts(&view.facts), [("new", FactKind::Pill), ("2 objections", FactKind::Objected), ("1 comment", FactKind::Plain)]);
-        assert!(view.draft_ready);
+    fn age_readsLikeTheListWindow() {
+        let mut fresh = row("a", Tab::Other, true);
+        fresh.age_hours = 0;
+        fresh.draft = Some(Draft {});
+        let mut old = row("b", Tab::Other, true);
+        old.age_hours = 50;
+        let view = shown(&loaded(vec![fresh, old]), "14:12");
+        assert_eq!(view.items.iter().map(|i| i.age.as_str()).collect::<Vec<_>>(), ["<1h", "2d"]);
+        assert!(view.items[0].draft);
     }
 }

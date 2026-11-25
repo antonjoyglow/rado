@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ink_core::api::Tier as CoreTier;
 use ink_core::config;
-use ink_core::model::{FactKind as CoreFactKind, Model, View};
+use ink_core::model::{Model, View};
 use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -47,17 +47,11 @@ fn run(config_path: &str) -> Result<(), slint::PlatformError> {
         }
     });
 
-    ui.on_select_tab({
-        let (model, shown, render) = (model.clone(), shown.clone(), render.clone());
-        move |index| {
-            let tab = match shown.borrow().as_ref() {
-                Some(View::List(list)) => list.tabs.get(index as usize).map(|t| t.tab),
-                _ => None,
-            };
-            if let Some(tab) = tab {
-                model.borrow_mut().select_tab(tab);
-                render();
-            }
+    ui.on_acknowledge({
+        let (model, render) = (model.clone(), render.clone());
+        move || {
+            model.borrow_mut().acknowledge();
+            render();
         }
     });
     ui.on_turn_page({
@@ -106,47 +100,28 @@ fn draw(ui: &AppWindow, view: &View) {
             ui.set_updated(list.updated.as_str().into());
             let banners: Vec<SharedString> = list.banners.iter().map(|b| b.into()).collect();
             ui.set_banners(ModelRc::new(VecModel::from(banners)));
-            let tabs: Vec<TabItem> = list
-                .tabs
+            ui.set_summary(list.summary.as_str().into());
+            ui.set_has_new(list.has_new);
+            let items: Vec<Item> = list
+                .items
                 .iter()
-                .map(|t| TabItem { label: t.label.into(), count: t.count as i32, selected: t.selected, next: t.next })
-                .collect();
-            ui.set_tabs(ModelRc::new(VecModel::from(tabs)));
-            let rows: Vec<RowItem> = list
-                .rows
-                .iter()
-                .map(|r| RowItem {
-                    title: r.title.as_str().into(),
-                    tier: match r.tier {
+                .map(|i| Item {
+                    title: i.title.as_str().into(),
+                    age: i.age.as_str().into(),
+                    tier: match i.tier {
                         CoreTier::Low => Tier::Low,
                         CoreTier::Normal => Tier::Normal,
                         CoreTier::Urgent => Tier::Urgent,
                     },
-                    review_next: r.review_next,
-                    facts: ModelRc::new(VecModel::from(
-                        r.facts
-                            .iter()
-                            .map(|f| FactItem {
-                                text: f.text.as_str().into(),
-                                kind: match f.kind {
-                                    CoreFactKind::Plain => FactKind::Plain,
-                                    CoreFactKind::Pill => FactKind::Pill,
-                                    CoreFactKind::Approved => FactKind::Approved,
-                                    CoreFactKind::Objected => FactKind::Objected,
-                                },
-                            })
-                            .collect::<Vec<_>>(),
-                    )),
-                    draft_ready: r.draft_ready,
-                    ticket: r.ticket.as_deref().unwrap_or_default().into(),
-                    prs: ModelRc::new(VecModel::from(r.prs.iter().map(SharedString::from).collect::<Vec<_>>())),
+                    new: i.new,
+                    re_review: i.re_review,
+                    yours: i.yours,
+                    draft: i.draft,
                 })
                 .collect();
-            ui.set_rows(ModelRc::new(VecModel::from(rows)));
-            ui.set_page(format!("Page {} of {}", list.page, list.pages).into());
-            ui.set_has_previous(list.page > 1);
-            ui.set_has_next(list.page < list.pages);
-            ui.set_end(list.end.as_deref().unwrap_or_default().into());
+            ui.set_items(ModelRc::new(VecModel::from(items)));
+            ui.set_page(list.page as i32);
+            ui.set_pages(list.pages as i32);
         }
     }
 }

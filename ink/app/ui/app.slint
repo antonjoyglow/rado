@@ -1,47 +1,34 @@
 // Sizes are logical pixels: on the Era Color one is 3.48 physical pixels (300 dpi times its 1.16 scale), so the
-// screen is about 363 by 483. The look is the list window's card design, on paper: grey cards on white, pills for
-// facts and chips, and colour only in the tier pill.
+// screen is about 363 by 483. The page is a notifier read from across the desk: the numbers first, then one line per
+// thing waiting on me. Colour is only in the Urgent tag.
 import "fonts/AtkinsonHyperlegibleNext.ttf";
 import "fonts/JetBrainsMono.ttf";
 import { Palette } from "std-widgets.slint";
 
-export struct TabItem {
-    label: string,
-    count: int,
-    selected: bool,
-    next: bool,
-}
-
 export enum Tier { low, normal, urgent }
 
-export enum FactKind { plain, pill, approved, objected }
-
-export struct FactItem {
-    text: string,
-    kind: FactKind,
-}
-
-export struct RowItem {
+export struct Item {
     title: string,
+    age: string,
     tier: Tier,
-    review-next: bool,
-    facts: [FactItem],
-    draft-ready: bool,
-    /// Empty when the row names no ticket.
-    ticket: string,
-    prs: [string],
+    new: bool,
+    re-review: bool,
+    yours: bool,
+    draft: bool,
 }
 
 export enum Mode { setup, waiting, list }
 
-component Pill inherits Rectangle {
+component Tag inherits Rectangle {
     in property <string> text;
-    in property <color> fill: white;
+    in property <color> fill: transparent;
     in property <color> ink: black;
-    in property <bool> bold;
+    in property <bool> outlined;
     height: 13px;
     border-radius: 6.5px;
     background: fill;
+    border-width: outlined ? 1px : 0;
+    border-color: black;
     HorizontalLayout {
         padding-left: 5px;
         padding-right: 5px;
@@ -49,7 +36,7 @@ component Pill inherits Rectangle {
             text: root.text;
             color: root.ink;
             font-size: 8px;
-            font-weight: root.bold ? 700 : 500;
+            font-weight: 700;
             vertical-alignment: center;
         }
     }
@@ -59,19 +46,19 @@ component Button inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     callback clicked();
-    min-width: 40px;
+    min-width: 30px;
     height: 22px;
     border-radius: 11px;
     border-width: 1px;
     border-color: enabled ? black : #aaa;
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
+        padding-left: 9px;
+        padding-right: 9px;
         Text {
             text: root.text;
             color: root.enabled ? black : #aaa;
             font-size: 9px;
-            font-weight: 600;
+            font-weight: 700;
             vertical-alignment: center;
             horizontal-alignment: center;
         }
@@ -82,81 +69,56 @@ component Button inherits Rectangle {
     }
 }
 
-// Kaleido colour is faint, so the fills are dark and saturated and the word alone says the tier.
-component TierPill inherits Rectangle {
-    in property <Tier> tier;
-    width: 42px;
-    height: 14px;
-    border-radius: 7px;
-    border-width: 1px;
-    border-color: tier == Tier.low ? black : transparent;
-    background: tier == Tier.urgent ? #a0001c : tier == Tier.normal ? #1b3f8b : white;
-    Text {
-        text: tier == Tier.urgent ? "Urgent" : tier == Tier.normal ? "Normal" : "Low";
-        color: tier == Tier.low ? black : white;
-        font-size: 8px;
-        font-weight: 700;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+component ItemLine inherits Rectangle {
+    in property <Item> item;
+    height: 27px;
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: #ccc;
     }
-}
-
-component Card inherits Rectangle {
-    in property <RowItem> item;
-    height: 52px;
-    border-radius: 10px;
-    background: item.review-next ? #d4d4d4 : #ececec;
-    clip: true;
-    VerticalLayout {
-        padding-top: 4px;
-        padding-bottom: 4px;
-        padding-left: 8px;
-        padding-right: 6px;
-        spacing: 2px;
-        HorizontalLayout {
-            height: 14px;
-            spacing: 6px;
-            Text {
-                text: item.title;
-                horizontal-stretch: 1;
-                font-size: 10px;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            TierPill { tier: item.tier; }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 4px;
+        // Kaleido colour is faint, so the fill is dark and saturated and the word alone says it.
+        if item.tier == Tier.urgent: VerticalLayout {
+            alignment: center;
+            Tag { text: "Urgent"; fill: #a0001c; ink: white; }
         }
-        HorizontalLayout {
-            alignment: start;
-            spacing: 3px;
-            if item.review-next: Pill {
-                text: "Review next";
-                fill: black;
-                ink: white;
-                bold: true;
-            }
-            for fact in item.facts: Pill {
-                text: fact.text;
-                fill: fact.kind == FactKind.plain ? transparent : fact.kind == FactKind.objected ? #4a4a4a : white;
-                ink: fact.kind == FactKind.objected ? white : black;
-                bold: fact.kind == FactKind.approved || fact.kind == FactKind.objected;
-            }
-            if item.draft-ready: Pill {
-                text: "Draft ready";
-                fill: black;
-                ink: white;
-                bold: true;
-            }
+        Text {
+            text: item.title;
+            horizontal-stretch: 1;
+            color: item.tier == Tier.low ? #555 : black;
+            font-size: 10px;
+            font-weight: item.new || item.tier == Tier.urgent ? 700 : 400;
+            vertical-alignment: center;
+            overflow: elide;
         }
-        HorizontalLayout {
-            alignment: start;
-            spacing: 3px;
-            if item.ticket != "": Pill {
-                text: item.ticket;
-                fill: #b8b8b8;
-                bold: true;
-            }
-            for pr in item.prs: Pill { text: pr; }
+        if item.new: VerticalLayout {
+            alignment: center;
+            Tag { text: "NEW"; fill: black; ink: white; }
+        }
+        if item.re-review: VerticalLayout {
+            alignment: center;
+            Tag { text: "Re-review"; outlined: true; }
+        }
+        if item.yours: VerticalLayout {
+            alignment: center;
+            Tag { text: "Yours"; outlined: true; }
+        }
+        if item.draft: VerticalLayout {
+            alignment: center;
+            Tag { text: "Draft"; fill: #d0d0d0; }
+        }
+        Text {
+            text: item.age;
+            width: 22px;
+            font-family: "JetBrains Mono";
+            font-size: 9px;
+            color: #444;
+            horizontal-alignment: right;
+            vertical-alignment: center;
         }
     }
 }
@@ -169,16 +131,14 @@ export component AppWindow inherits Window {
     in property <string> workspace;
     in property <int> reviews;
     in property <int> mine;
+    in property <string> summary;
+    in property <bool> has-new;
     in property <string> updated;
     in property <[string]> banners;
-    in property <[TabItem]> tabs;
-    in property <[RowItem]> rows;
-    in property <string> page;
-    in property <bool> has-previous;
-    in property <bool> has-next;
-    /// "That's all 9", under the last card when its page has room; empty otherwise.
-    in property <string> end;
-    callback select-tab(int);
+    in property <[Item]> items;
+    in property <int> page;
+    in property <int> pages;
+    callback acknowledge();
     callback turn-page(bool);
     callback exit();
 
@@ -207,23 +167,17 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             HorizontalLayout {
-                padding-left: 8px;
+                padding-left: 10px;
                 padding-right: 6px;
                 spacing: 8px;
-                height: 34px;
+                height: 30px;
                 Text {
                     text: mode == Mode.list ? root.workspace : "Rado";
                     horizontal-stretch: 1;
-                    font-size: 12px;
-                    font-weight: 800;
+                    font-size: 10px;
+                    font-weight: 700;
                     vertical-alignment: center;
                     overflow: elide;
-                }
-                if mode == Mode.list: Text {
-                    text: root.reviews + " reviews · " + root.mine + " mine";
-                    font-family: "JetBrains Mono";
-                    font-size: 9px;
-                    vertical-alignment: center;
                 }
                 if mode == Mode.list: Text {
                     text: root.updated;
@@ -280,80 +234,93 @@ export component AppWindow inherits Window {
                         text: banner;
                         color: white;
                         font-size: 9px;
+                        font-weight: 700;
                         overflow: elide;
-                        x: 8px;
-                        width: parent.width - 16px;
+                        x: 10px;
+                        width: parent.width - 20px;
                         vertical-alignment: center;
                     }
                 }
-                HorizontalLayout {
-                    padding: 4px;
-                    spacing: 4px;
-                    height: 30px;
-                    for tab[index] in root.tabs: Rectangle {
-                        border-radius: 11px;
-                        background: tab.selected ? black : #ececec;
+                Rectangle {
+                    height: 112px;
+                    VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 4px;
                         HorizontalLayout {
-                            alignment: center;
-                            spacing: 4px;
-                            Text {
-                                text: tab.label;
-                                color: tab.selected ? white : black;
-                                font-size: 9px;
-                                font-weight: tab.selected ? 700 : 500;
-                                vertical-alignment: center;
+                            spacing: 18px;
+                            alignment: start;
+                            VerticalLayout {
+                                Text {
+                                    text: root.reviews;
+                                    font-family: "JetBrains Mono";
+                                    font-size: 56px;
+                                    font-weight: 800;
+                                }
+                                Text {
+                                    text: root.reviews == 1 ? "review" : "reviews";
+                                    font-size: 9px;
+                                    color: #444;
+                                }
                             }
-                            Text {
-                                text: tab.count + (tab.next ? " •" : "");
-                                color: tab.selected ? white : #444;
-                                font-family: "JetBrains Mono";
-                                font-size: 9px;
-                                vertical-alignment: center;
+                            VerticalLayout {
+                                alignment: end;
+                                Text {
+                                    text: root.mine;
+                                    font-family: "JetBrains Mono";
+                                    font-size: 30px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: "yours";
+                                    font-size: 9px;
+                                    color: #444;
+                                }
                             }
                         }
-                        TouchArea {
-                            clicked => { root.select-tab(index); }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.summary;
+                                font-size: 12px;
+                                font-weight: 800;
+                                vertical-alignment: center;
+                            }
+                            if root.has-new: Text {
+                                text: "tap to mark seen";
+                                font-size: 8px;
+                                color: #555;
+                                vertical-alignment: center;
+                            }
                         }
                     }
+                    TouchArea {
+                        clicked => { root.acknowledge(); }
+                    }
+                }
+                Rectangle {
+                    height: 2px;
+                    background: black;
                 }
                 VerticalLayout {
                     alignment: start;
                     vertical-stretch: 1;
-                    padding-left: 4px;
-                    padding-right: 4px;
-                    spacing: 4px;
-                    for row in root.rows: Card { item: row; }
-                    if root.rows.length == 0: Text {
-                        text: "Nothing here.";
-                        font-size: 10px;
-                        horizontal-alignment: center;
-                        height: 48px;
-                        vertical-alignment: center;
-                    }
-                    if root.end != "": Text {
-                        text: root.end;
-                        font-size: 10px;
-                        font-weight: 800;
-                        color: #666;
-                        horizontal-alignment: center;
-                        height: 30px;
-                        vertical-alignment: center;
-                    }
+                    for item in root.items: ItemLine { item: item; }
                 }
-                HorizontalLayout {
-                    padding-left: 6px;
-                    padding-right: 6px;
-                    height: 32px;
+                if root.pages > 1: HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    height: 28px;
                     VerticalLayout {
                         alignment: center;
                         Button {
-                            text: "‹ Back";
-                            enabled: root.has-previous;
+                            text: "‹";
+                            enabled: root.page > 1;
                             clicked => { root.turn-page(false); }
                         }
                     }
                     Text {
-                        text: root.page;
+                        text: root.page + " / " + root.pages;
                         horizontal-stretch: 1;
                         font-family: "JetBrains Mono";
                         font-size: 9px;
@@ -363,8 +330,8 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         Button {
-                            text: "Next ›";
-                            enabled: root.has-next;
+                            text: "›";
+                            enabled: root.page < root.pages;
                             clicked => { root.turn-page(true); }
                         }
                     }
