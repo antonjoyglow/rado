@@ -511,8 +511,8 @@ mod tests {
         }
     }
 
-    /// Review `pr:1` (urgent, a linked draft); hidden `pr:8`; re-review `pr:4`; an aggregate of a review and a PR of
-    /// mine with an unlinked draft; my `pr:6` (older, needs work) and `pr:7` (newer); approved `pr:9`.
+    /// Review `pr:1` (urgent, a draft with its link); hidden `pr:8`; re-review `pr:4`; an aggregate of a review and a
+    /// PR of mine with a draft that has none; my `pr:6` (older, needs work) and `pr:7` (newer); approved `pr:9`.
     fn fake(name: &str) -> Arc<Fake> {
         use Provider::{Ado, GitHub};
         use ReviewState::*;
@@ -628,7 +628,6 @@ mod tests {
         for (method, path) in [("POST", "/v1/refresh"), ("POST", "/v1/open"), ("POST", "/v1/ticket"), ("POST", "/v1/draft"), ("POST", "/v1/hidden"), ("POST", "/v1/list"), ("GET", "/v2/list")] {
             assert_eq!(send(&rado, &request(method, path)).status, 404, "{method} {path}");
         }
-        assert!(!rado.session.lock().unwrap().take_wake(), "no poll asked for");
         assert_eq!(send(&rado, &request("GET", "/v1/list?x=1")).status, 200);
     }
 

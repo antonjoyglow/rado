@@ -54,7 +54,6 @@ const MAX_BACKOFF_MINUTES: i64 = 60;
 struct Backoff {
     /// Failed polls in a row.
     failures: u32,
-    /// The next try.
     until: DateTime<Utc>,
     /// When the source said to come back (`Retry-After` or a rate limit's reset); a bare 429 names nothing.
     named: Option<DateTime<Utc>>,
