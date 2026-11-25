@@ -14,6 +14,26 @@ test("double-clicking a row opens it once", async ({ page }) => {
   expect((await calls(page, "open_row")).map((c) => c.args.key)).toEqual(["k1"]);
 });
 
+test("double-clicking a PR, ticket or Draft ready chip opens its link once, and never the row", async ({ page }) => {
+  const m = member({ id: 7, number: 7, agentDraft: { host: "github.com" } });
+  await open(page, snapshot({ items: [item({ members: [m], id: 7, key: "k7", ticket: "ABC-12" })] }));
+  await page.locator(".row .member", { hasText: "!7" }).dblclick();
+  await page.locator(".row .member.ticket").dblclick();
+  await page.locator("button.agent-draft").dblclick();
+  expect(await calls(page, "open_pr")).toHaveLength(1);
+  expect(await calls(page, "open_ticket")).toHaveLength(1);
+  expect(await calls(page, "open_draft")).toHaveLength(1);
+  expect(await calls(page, "open_row")).toHaveLength(0);
+});
+
+test("a chip opens from the keyboard", async ({ page }) => {
+  await open(page, snapshot({ items: [item({ key: "k8", ticket: "ABC-12" })] }));
+  await page.locator(".row .member.ticket").focus();
+  await page.keyboard.press("Enter");
+  expect((await calls(page, "open_ticket")).map((c) => c.args)).toEqual([{ key: "k8" }]);
+  expect(await calls(page, "open_row")).toHaveLength(0);
+});
+
 test.describe("Draft ready chip", () => {
   test("a linked draft is a button titled with its host and opens the draft, not the row", async ({ page }) => {
     const m = member({ id: 7, number: 7, agentDraft: { host: "github.com" } });

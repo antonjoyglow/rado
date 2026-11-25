@@ -336,19 +336,13 @@ function row(item: ReviewItem, tracker: string, isNext: boolean, act: ReturnType
       type: "button",
       title: m.state ? `Open ${prLabel(m)}: ${m.title}` : `Open ${prLabel(m)} (same branch, not assigned to you): ${m.title}`,
       data: { assigned: String(m.state !== null) },
-      onclick: (e: MouseEvent) => {
-        e.stopPropagation();
-        void act(api.openPr(m.id).then(() => opened(item.key)));
-      },
+      onclick: chipClick(() => void act(api.openPr(m.id).then(() => opened(item.key)))),
     }, prLabel(m)), draftChip(m, item.key)]);
   const ticket = item.ticket && h("button", {
     class: "member ticket",
     type: "button",
     title: `Open ${item.ticket} in ${tracker}`,
-    onclick: (e: MouseEvent) => {
-      e.stopPropagation();
-      void act(api.openTicket(item.key));
-    },
+    onclick: chipClick(() => void act(api.openTicket(item.key))),
   }, item.ticket);
   const copy: HTMLButtonElement = h("button", {
     class: "action",
@@ -405,15 +399,23 @@ function draftChip(m: Member, rowKey: string): HTMLElement | null {
     class: "member agent-draft",
     type: "button",
     title: marker.title,
-    onclick: (e: MouseEvent) => {
-      e.stopPropagation();
+    onclick: chipClick(() => {
       api.openDraft(m.id).then(() => opened(rowKey), (error: unknown) => {
         open.title = `${marker.title}\nCouldn't open it: ${String(error)}`;
         flash(open, "Failed");
       });
-    },
+    }),
   }, "Draft ready");
   return open;
+}
+
+/** A chip's click: it opens its own link, not the row's, and a double-click's second click opens nothing. */
+function chipClick(open: () => void): (e: MouseEvent) => void {
+  return (e) => {
+    e.stopPropagation();
+    if (e.detail > 1) return;
+    open();
+  };
 }
 
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -690,7 +692,7 @@ function renderSettings(
       startWithWindows,
       h("div", { class: "field" },
         caption("PocketBook", n.ink),
-        h("span", { class: "steps" }, "Shows this list on a PocketBook and acts on its rows. Pair, then save the copied config on the PocketBook as system/config/rado.cfg."),
+        h("span", { class: "steps" }, "Shows what waits on you on a PocketBook. Pair, then save the copied config on the PocketBook as system/config/rado.cfg."),
         ink),
     ];
   };

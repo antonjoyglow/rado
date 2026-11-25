@@ -1,5 +1,5 @@
 //! The e-ink endpoint: API v1 for the PocketBook app in `ink/`, served on the laptop's Wi-Fi address while a pairing
-//! token exists. Every answer comes from the same session and row operations the list window uses.
+//! token exists. It only reads: `GET /v1/list` answers from the same session the list window shows.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::group::{self, Counts, ReviewRow};
-use crate::score::{CommentStats, Provider, ReviewState, Tier};
-use crate::session::{self, Session};
+use crate::group::{Counts, ReviewRow};
+use crate::score::{ReviewState, Tier};
+use crate::session::Session;
 use crate::store::Secrets;
 
 pub const PORT: u16 = 7878;
@@ -32,7 +32,6 @@ pub struct List {
     workspace: String,
     counts: Counts,
     last_refreshed: Option<DateTime<Utc>>,
-    polling: bool,
     error: Option<String>,
     rows: Vec<Row>,
 }
@@ -44,16 +43,9 @@ struct Row {
     tab: Tab,
     tier: Tier,
     title: String,
-    ticket: Option<String>,
     age_hours: i64,
-    approvals: u32,
-    objections: u32,
-    comments: Option<CommentStats>,
     waiting: bool,
-    /// The row holds a PR of mine, so hiding it says "Hide" rather than "Not mine".
-    holds_mine: bool,
     draft: Option<Draft>,
-    prs: Vec<Pr>,
 }
 
 /// The list window's tabs, keyed as in `src/tabs.ts`.
@@ -69,17 +61,10 @@ enum Tab {
     Hidden,
 }
 
+/// An agent's draft on one of the row's PRs. Braced, so it serialises as `{}`: a unit struct would be `null`, which
+/// the device reads as no draft.
 #[derive(Debug, Serialize)]
-struct Draft {
-    linked: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct Pr {
-    repo: String,
-    number: i64,
-    provider: Provider,
-}
+struct Draft {}
 
 fn tab(row: &ReviewRow) -> Tab {
     if row.summary.hidden {
@@ -97,21 +82,14 @@ fn tab(row: &ReviewRow) -> Tab {
 
 impl From<ReviewRow> for Row {
     fn from(row: ReviewRow) -> Self {
-        let drafts: Vec<_> = row.members.iter().filter_map(|m| m.agent_draft.as_ref()).collect();
         Self {
             tab: tab(&row),
             // As the list window draws it.
             tier: if row.summary.hidden { Tier::Low } else { row.summary.tier },
             title: row.summary.title,
-            ticket: row.ticket,
             age_hours: row.summary.age_hours,
-            approvals: row.summary.approvals,
-            objections: row.summary.objections,
-            comments: row.summary.comments,
             waiting: row.summary.actionable,
-            holds_mine: row.members.iter().any(|m| m.state == Some(ReviewState::Mine)),
-            draft: (!drafts.is_empty()).then(|| Draft { linked: drafts.iter().any(|d| d.host.is_some()) }),
-            prs: row.members.into_iter().map(|m| Pr { repo: m.repo, number: m.number, provider: m.provider }).collect(),
+            draft: row.members.iter().any(|m| m.agent_draft.is_some()).then_some(Draft {}),
             key: row.key,
         }
     }
@@ -131,7 +109,6 @@ pub fn list(session: &Session) -> List {
         workspace: session.settings().active().map(|w| w.name.clone()).unwrap_or_default(),
         counts: status.counts,
         last_refreshed: status.last_refreshed,
-        polling: status.polling,
         error: status.error.as_deref().map(without_links),
         rows: rows.into_iter().map(Row::from).collect(),
     }
@@ -148,12 +125,9 @@ fn without_links(text: &str) -> String {
         .join(" ")
 }
 
-/// Rado as the endpoint sees it. The app runs `change` through the same path as its commands, so windows get the
-/// new snapshot and the poller wakes when asked, and `open` opens links in the browser chosen in settings.
+/// Rado as the endpoint sees it.
 pub trait Rado {
     fn read<T>(&self, f: impl FnOnce(&Session) -> T) -> T;
-    fn change<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T;
-    fn open(&self, urls: Vec<String>) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -162,7 +136,6 @@ pub struct Request {
     pub path: String,
     pub authorization: Option<String>,
     pub if_none_match: Option<String>,
-    pub body: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,24 +146,9 @@ pub struct Response {
 }
 
 impl Response {
-    fn empty(status: u16) -> Self {
-        Self { status, etag: None, body: None }
-    }
-
     fn error(status: u16, text: &str) -> Self {
         Self { status, etag: None, body: Some(serde_json::json!({ "error": text }).to_string()) }
     }
-}
-
-#[derive(Deserialize)]
-struct RowAction {
-    key: String,
-}
-
-#[derive(Deserialize)]
-struct HiddenAction {
-    key: String,
-    hidden: bool,
 }
 
 /// Answers one request. `token` is the pairing token, `None` once it was removed.
@@ -211,55 +169,8 @@ pub fn handle(rado: &impl Rado, token: Option<&str>, request: &Request) -> Respo
             }
             Response { status: 200, etag: Some(etag), body: Some(body) }
         }
-        ("POST", "/v1/refresh") => {
-            rado.change(|s| s.refresh(Utc::now()));
-            Response::empty(204)
-        }
-        ("POST", "/v1/open") => match body::<RowAction>(request) {
-            Ok(a) => on_row(rado, &a.key, |row| rado.open(group::open_urls(&row))),
-            Err(r) => r,
-        },
-        ("POST", "/v1/ticket") => match body::<RowAction>(request) {
-            Ok(a) => on_row(rado, &a.key, |_| rado.read(|s| s.ticket_url(&a.key)).and_then(|url| rado.open(vec![url]))),
-            Err(r) => r,
-        },
-        ("POST", "/v1/draft") => match body::<RowAction>(request) {
-            Ok(a) => on_row(rado, &a.key, |row| rado.read(|s| draft_urls(s, &row)).and_then(|urls| rado.open(urls))),
-            Err(r) => r,
-        },
-        ("POST", "/v1/hidden") => match body::<HiddenAction>(request) {
-            Ok(a) => on_row(rado, &a.key, |_| {
-                // The rest of the text is a path on the laptop.
-                let hidden = rado.change(|s| s.set_hidden(&a.key, a.hidden));
-                hidden.map_err(|e| if e.starts_with(session::NOT_SAVED) { format!("{}: Rado couldn't save the hidden list", session::NOT_SAVED) } else { e })
-            }),
-            Err(r) => r,
-        },
         _ => Response::error(404, "not found"),
     }
-}
-
-fn body<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, Response> {
-    serde_json::from_slice(&request.body).map_err(|e| Response::error(400, &format!("bad request: {e}")))
-}
-
-/// Runs an action on a row: 410 when the row is gone, so the device reloads; 409 with Rado's text when it fails.
-fn on_row(rado: &impl Rado, key: &str, act: impl FnOnce(ReviewRow) -> Result<(), String>) -> Response {
-    match rado.read(|s| s.row(key)).map(act) {
-        Err(e) => Response::error(410, &e),
-        Ok(Err(e)) => Response::error(409, &e),
-        Ok(Ok(())) => Response::empty(204),
-    }
-}
-
-/// Every linked draft among the row's PRs; without one, the session's reason.
-fn draft_urls(s: &Session, row: &ReviewRow) -> Result<Vec<String>, String> {
-    let found: Vec<Result<String, String>> = row.members.iter().map(|m| s.draft_url(m.id)).collect();
-    let urls: Vec<String> = found.iter().filter_map(|r| r.clone().ok()).collect();
-    if urls.is_empty() {
-        return Err(found.into_iter().find_map(Result::err).unwrap_or_default());
-    }
-    Ok(urls)
 }
 
 /// Compares in time that doesn't depend on where the strings differ.
@@ -267,8 +178,7 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Reads one whole request: headers, then `Content-Length` bytes of body. Answering before the client finished
-/// sending makes Windows reset the connection, and the device sees "connection reset by peer".
+/// Reads one request's headers; the API takes no body.
 async fn read_request(stream: &mut (impl AsyncRead + Unpin)) -> Result<Request, Response> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -283,34 +193,19 @@ async fn read_request(stream: &mut (impl AsyncRead + Unpin)) -> Result<Request, 
         }
         let mut headers = [httparse::EMPTY_HEADER; 32];
         let mut parsed = httparse::Request::new(&mut headers);
-        let head = match parsed.parse(&buf) {
-            Ok(httparse::Status::Complete(head)) => head,
+        match parsed.parse(&buf) {
+            Ok(httparse::Status::Complete(_)) => {}
             Ok(httparse::Status::Partial) => continue,
             Err(e) => return Err(Response::error(400, &format!("bad request: {e}"))),
-        };
+        }
         let header = |name: &str| {
             parsed.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| String::from_utf8_lossy(h.value).trim().to_string())
         };
-        if header("Transfer-Encoding").is_some() {
-            return Err(Response::error(400, "send a Content-Length instead of Transfer-Encoding"));
-        }
-        let length = match header("Content-Length") {
-            None => 0,
-            Some(n) => n.parse::<usize>().map_err(|_| Response::error(400, "bad Content-Length"))?,
-        };
-        // `head` is within `buf`, which is at most MAX_REQUEST long, so this can't underflow.
-        if length > MAX_REQUEST - head {
-            return Err(Response::error(413, "request too large"));
-        }
-        if buf.len() < head + length {
-            continue;
-        }
         return Ok(Request {
             method: parsed.method.unwrap_or_default().to_string(),
             path: parsed.path.unwrap_or_default().to_string(),
             authorization: header("Authorization"),
             if_none_match: header("If-None-Match"),
-            body: buf[head..head + length].to_vec(),
         });
     }
 }
@@ -318,13 +213,10 @@ async fn read_request(stream: &mut (impl AsyncRead + Unpin)) -> Result<Request, 
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
-        204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
-        409 => "Conflict",
-        410 => "Gone",
         413 => "Content Too Large",
         _ => "Internal Server Error",
     }
@@ -349,7 +241,7 @@ async fn serve<R: Rado + Clone + Send + 'static>(stream: &mut (impl AsyncRead + 
         Err(response) => response,
         Ok(request) => {
             let token = token.borrow().clone();
-            // Row actions start the browser and write files; keep them off the async threads.
+            // The session's lock is held across a poll's file writes; wait for it off the async threads.
             tokio::task::spawn_blocking(move || handle(&rado, token.as_deref(), &request))
                 .await
                 .unwrap_or_else(|_| Response::error(500, "Rado failed to answer"))
@@ -571,29 +463,19 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::score::ReviewItem;
+    use crate::score::{Provider, ReviewItem};
     use crate::store::tests::TempDir;
 
     const TOKEN: &str = "pairing-token";
 
     struct Fake {
         session: Mutex<Session>,
-        opened: Mutex<Vec<String>>,
         _dir: TempDir,
     }
 
     impl Rado for Arc<Fake> {
         fn read<T>(&self, f: impl FnOnce(&Session) -> T) -> T {
             f(&self.session.lock().unwrap())
-        }
-
-        fn change<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T {
-            f(&mut self.session.lock().unwrap())
-        }
-
-        fn open(&self, urls: Vec<String>) -> Result<(), String> {
-            self.opened.lock().unwrap().extend(urls);
-            Ok(())
         }
     }
 
@@ -629,18 +511,13 @@ mod tests {
         }
     }
 
-    /// Review `pr:1` (urgent, ticket ABC-12, a linked draft); hidden `pr:8`; re-review `pr:4`; an aggregate of a
-    /// review and a PR of mine with an unlinked draft; my `pr:6` (older, needs work) and `pr:7` (newer); approved `pr:9`.
+    /// Review `pr:1` (urgent, a draft with its link); hidden `pr:8`; re-review `pr:4`; an aggregate of a review and a
+    /// PR of mine with a draft that has none; my `pr:6` (older, needs work) and `pr:7` (newer); approved `pr:9`.
     fn fake(name: &str) -> Arc<Fake> {
         use Provider::{Ado, GitHub};
         use ReviewState::*;
         let items = vec![
-            ReviewItem {
-                tier: Tier::Urgent,
-                approvals: 1,
-                comments: Some(CommentStats { total: 3, open_threads: 1 }),
-                ..item(1, Ado, "api", "feature/ABC-12-login", NeedsReview, 90, 30)
-            },
+            ReviewItem { tier: Tier::Urgent, ..item(1, Ado, "api", "feature/ABC-12-login", NeedsReview, 90, 30) },
             ReviewItem { tier: Tier::Urgent, hidden: true, actionable: false, ..item(8, Ado, "api", "chore/deps", NeedsReview, 85, 2) },
             item(4, GitHub, "web", "fix/header", ReReview, 80, 12),
             item(2, GitHub, "web", "feature/shared", NeedsReview, 70, 48),
@@ -649,20 +526,13 @@ mod tests {
             item(7, Ado, "api", "feature/new", Mine, 30, 5),
             item(9, GitHub, "web", "feature/done", Approved, 20, 72),
         ];
-        let urls = items.iter().map(|i| (i.id, format!("https://example.test/pr/{}", i.id))).collect();
         let drafts = HashMap::from([(1, Some("https://drafts.example.test/1".to_string())), (3, None)]);
-        let (session, dir) = crate::session::tests::listing(&format!("ink-{name}"), items, urls, drafts, refreshed());
-        Arc::new(Fake { session: Mutex::new(session), opened: Mutex::new(Vec::new()), _dir: dir })
+        let (session, dir) = crate::session::tests::listing(&format!("ink-{name}"), items, drafts, refreshed());
+        Arc::new(Fake { session: Mutex::new(session), _dir: dir })
     }
 
-    fn request(method: &str, path: &str, body: Value) -> Request {
-        Request {
-            method: method.into(),
-            path: path.into(),
-            authorization: Some(format!("Bearer {TOKEN}")),
-            if_none_match: None,
-            body: if body.is_null() { Vec::new() } else { body.to_string().into_bytes() },
-        }
+    fn request(method: &str, path: &str) -> Request {
+        Request { method: method.into(), path: path.into(), authorization: Some(format!("Bearer {TOKEN}")), if_none_match: None }
     }
 
     fn send(rado: &Arc<Fake>, request: &Request) -> Response {
@@ -670,7 +540,7 @@ mod tests {
     }
 
     fn get_list(rado: &Arc<Fake>) -> Value {
-        let response = send(rado, &request("GET", "/v1/list", Value::Null));
+        let response = send(rado, &request("GET", "/v1/list"));
         assert_eq!(response.status, 200);
         serde_json::from_str(response.body.as_deref().unwrap()).unwrap()
     }
@@ -703,26 +573,21 @@ mod tests {
         let list = get_list(&fake("content"));
         assert_eq!(list["workspace"], "Acme");
         assert_eq!(list["counts"], json!({ "reviews": 3, "mine": 1 }));
-        assert_eq!((&list["lastRefreshed"], &list["polling"], &list["error"]), (&json!("2026-11-25T09:30:00Z"), &json!(false), &Value::Null));
+        assert_eq!((&list["lastRefreshed"], &list["error"]), (&json!("2026-11-25T09:30:00Z"), &Value::Null));
         assert_eq!(
             row(&list, "pr:1"),
-            &json!({
-                "key": "pr:1", "tab": "needsReview", "tier": "urgent", "title": "Change 1", "ticket": "ABC-12", "ageHours": 30,
-                "approvals": 1, "objections": 0, "comments": { "total": 3, "openThreads": 1 }, "waiting": true,
-                "holdsMine": false, "draft": { "linked": true }, "prs": [{ "repo": "api", "number": 101, "provider": "ado" }]
-            })
+            &json!({ "key": "pr:1", "tab": "needsReview", "tier": "urgent", "title": "Change 1", "ageHours": 30, "waiting": true, "draft": {} })
         );
-        let shared = row(&list, "branch:GitHub:feature/shared");
-        assert_eq!((&shared["holdsMine"], &shared["draft"], shared["prs"].as_array().unwrap().len()), (&json!(true), &json!({ "linked": false }), 2));
-        assert_eq!(row(&list, "pr:4")["holdsMine"], false);
+        assert_eq!(row(&list, "branch:GitHub:feature/shared")["draft"], json!({}), "an unlinked draft counts too");
+        assert_eq!(row(&list, "pr:4")["draft"], Value::Null);
         assert_eq!(row(&list, "pr:8")["tier"], "low", "hidden rows are drawn low, as in the list window");
     }
 
     #[test]
     fn list_holdsNoLinksSettingsOrSecrets_evenWhenTheSourceErrorQuotesAUrl() {
         let rado = fake("leaks");
-        rado.change(|s| s.report("Azure DevOps: network: error sending request for url (https://dev.azure.com/acme/_apis/git)".into()));
-        let body = send(&rado, &request("GET", "/v1/list", Value::Null)).body.unwrap();
+        rado.session.lock().unwrap().report("Azure DevOps: network: error sending request for url (https://dev.azure.com/acme/_apis/git)".into());
+        let body = send(&rado, &request("GET", "/v1/list")).body.unwrap();
         for leak in ["://", "example.test", "settings", "hasPat", "oken", "saved", "url\""] {
             assert!(!body.contains(leak), "{leak} in {body}");
         }
@@ -732,35 +597,14 @@ mod tests {
     #[test]
     fn list_sameETag_isNotModified_untilTheListChanges() {
         let rado = fake("etag");
-        let first = send(&rado, &request("GET", "/v1/list", Value::Null));
-        let again = Request { if_none_match: first.etag.clone(), ..request("GET", "/v1/list", Value::Null) };
+        let first = send(&rado, &request("GET", "/v1/list"));
+        let again = Request { if_none_match: first.etag.clone(), ..request("GET", "/v1/list") };
         assert_eq!(send(&rado, &again), Response { status: 304, etag: first.etag.clone(), body: None });
 
-        assert_eq!(send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4", "hidden": true }))).status, 204);
+        rado.session.lock().unwrap().set_hidden("pr:4", true).unwrap();
         let changed = send(&rado, &again);
         assert_eq!(changed.status, 200);
         assert_ne!(changed.etag, first.etag);
-    }
-
-    #[test]
-    fn hidden_movesTheRowToHidden_andShowBringsItBack() {
-        let rado = fake("hide");
-        assert_eq!(send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4", "hidden": true }))).status, 204);
-        let list = get_list(&rado);
-        assert_eq!((&row(&list, "pr:4")["tab"], &row(&list, "pr:4")["tier"]), (&json!("hidden"), &json!("low")));
-
-        assert_eq!(send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4", "hidden": false }))).status, 204);
-        assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "reReview");
-    }
-
-    #[test]
-    fn rowActions_unknownRow_isGoneWithRadosText() {
-        let rado = fake("gone");
-        for path in ["/v1/open", "/v1/ticket", "/v1/draft", "/v1/hidden"] {
-            let response = send(&rado, &request("POST", path, json!({ "key": "pr:999", "hidden": true })));
-            assert_eq!((response.status, response.body.as_deref()), (410, Some(r#"{"error":"That row is gone; refresh the list"}"#)), "{path}");
-        }
-        assert!(rado.opened.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -770,62 +614,21 @@ mod tests {
         let bearer = format!("Bearer {TOKEN}");
         let attempts = [(Some(TOKEN), None), (Some(TOKEN), Some("Bearer wrong")), (Some(TOKEN), Some(TOKEN)), (None, Some(bearer.as_str())), (None, Some("Bearer "))];
         for (token, header) in attempts {
-            for (method, path) in [("GET", "/v1/list"), ("POST", "/v1/refresh"), ("POST", "/v1/hidden"), ("GET", "/elsewhere")] {
-                let req = Request { authorization: header.map(String::from), ..request(method, path, json!({ "key": "pr:4", "hidden": true })) };
+            for (method, path) in [("GET", "/v1/list"), ("POST", "/v1/refresh"), ("GET", "/elsewhere")] {
+                let req = Request { authorization: header.map(String::from), ..request(method, path) };
                 let response = handle(&rado, token, &req);
                 assert_eq!((response.status, response.body.as_deref()), (401, unauthorized), "{method} {path} with {header:?}");
             }
         }
-        assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "reReview");
     }
 
     #[test]
-    fn open_opensTheRowsLinksTaggedForTheExtension() {
-        let rado = fake("open");
-        assert_eq!(send(&rado, &request("POST", "/v1/open", json!({ "key": "branch:GitHub:feature/shared" }))).status, 204);
-        assert_eq!(
-            *rado.opened.lock().unwrap(),
-            ["https://example.test/pr/2#rado=feature%2Fshared&group", "https://example.test/pr/3#rado=feature%2Fshared&group"]
-        );
-    }
-
-    #[test]
-    fn ticketAndDraft_openTheirLinks_orAnswerWithRadosReason() {
-        let rado = fake("ticket-draft");
-        assert_eq!(send(&rado, &request("POST", "/v1/ticket", json!({ "key": "pr:1" }))).status, 204);
-        assert_eq!(send(&rado, &request("POST", "/v1/draft", json!({ "key": "pr:1" }))).status, 204);
-        assert_eq!(*rado.opened.lock().unwrap(), ["https://acme.atlassian.net/browse/ABC-12", "https://drafts.example.test/1"]);
-
-        let no_ticket = send(&rado, &request("POST", "/v1/ticket", json!({ "key": "pr:4" })));
-        assert_eq!((no_ticket.status, no_ticket.body.as_deref()), (409, Some(r#"{"error":"That row's branch names no ticket"}"#)));
-        let unlinked = send(&rado, &request("POST", "/v1/draft", json!({ "key": "branch:GitHub:feature/shared" })));
-        assert_eq!((unlinked.status, unlinked.body.as_deref()), (409, Some(r#"{"error":"That PR has no linked draft now; refresh the list"}"#)));
-    }
-
-    #[test]
-    fn hidden_changedButNotSaved_saysSoWithoutTheLaptopsPaths() {
-        let rado = fake("unsaved");
-        // A file where the workspace folders go makes saving the hidden list fail.
-        std::fs::write(rado._dir.0.join("workspaces"), "").unwrap();
-        let response = send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4", "hidden": true })));
-        let expected = Some(r#"{"error":"Changed, but not saved: Rado couldn't save the hidden list"}"#);
-        assert_eq!((response.status, response.body.as_deref()), (409, expected));
-        assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "hidden");
-    }
-
-    #[test]
-    fn refresh_asksTheSessionForAPollNow() {
-        let rado = fake("refresh");
-        assert_eq!(send(&rado, &request("POST", "/v1/refresh", Value::Null)).status, 204);
-        assert!(rado.change(|s| s.take_wake()));
-    }
-
-    #[test]
-    fn badBodyOrUnknownPath_isRefused() {
-        let rado = fake("bad");
-        assert_eq!(send(&rado, &request("POST", "/v1/hidden", json!({ "key": "pr:4" }))).status, 400);
-        assert_eq!(send(&rado, &request("GET", "/v2/list", Value::Null)).status, 404);
-        assert_eq!(send(&rado, &request("GET", "/v1/list?x=1", Value::Null)).status, 200);
+    fn anythingButGetList_isNotFound_soTheDeviceChangesNothing() {
+        let rado = fake("read-only");
+        for (method, path) in [("POST", "/v1/refresh"), ("POST", "/v1/open"), ("POST", "/v1/ticket"), ("POST", "/v1/draft"), ("POST", "/v1/hidden"), ("POST", "/v1/list"), ("GET", "/v2/list")] {
+            assert_eq!(send(&rado, &request(method, path)).status, 404, "{method} {path}");
+        }
+        assert_eq!(send(&rado, &request("GET", "/v1/list?x=1")).status, 200);
     }
 
     /// The contract with the device: ink-core parses this file.
@@ -842,30 +645,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readRequest_readsTheBodyItsLengthNames() {
-        let request = read(b"POST /v1/hidden HTTP/1.1\r\nauthorization: Bearer t\r\nContent-Length: 4\r\n\r\nbodyEXTRA").await.unwrap();
-        let read = (request.method.as_str(), request.path.as_str(), request.authorization.as_deref(), &request.body[..]);
-        assert_eq!(read, ("POST", "/v1/hidden", Some("Bearer t"), &b"body"[..]));
+    async fn readRequest_readsTheHeadersTheEndpointUses() {
+        let request = read(b"GET /v1/list HTTP/1.1\r\nauthorization: Bearer t\r\nIf-None-Match: \"e1\"\r\n\r\n").await.unwrap();
+        let read = (request.method.as_str(), request.path.as_str(), request.authorization.as_deref(), request.if_none_match.as_deref());
+        assert_eq!(read, ("GET", "/v1/list", Some("Bearer t"), Some("\"e1\"")));
     }
 
     #[tokio::test]
-    async fn readRequest_refusesWhatItCantReadWhole_withoutPanicking() {
+    async fn readRequest_refusesWhatItCantRead_withoutPanicking() {
         let huge = format!("GET / HTTP/1.1\r\nX: {}\r\n", "a".repeat(MAX_REQUEST));
-        let cases: [(&[u8], u16); 6] = [
-            (b"POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n", 400),
-            (b"POST / HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n", 413),
-            (b"POST / HTTP/1.1\r\nContent-Length: 20000\r\n\r\n", 413),
-            (b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nshort", 400),
-            (b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400),
-            (huge.as_bytes(), 413),
-        ];
-        for (bytes, status) in cases {
-            assert_eq!(read(bytes).await.err(), Some(status), "{}", String::from_utf8_lossy(&bytes[..40.min(bytes.len())]));
-        }
+        assert_eq!(read(huge.as_bytes()).await.err(), Some(413));
+        assert_eq!(read(b"GET / HTTP/1.1\r\n").await.err(), Some(400), "cut off");
         assert!(read(b"GET /\xff\xfe HTTP/1.1\r\n\r\n").await.is_err());
     }
 
-    /// Over a real socket, a request whose body arrives after its headers is read whole before the answer.
+    /// Over a real socket, a request whose headers arrive in two parts is read whole before the answer.
     #[tokio::test]
     async fn accept_answersOnlyAfterTheWholeRequestArrived() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -875,16 +669,13 @@ mod tests {
         tokio::spawn(accept(listener, rado.clone(), token));
 
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-        let body = r#"{"key":"pr:4","hidden":true}"#;
-        let head = format!("POST /v1/hidden HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n", body.len());
-        client.write_all(head.as_bytes()).await.unwrap();
+        client.write_all(b"GET /v1/list HTTP/1.1\r\nHost: x\r\n").await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        client.write_all(body.as_bytes()).await.unwrap();
+        client.write_all(format!("Authorization: Bearer {TOKEN}\r\n\r\n").as_bytes()).await.unwrap();
         let mut answer = String::new();
         client.read_to_string(&mut answer).await.unwrap();
 
-        assert!(answer.starts_with("HTTP/1.1 204 No Content\r\n"), "{answer}");
-        assert_eq!(row(&get_list(&rado), "pr:4")["tab"], "hidden");
+        assert!(answer.starts_with("HTTP/1.1 200 OK\r\n"), "{answer}");
     }
 
     /// Whether connecting to `at` succeeds (`open`) or fails within about two seconds.
