@@ -314,7 +314,7 @@ The installer and uninstaller also stop every `rado-mcp.exe` running from the in
 
 `app:update` runs the installer with `/P /UPDATE /R`: it keeps the existing install, closes a running Rado and starts it again. It builds under `src-tauri/target/app`, so Claude sessions holding `target/release/rado-mcp.exe` don't block it. It starts the installer through WMI (`scripts/run-outside.ps1`), because an installer started from a Claude desktop session installs into the Claude app's private copy of `%LOCALAPPDATA%` instead of the real one. Windows now refuses that WMI start from a Claude session (`Win32_Process.Create` error 2); `app:update` then prints the installer's path and exits with 1. So from a Claude session, never install: hand the owner a `.cmd` naming the exact installer to double-click from Explorer. To update by hand, run the setup exe with the same flags.
 
-`scripts\install-release.cmd <version>` installs a published release: it downloads `Rado_<version>_x64-setup.exe` from that version's GitHub release, runs it with `/P /UPDATE /R` and prints the installed version. Double-click it from Explorer or run it from a terminal outside the Claude app.
+`scripts\install-release.cmd <version>` installs a published release: it downloads `Rado_<version>_x64-setup.exe` from that version's GitHub release, runs it with `/P /UPDATE /R` and prints the installed version. Without a version it asks for one, and Enter takes the latest release. Double-click it from Explorer or run it from a terminal outside the Claude app.
 
 The `app:*` and `test:rust` scripts go through `scripts/msvc.cmd`, which loads the VS Build Tools environment. Without it, Rust can pick a Visual Studio install that has no C++ libraries.
 
